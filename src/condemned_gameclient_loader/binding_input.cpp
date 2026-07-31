@@ -45,6 +45,8 @@ using GetBindingValueFunction =
 using GetExtremalCommandValueFunction =
     float(__thiscall*)(const void*, std::uint32_t);
 using GetInputStateFunction = BOOL(__cdecl*)(FearVrInputState*);
+using SubmitHapticRequestFunction =
+    BOOL(__cdecl*)(const FearVrHapticRequest*);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
 using ClientShellUpdateFunction = void(__thiscall*)(void*);
 using ClientShellKeyUpFunction = void(__thiscall*)(void*, int);
@@ -132,6 +134,7 @@ SRWLOCK g_bindingLock = SRWLOCK_INIT;
 GetBindingValueFunction g_originalGetBindingValue = nullptr;
 GetExtremalCommandValueFunction g_originalGetExtremalCommandValue = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
+SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 SetMenuActiveFunction g_setMenuActive = nullptr;
 ClientShellUpdateFunction g_originalClientShellUpdate = nullptr;
 ClientShellKeyUpFunction g_clientShellKeyUp = nullptr;
@@ -152,7 +155,12 @@ std::uint32_t g_lastDirectionMask = 0;
 int g_lastTurnDirection = 0;
 volatile LONG g_locomotionEnabled = 0;
 volatile LONG g_interactionEnabled = 0;
+volatile LONG g_coreActionsEnabled = 0;
 volatile LONG g_lastInteractionActive = 0;
+volatile LONG g_lastCoreActionActive[7]{};
+alignas(8) volatile LONG64 g_hapticRequestId = 0;
+volatile LONG g_hapticsEnabled = 0;
+volatile LONG g_hapticFailureReported = 0;
 MenuToggleLatch g_menuToggleLatch;
 
 int ReadRetailGameState(void* interfaceManager) noexcept;
@@ -327,6 +335,59 @@ void ReportTurnTransition(
     }
 }
 
+void RequestCoreActionHaptic(
+    std::uint32_t command,
+    bool controllerApplied) noexcept {
+    if (!controllerApplied || g_submitHapticRequest == nullptr ||
+        InterlockedCompareExchange(&g_hapticsEnabled, 0, 0) == 0) {
+        return;
+    }
+    const CoreActionHapticPulse pulse =
+        ResolveCoreActionHapticPulse(command);
+    if (!pulse.active) {
+        return;
+    }
+
+    FearVrHapticRequest request{};
+    request.requestId = static_cast<std::uint64_t>(
+        InterlockedIncrement64(&g_hapticRequestId));
+    request.durationNs = pulse.durationNs;
+    request.amplitude = pulse.amplitude;
+    request.frequency = 0.0F;
+    request.handMask = pulse.handMask;
+    request.flags = FEARVR_HF_VALID;
+    BOOL submitted = FALSE;
+    __try {
+        submitted = g_submitHapticRequest(&request);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        submitted = FALSE;
+    }
+    if (submitted == FALSE) {
+        if (InterlockedCompareExchange(
+                &g_hapticFailureReported, 1, 0) == 0 &&
+            g_log != nullptr) {
+            g_log(
+                "m4_controller_haptic_failed",
+                "CondemnedVr_SubmitHapticRequest_failed");
+        }
+        return;
+    }
+    if (g_log != nullptr) {
+        char detail[192]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "command=%u request_id=%llu hand_mask=0x%X "
+            "duration_ns=%llu amplitude=%.2f "
+            "source=vr_binding_rising_edge",
+            command,
+            static_cast<unsigned long long>(request.requestId),
+            request.handMask,
+            static_cast<unsigned long long>(request.durationNs),
+            request.amplitude);
+        g_log("m4_controller_haptic_requested", detail);
+    }
+}
+
 void ReportInteractionTransition(
     const ActivateValue& activate,
     float retailValue,
@@ -337,6 +398,11 @@ void ReportInteractionTransition(
             &g_lastInteractionActive, active) == active) {
         return;
     }
+    const bool controllerApplied = activate.active &&
+        std::isfinite(activate.value) && std::isfinite(retailValue) &&
+        std::fabs(activate.value) > std::fabs(retailValue);
+    RequestCoreActionHaptic(
+        kCondemnedActivateCommand, controllerApplied);
     if (g_log != nullptr) {
         char detail[224]{};
         std::snprintf(
@@ -347,6 +413,40 @@ void ReportInteractionTransition(
             "direct_command_writes=0 system_input=0",
             active, retailValue, outputValue, retailGameState);
         g_log("m4_binding_interaction_applied", detail);
+    }
+}
+
+void ReportCoreActionTransition(
+    std::uint32_t command,
+    const CoreActionValue& action,
+    float retailValue,
+    float outputValue,
+    int retailGameState) noexcept {
+    const int index = CondemnedCoreActionIndex(command);
+    if (index < 0) {
+        return;
+    }
+    const LONG active = action.active ? 1 : 0;
+    if (InterlockedExchange(
+            &g_lastCoreActionActive[index], active) == active) {
+        return;
+    }
+    const bool controllerApplied = action.active &&
+        std::isfinite(action.value) && std::isfinite(retailValue) &&
+        std::fabs(action.value) > std::fabs(retailValue);
+    RequestCoreActionHaptic(command, controllerApplied);
+    if (g_log != nullptr) {
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "command=%u controller_active=%ld retail_value=%.3f "
+            "output_value=%.3f game_state=%d control=%s "
+            "path=retail_binding_value direct_command_writes=0 "
+            "system_input=0",
+            command, active, retailValue, outputValue,
+            retailGameState,
+            CondemnedCoreActionControlName(command));
+        g_log("m4_binding_core_action_applied", detail);
     }
 }
 
@@ -415,6 +515,24 @@ float __fastcall HookGetBindingValue(
             MergeActivateWithRetail(original, activate);
         ReportInteractionTransition(
             activate, original, outputValue, retailGameState);
+        return outputValue;
+    }
+
+    if (CondemnedCoreActionIndex(binding->command) >= 0 &&
+        InterlockedCompareExchange(
+            &g_coreActionsEnabled, 0, 0) != 0) {
+        FearVrInputState input{};
+        const int retailGameState =
+            ReadRetailGameState(g_interfaceManager);
+        const bool usable = ReadUsableControllerInput(input) &&
+            retailGameState == kCondemnedGameStatePlaying;
+        const CoreActionValue action = ResolveCoreActionValue(
+            input, usable, binding->command);
+        const float outputValue = MergeCoreActionWithRetail(
+            original, action);
+        ReportCoreActionTransition(
+            binding->command, action, original, outputValue,
+            retailGameState);
         return outputValue;
     }
 
@@ -886,6 +1004,96 @@ bool InstallBindingInteractionHook(
         "button=right_squeeze threshold=0.65 "
         "state=playing path=retail_binding_value "
         "binding_size=60 direct_command_writes=0 system_input=0");
+    return true;
+}
+
+bool InstallBindingCoreActionsHook(
+    void* masterDatabase,
+    HMODULE gameClientModule,
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept {
+    if (masterDatabase == nullptr || gameClientModule == nullptr ||
+        bridgeModule == nullptr || log == nullptr) {
+        return false;
+    }
+    void* const clientShell = FindCurrentInterface(
+        masterDatabase, "IClientShell.Default", 4);
+    if (clientShell == nullptr ||
+        !MenuTargetsMatch(gameClientModule, clientShell)) {
+        log(
+            "m4_binding_core_actions_rejected",
+            clientShell == nullptr
+                ? "IClientShell_Default_v4_missing"
+                : "IClientShell_Default_v4_state_guard_mismatch");
+        return false;
+    }
+    void* const interfaceManager = ResolveVerifiedInterfaceManager(
+        gameClientModule, clientShell);
+    if (interfaceManager == nullptr) {
+        log(
+            "m4_binding_core_actions_rejected",
+            "CInterfaceMgr_state_source_mismatch");
+        return false;
+    }
+    if (!EnsureBindingValueHook(
+            gameClientModule, bridgeModule, log,
+            "m4_binding_core_actions_rejected")) {
+        return false;
+    }
+
+    g_interfaceManager = interfaceManager;
+    for (auto& state : g_lastCoreActionActive) {
+        InterlockedExchange(&state, 0);
+    }
+    InterlockedExchange(&g_coreActionsEnabled, 1);
+    log(
+        "m4_binding_core_actions_armed",
+        "target=GameOrig+0x000095F0 "
+        "commands=16,17,28,60,61,62,114 "
+        "controls=left_squeeze,right_trigger,left_trigger,"
+        "right_primary,right_secondary,left_stick,"
+        "left_primary state=playing path=retail_binding_value "
+        "binding_size=60 direct_command_writes=0 system_input=0");
+    return true;
+}
+
+bool InstallControllerHaptics(
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept {
+    if (bridgeModule == nullptr || log == nullptr) {
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_coreActionsEnabled, 0, 0) == 0 &&
+        InterlockedCompareExchange(
+            &g_interactionEnabled, 0, 0) == 0) {
+        log(
+            "m4_controller_haptics_rejected",
+            "core_action_or_interaction_gate_required");
+        return false;
+    }
+    const auto submit =
+        reinterpret_cast<SubmitHapticRequestFunction>(
+            GetProcAddress(
+                bridgeModule,
+                "CondemnedVr_SubmitHapticRequest"));
+    if (submit == nullptr) {
+        log(
+            "m4_controller_haptics_rejected",
+            "haptic_transport_export_missing");
+        return false;
+    }
+
+    g_submitHapticRequest = submit;
+    InterlockedExchange64(&g_hapticRequestId, 0);
+    InterlockedExchange(&g_hapticFailureReported, 0);
+    InterlockedExchange(&g_hapticsEnabled, 1);
+    log(
+        "m4_controller_haptics_armed",
+        "commands=17,28,87 edge=rising "
+        "pulses=fire_right_35ms_0.25,block_left_25ms_0.18,"
+        "activate_right_20ms_0.15 transport=openxr_haptic "
+        "weapon_event_haptics=0");
     return true;
 }
 

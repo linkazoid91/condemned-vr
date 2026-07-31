@@ -178,3 +178,38 @@ press and release, native `m4_hmd_recenter_requested` followed by
 recorded the panel reanchor requests. The accepted launch also retained the
 previous locomotion, turning, menu, physical keyboard, and mouse paths.
 Automated input tests pass 19/19 on x86 and 16/16 on x64.
+
+## Core actions and bounded haptics
+
+`-CoreActionsProbe` extends the same verified Retail binding evaluator without
+writing the command database or injecting system input. All overlays remain
+limited to fresh, focused, foreground-owned OpenXR input while Retail is in
+the playing state, and a stronger physical Retail value is preserved.
+
+| VR control | Condemned command |
+|---|---:|
+| Left squeeze | Run (16) |
+| Right trigger | Fire / attack (17) |
+| Left trigger | Block (28) |
+| Right primary | Toggle melee weapon (60) |
+| Right secondary | Ammo check (61) |
+| Left-stick click | Taser (62) |
+| Left primary | Flashlight (114) |
+
+Manual crouch was deliberately excluded. Command 14 exists in the inherited
+engine command namespace, but the live Condemned binding evaluator never
+queries it and Retail exposes no manual crouch control. A diagnostic mapping
+produced no command-14 telemetry and was removed; right-stick vertical input
+therefore remains free.
+
+`-HapticsProbe` enables short confirmation pulses only when VR wins a rising
+Retail binding edge: Fire uses 35 ms at 0.25 on the right hand, Block uses
+25 ms at 0.18 on the left, and Activate uses 20 ms at 0.15 on the right.
+These are bounded input-confirmation pulses, not weapon recoil. A later
+verified game-event hook must drive per-shot or impact feedback so empty fire
+and automatic weapons are represented correctly.
+
+The corrected layout passed live on 1 August 2026. The tester confirmed that
+all mapped controls work and accepted the haptic behavior. Both launcher
+gates armed without rejection, the bridge exported the existing OpenXR haptic
+transport, and automated tests pass 19/19 on x86 and 16/16 on x64.

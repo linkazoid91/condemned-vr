@@ -34,6 +34,21 @@ bool InstallBindingInteractionHook(
     HMODULE bridgeModule,
     RendererProbeLogFunction log) noexcept;
 
+// Overlays the verified Retail run, fire, block, melee-toggle, ammo-check,
+// stun-gun, and flashlight bindings. Every command remains
+// state-gated and Retail retains command-edge and callback ownership.
+bool InstallBindingCoreActionsHook(
+    void* masterDatabase,
+    HMODULE gameClientModule,
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept;
+
+// Enables short OpenXR confirmation pulses for VR-applied Fire, Block, and
+// Activate edges. This is not a weapon-impact or per-shot haptic path.
+bool InstallControllerHaptics(
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept;
+
 // Polls a release-gated left-secondary edge from the Retail client-shell
 // update and routes it through the game's own Escape key callbacks.
 bool InstallMenuToggleHook(

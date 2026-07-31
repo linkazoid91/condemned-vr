@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <limits>
 
@@ -258,6 +259,105 @@ int main() {
     if (!std::isnan(condemnedvr::MergeActivateWithRetail(
             nonFiniteRetail, activate))) {
         return Fail("a non-finite Retail Activate value must fail closed");
+    }
+
+    FearVrInputState actions{};
+    actions.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    actions.activeHands =
+        FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT;
+    actions.squeeze[FEARVR_HAND_LEFT] = 0.65F;
+    actions.trigger[FEARVR_HAND_RIGHT] = 0.55F;
+    actions.trigger[FEARVR_HAND_LEFT] = 0.55F;
+    actions.buttons = FEARVR_IB_RIGHT_PRIMARY |
+        FEARVR_IB_RIGHT_SECONDARY |
+        FEARVR_IB_LEFT_STICK |
+        FEARVR_IB_LEFT_PRIMARY;
+    const std::uint32_t coreCommands[] = {
+        condemnedvr::kCondemnedRunCommand,
+        condemnedvr::kCondemnedFireCommand,
+        condemnedvr::kCondemnedBlockCommand,
+        condemnedvr::kCondemnedToggleMeleeCommand,
+        condemnedvr::kCondemnedAmmoCheckCommand,
+        condemnedvr::kCondemnedStunGunCommand,
+        condemnedvr::kCondemnedFlashlightCommand};
+    for (const std::uint32_t command : coreCommands) {
+        const condemnedvr::CoreActionValue action =
+            condemnedvr::ResolveCoreActionValue(actions, true, command);
+        if (!action.active || !Near(action.value, 1.0F) ||
+            condemnedvr::CondemnedCoreActionIndex(command) < 0 ||
+            std::strcmp(
+                condemnedvr::CondemnedCoreActionControlName(command),
+                "unmapped") == 0) {
+            return Fail("every guarded core control must map exactly once");
+        }
+        if (!Near(
+                condemnedvr::MergeCoreActionWithRetail(0.25F, action),
+                1.0F) ||
+            !Near(
+                condemnedvr::MergeCoreActionWithRetail(1.25F, action),
+                1.25F)) {
+            return Fail(
+                "core actions must preserve the strongest Retail or VR value");
+        }
+    }
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, false,
+            condemnedvr::kCondemnedFireCommand).active) {
+        return Fail("stale input must neutralize every core action");
+    }
+    actions.flags = FEARVR_IF_VALID;
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedBlockCommand).active) {
+        return Fail("unfocused input must neutralize every core action");
+    }
+    actions.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    actions.activeHands = FEARVR_HAND_MASK_LEFT;
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedFireCommand).active) {
+        return Fail("an inactive right hand must not fire");
+    }
+    actions.activeHands = FEARVR_HAND_MASK_RIGHT;
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedRunCommand).active) {
+        return Fail("an inactive left hand must not run");
+    }
+    actions.activeHands =
+        FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT;
+    if (condemnedvr::CondemnedCoreActionIndex(999U) != -1 ||
+        condemnedvr::ResolveCoreActionValue(
+            actions, true, 999U).active ||
+        !std::isnan(condemnedvr::MergeCoreActionWithRetail(
+            nonFiniteRetail,
+            condemnedvr::CoreActionValue{1.0F, true}))) {
+        return Fail("unknown or non-finite core actions must fail closed");
+    }
+
+    const auto firePulse = condemnedvr::ResolveCoreActionHapticPulse(
+        condemnedvr::kCondemnedFireCommand);
+    const auto blockPulse = condemnedvr::ResolveCoreActionHapticPulse(
+        condemnedvr::kCondemnedBlockCommand);
+    const auto activatePulse = condemnedvr::ResolveCoreActionHapticPulse(
+        condemnedvr::kCondemnedActivateCommand);
+    const auto unsupportedPulse =
+        condemnedvr::ResolveCoreActionHapticPulse(
+            condemnedvr::kCondemnedFlashlightCommand);
+    if (!firePulse.active ||
+        firePulse.handMask != FEARVR_HAND_MASK_RIGHT ||
+        firePulse.durationNs != 35'000'000ULL ||
+        !Near(firePulse.amplitude, 0.25F) ||
+        !blockPulse.active ||
+        blockPulse.handMask != FEARVR_HAND_MASK_LEFT ||
+        blockPulse.durationNs != 25'000'000ULL ||
+        !Near(blockPulse.amplitude, 0.18F) ||
+        !activatePulse.active ||
+        activatePulse.handMask != FEARVR_HAND_MASK_RIGHT ||
+        activatePulse.durationNs != 20'000'000ULL ||
+        !Near(activatePulse.amplitude, 0.15F) ||
+        unsupportedPulse.active) {
+        return Fail("M4 haptic pulses must stay bounded and hand-specific");
     }
 
     FearVrInputState recenter{};

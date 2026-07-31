@@ -210,6 +210,15 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             masterDatabase, g_original, g_bridge,
             AppendLoaderEvent);
     }
+    if (CommandLineContains(L"-condemnedvr-m4-core-actions")) {
+        condemnedvr::InstallBindingCoreActionsHook(
+            masterDatabase, g_original, g_bridge,
+            AppendLoaderEvent);
+    }
+    if (CommandLineContains(L"-condemnedvr-m4-haptics")) {
+        condemnedvr::InstallControllerHaptics(
+            g_bridge, AppendLoaderEvent);
+    }
     if (CommandLineContains(L"-condemnedvr-m4-turning")) {
         condemnedvr::InstallBindingTurningHook(
             g_original, g_bridge, AppendLoaderEvent);

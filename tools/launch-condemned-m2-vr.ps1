@@ -23,6 +23,14 @@
 .PARAMETER InteractionProbe
     Enables the separately guarded M4 right-grip Activate command gate.
 
+.PARAMETER CoreActionsProbe
+    Enables the guarded M4 run, fire, block, weapon-toggle,
+    ammo-check, stun-gun, and flashlight command gate.
+
+.PARAMETER HapticsProbe
+    Enables bounded M4 Fire, Block, and Activate confirmation pulses.
+    Requires -CoreActionsProbe or -InteractionProbe.
+
 .PARAMETER RecenterProbe
     Enables release-gated right-stick recentering for tracked gameplay and
     the existing flat headset panel. Requires -StereoTuning.
@@ -44,6 +52,8 @@ param(
     [switch]$TurningProbe,
     [switch]$MenuProbe,
     [switch]$InteractionProbe,
+    [switch]$CoreActionsProbe,
+    [switch]$HapticsProbe,
     [switch]$RecenterProbe,
     [switch]$DesktopWindow,
     [ValidateRange(640, 3840)]
@@ -61,6 +71,10 @@ $cfg = Get-CondemnedVrConfig
 
 if ($RecenterProbe -and -not $StereoTuning) {
     throw '-RecenterProbe requires -StereoTuning.'
+}
+if ($HapticsProbe -and
+    -not ($CoreActionsProbe -or $InteractionProbe)) {
+    throw '-HapticsProbe requires -CoreActionsProbe or -InteractionProbe.'
 }
 
 function Read-LiveLog([string]$Path) {
@@ -261,6 +275,12 @@ if ($LocomotionProbe) {
 if ($InteractionProbe) {
     $gameArguments += '-condemnedvr-m4-interaction'
 }
+if ($CoreActionsProbe) {
+    $gameArguments += '-condemnedvr-m4-core-actions'
+}
+if ($HapticsProbe) {
+    $gameArguments += '-condemnedvr-m4-haptics'
+}
 if ($TurningProbe) {
     $gameArguments += '-condemnedvr-m4-turning'
 }
@@ -338,6 +358,21 @@ try {
                 '"event":"m4_binding_interaction_rejected"')) {
             throw 'The guarded M4 interaction hook was rejected.'
         }
+        if ($CoreActionsProbe -and
+            $loaderText.Contains(
+                '"event":"m4_binding_core_actions_rejected"')) {
+            throw 'The guarded M4 core-action hook was rejected.'
+        }
+        if ($HapticsProbe -and
+            $loaderText.Contains(
+                '"event":"m4_controller_haptics_rejected"')) {
+            throw 'The guarded M4 haptic path was rejected.'
+        }
+        if ($HapticsProbe -and
+            $loaderText.Contains(
+                '"event":"m4_controller_haptic_failed"')) {
+            throw 'The guarded M4 haptic transport failed.'
+        }
         if ($RecenterProbe -and
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_rejected"')) {
@@ -371,6 +406,12 @@ try {
         $interactionReady = -not $InteractionProbe -or
             $loaderText.Contains(
                 '"event":"m4_binding_interaction_armed"')
+        $coreActionsReady = -not $CoreActionsProbe -or
+            $loaderText.Contains(
+                '"event":"m4_binding_core_actions_armed"')
+        $hapticsReady = -not $HapticsProbe -or
+            $loaderText.Contains(
+                '"event":"m4_controller_haptics_armed"')
         $recenterReady = -not $RecenterProbe -or
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_armed"')
@@ -383,7 +424,8 @@ try {
                  '"event":"m4_menu_render_state"'))
         $inputHooksReady =
             $locomotionReady -and $turningReady -and $menuReady -and
-            $interactionReady -and $recenterReady
+            $interactionReady -and $coreActionsReady -and $hapticsReady -and
+            $recenterReady
     } until (($bridgeReady -and $hostReady -and $inputHooksReady) -or
         (Get-Date) -ge $deadline)
 
@@ -426,6 +468,8 @@ try {
             Turning = [bool]$TurningProbe
             Menu = [bool]$MenuProbe
             Interaction = [bool]$InteractionProbe
+            CoreActions = [bool]$CoreActionsProbe
+            Haptics = [bool]$HapticsProbe
             Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true

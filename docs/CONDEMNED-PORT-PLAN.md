@@ -247,8 +247,10 @@ damaging either the retail installation or any third-party files left there.
 ## Immediate next step
 
 The M4 controller path now has live-accepted locomotion, right-stick turning,
-Retail-state headset menus, right-squeeze Activate, and right-stick recentering
-while preserving mouse, keyboard, and flat-panel fallback. Continue with a
-guarded crouch path and the remaining basic action bindings, then add bounded
-haptic feedback. Keep physical-Escape, desktop menu controls, and a full movie
-sequence in the release regression pass.
+Retail-state headset menus, right-squeeze Activate, right-stick recentering,
+the remaining Retail gameplay actions, and bounded confirmation haptics.
+Manual crouch is not a Condemned control and was removed after live evidence.
+Next, suppress mouse look only while focused VR tracking is active, make the
+player's aim follow HMD look, and drive the flashlight from that same head
+basis. Keep physical-Escape, desktop menu controls, and a full movie sequence
+in the release regression pass.
