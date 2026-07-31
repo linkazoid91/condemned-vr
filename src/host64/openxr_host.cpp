@@ -518,8 +518,44 @@ private:
     void CreateSystemAndDevice() {
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
         systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-        CheckXr(instance_, xrGetSystem(instance_, &systemInfo, &systemId_),
-                "xrGetSystem(HMD)");
+        constexpr auto retryInterval = std::chrono::milliseconds(250);
+        constexpr auto retryTimeout = std::chrono::seconds(15);
+        const auto retryStarted = std::chrono::steady_clock::now();
+        const auto retryDeadline = retryStarted + retryTimeout;
+        bool retryLogged = false;
+        XrResult systemResult = XR_ERROR_FORM_FACTOR_UNAVAILABLE;
+        do {
+            XrSystemId candidate = XR_NULL_SYSTEM_ID;
+            systemResult = xrGetSystem(
+                instance_, &systemInfo, &candidate);
+            if (XR_SUCCEEDED(systemResult)) {
+                systemId_ = candidate;
+            }
+            if (systemResult != XR_ERROR_FORM_FACTOR_UNAVAILABLE ||
+                g_stopRequested.load() ||
+                std::chrono::steady_clock::now() >= retryDeadline) {
+                break;
+            }
+            if (!retryLogged) {
+                logger_.Write(
+                    "INFO", "xr_system_wait",
+                    "HMD is temporarily unavailable; retrying for up to "
+                    "15 seconds at 250 ms intervals.");
+                retryLogged = true;
+            }
+            std::this_thread::sleep_for(retryInterval);
+        } while (true);
+        CheckXr(instance_, systemResult, "xrGetSystem(HMD)");
+        if (retryLogged) {
+            const auto waitedMilliseconds =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - retryStarted)
+                    .count();
+            logger_.Write(
+                "INFO", "xr_system_recovered",
+                "HMD became available after " +
+                    std::to_string(waitedMilliseconds) + " ms.");
+        }
 
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
         CheckXr(instance_, xrGetSystemProperties(instance_, systemId_,

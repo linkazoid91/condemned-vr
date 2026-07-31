@@ -57,3 +57,18 @@ control.
 
 M2 is accepted. M3 may now investigate Condemned-specific renderer interfaces
 and camera calls while retaining this mono transport as its fallback.
+
+## OpenXR startup availability
+
+`XR_ERROR_FORM_FACTOR_UNAVAILABLE` is temporary by definition, so the shared
+host now retries only that result for up to 15 seconds at 250 ms intervals.
+Every other OpenXR initialization error still fails immediately, and a real
+headset timeout retains the existing exit code and launcher error.
+
+During the M4 headset-menu acceptance, Virtual Desktop desktop streaming was
+connected but VDXR had not switched its streaming source into PCVR mode. The
+bounded retry behaved correctly but could not create that mode itself. A
+session-scoped SteamVR manifest validated and ran the same host immediately,
+without changing the system-wide OpenXR runtime. For a cold VDXR launch, switch
+Virtual Desktop into VR mode before starting the host; SteamVR remains a
+reversible per-run fallback.
