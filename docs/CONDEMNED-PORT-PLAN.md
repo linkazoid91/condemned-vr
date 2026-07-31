@@ -19,7 +19,7 @@ The completed installation was inspected on 31 July 2026.
 | File | Version or PE identity | SHA-256 |
 |---|---|---|
 | `Condemned.exe` | `1.0.314.0`, PE32, image base `0x00400000`, image size `0x0018f000`, timestamp `0x43fcff00` | `45A1404F213EDBDEAD16168B6E005B245B93105F7345AAF4FB83ECB6A7C5AE02` |
-| `Game/GameClient.dll` | `1.0.314.0`, PE32, image base `0x10000000`, image size `0x00194000`, timestamp `0x43fcffde` | `0AC9798CA460C3E24EFC6D103D5FD258CCA6C921E0BD2A3FD9119D1C7C5228CC` |
+| `Game/GameClient.dll` | `1.0.314.0`, PE32, image base `0x10000000`, image size `0x00194000`, timestamp `0x43fcffdf` | `0AC9798CA460C3E24EFC6D103D5FD258CCA6C921E0BD2A3FD9119D1C7C5228CC` |
 | `Game/GameServer.dll` | `1.0.314.0` | `48321A894D47105707020ABF52A2B3CD2049D4366233C2CEB011240961AC26EC` |
 
 The following compatibility facts have also been verified:
@@ -32,8 +32,11 @@ The following compatibility facts have also been verified:
 - `default.archcfg` selects the `Game` directory and retail archives, so an
   isolated archive configuration should be investigated first.
 - The retail directory currently contains Ultimate ASI Loader as `d3d9.dll`
-  and `scripts/Condemned.WidescreenFix.asi`. The VR bridge must coexist with
-  this chain and must not silently replace it.
+  and `scripts/Condemned.WidescreenFix.asi`. These are a temporary behavioral
+  reference, not a planned dependency. Determine which Widescreen Fix
+  corrections are still required and implement those corrections in this
+  repository. The isolated VR stage must then run without either third-party
+  binary and must never overwrite or remove them from the retail installation.
 
 ## Proposed architecture
 
@@ -58,11 +61,12 @@ project GameClient.dll loader (x86)
 Condemned.exe (x86, Jupiter EX, D3D9)
 ```
 
-The preferred loading path is a custom isolated `-archcfg` whose
-`GameClient.dll` delegates to a locally staged copy of the stock client renamed
-to `GameOrig.dll`. This is cleaner than making the VR implementation depend on
-an ASI loader. An ASI bootstrap remains a fallback if Condemned does not honor
-the required isolated launch arguments.
+The loading path is a custom isolated `-archcfg` whose `GameClient.dll`
+delegates to a locally staged copy of the stock client renamed to
+`GameOrig.dll`. The shipped mod must not depend on an ASI loader. If Condemned
+does not honor the required isolated launch arguments, investigate and document
+another repository-owned loading path instead of silently adopting the retail
+ASI chain.
 
 ## Reuse boundary
 
@@ -97,9 +101,14 @@ same engine family.
 
 ### M0 — Reproducible desktop baseline
 
+Current evidence and remaining gates are recorded in
+[`CONDEMNED-M0.md`](CONDEMNED-M0.md).
+
 1. Record the complete retail manifest and hashes.
 2. Run Condemned without VR and capture clean startup logs.
-3. Test once with the Widescreen Fix enabled and once without it.
+3. Test once with the Widescreen Fix enabled and once without it, inventory
+   every relevant behavioral difference, and identify the corrections that
+   must be implemented natively in this repository.
 4. Establish the normal window, resolution, D3D device, swap-chain, and
    presentation behavior.
 
@@ -107,6 +116,9 @@ Exit condition: the verified retail build starts and plays normally, and its
 existing modifications are understood.
 
 ### M1 — Isolated stock-client delegation
+
+Current implementation evidence is recorded in
+[`CONDEMNED-M1.md`](CONDEMNED-M1.md).
 
 1. Rename project products and IPC objects from F.E.A.R. VR to Condemned VR.
 2. Build a minimal x86 `GameClient.dll` loader.
@@ -121,6 +133,9 @@ and no retail files overwritten.
 
 ### M2 — Mono OpenXR transport
 
+The passive D3D9 presentation gate and its exact live parameters are recorded
+in [`CONDEMNED-M2.md`](CONDEMNED-M2.md).
+
 1. Start the reusable x64 OpenXR host before the game.
 2. Load the renamed D3D9 bridge explicitly from the client loader.
 3. Hook Direct3D creation, the actual presenting swap chain, `Present`, and
@@ -134,6 +149,9 @@ frame delivery, clean shutdown, and desktop fallback when the host is absent.
 
 ### M3 — Stereo renderer proof
 
+Current interface, renderer-slot, pass-through, and eye-separated transport
+evidence is recorded in [`CONDEMNED-M3.md`](CONDEMNED-M3.md).
+
 1. Locate the renderer interface and player-camera render path.
 2. Validate candidate vtable slots and function prefixes against
    `GameClient.dll` version `1.0.314.0`.
@@ -146,7 +164,15 @@ frame delivery, clean shutdown, and desktop fallback when the host is absent.
 Exit condition: gameplay renders as a stable stereo pair with correct eye
 ordering, scale, FOV, and no doubled game behavior.
 
+Status: passed live at native 2560x1440 render scale and 130% coupled FOV.
+Stereo depth, full HMD rotation/translation, restoration, and the complete
+unwarped image were accepted by the tester. Sub-native render targets are not
+supported because Condemned retains Retail-sized internal post-processing.
+
 ### M4 — Head tracking and controller input
+
+Current controller-transport, command-ID, and first locomotion-gate evidence
+is recorded in [`CONDEMNED-M4.md`](CONDEMNED-M4.md).
 
 1. Determine Condemned's coordinate and world-unit mapping empirically.
 2. Apply rotational tracking, then positional tracking.
@@ -181,20 +207,26 @@ save/load, and level-transition scenarios work in a sustained VR session.
 5. Run automated x86/x64 tests and a complete manual regression checklist.
 
 Exit condition: a clean package installs, updates, launches, and uninstalls
-without damaging the retail installation or the existing Widescreen Fix.
+without depending on the Widescreen Fix or Ultimate ASI Loader and without
+damaging either the retail installation or any third-party files left there.
 
 ## First implementation checklist
 
 - [ ] Rename CMake targets, namespaces exposed to the OS, executable names,
       configuration files, and log event prefixes.
-- [ ] Add a Condemned `1.0.314.0` version descriptor using the verified hashes
+- [x] Add a Condemned `1.0.314.0` version descriptor using the verified hashes
       and PE identities above.
-- [ ] Create the minimal stock-client loader with no hooks enabled.
-- [ ] Prototype isolated `-archcfg` and `-userdirectory` launch arguments.
-- [ ] Verify stock-client delegation through menus and one playable scene.
-- [ ] Add a no-capture D3D9 bridge load/unload smoke test.
-- [ ] Add exact presenting-swap-chain logging.
-- [ ] Produce the first mono OpenXR frame.
+- [x] Create the minimal stock-client loader with no hooks enabled.
+- [x] Prototype isolated `-archcfg` and `-userdirectory` launch arguments.
+- [ ] Inventory the Widescreen Fix behavior and record which corrections the
+      repository must provide before the external ASI is excluded from testing.
+      Its aspect-ratio effect is confirmed, but desktop widescreen is not an
+      initial VR requirement: native world rendering will use OpenXR per-eye
+      projections and flat UI may remain on a proportioned 4:3 comfort panel.
+- [x] Verify stock-client delegation through menus and one playable scene.
+- [x] Add a no-capture D3D9 bridge load/unload smoke test.
+- [x] Add exact presenting-swap-chain logging.
+- [x] Produce the first mono OpenXR frame.
 
 ## Safety and engineering rules
 
@@ -214,7 +246,7 @@ without damaging the retail installation or the existing Widescreen Fix.
 
 ## Immediate next step
 
-Implement M1 only: rename the minimum project surface, add verified Condemned
-module identities, build a pass-through client loader, and prove that an
-isolated desktop launch behaves exactly like stock Condemned before attempting
-any OpenXR or stereo work.
+Proceed to the next bounded M4 input gate. Basic binding-value locomotion and
+physical-keyboard coexistence have passed. Verify Condemned's turning and menu
+command paths, then add right-stick turning and one reversible menu action
+without enabling combat interactions or direct command-state writes.

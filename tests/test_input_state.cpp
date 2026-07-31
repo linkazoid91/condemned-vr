@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "input_state.h"
+#include "condemned_locomotion.h"
 
 namespace {
 
@@ -132,6 +133,32 @@ int main() {
     lean.aimPoseValidHands = FEARVR_HAND_MASK_LEFT;
     if (!Near(fearvr::LeftHandLeanRollRadians(lean), 0.5F)) {
         return Fail("lean roll must follow the left aim pose");
+    }
+
+    FearVrInputState locomotion{};
+    locomotion.sampleId = 12;
+    locomotion.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    locomotion.activeHands = FEARVR_HAND_MASK_LEFT;
+    locomotion.moveX = -0.75F;
+    locomotion.moveY = 0.80F;
+    auto directions = condemnedvr::ResolveLocomotionDirections(
+        locomotion, true);
+    if (!directions.forward || directions.backward ||
+        !directions.left || directions.right) {
+        return Fail("left stick must resolve to forward-left locomotion");
+    }
+    directions = condemnedvr::ResolveLocomotionDirections(
+        locomotion, false);
+    if (directions.forward || directions.backward ||
+        directions.left || directions.right) {
+        return Fail("stale controller input must resolve to neutral");
+    }
+    locomotion.activeHands = FEARVR_HAND_MASK_RIGHT;
+    directions = condemnedvr::ResolveLocomotionDirections(
+        locomotion, true);
+    if (directions.forward || directions.backward ||
+        directions.left || directions.right) {
+        return Fail("an inactive left hand must resolve to neutral");
     }
 
     // Linkshaenderbelegung: ein einziger Tausch dreht Stoecke, Trigger,

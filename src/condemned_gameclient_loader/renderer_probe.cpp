@@ -33,6 +33,7 @@ using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
 using EndStereoDiagnosticFrameFunction = BOOL(__cdecl*)(std::uint64_t);
 using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
 using SetFovScalePercentFunction = void(__cdecl*)(std::uint32_t);
+using GetInputStateFunction = BOOL(__cdecl*)(FearVrInputState*);
 struct RigidTransformAbi {
     float position[3];
     float rotation[4];
@@ -97,6 +98,7 @@ CaptureEyeFunction g_captureEye = nullptr;
 EndStereoDiagnosticFrameFunction g_endStereoDiagnosticFrame = nullptr;
 EndStereoFrameFunction g_endStereoFrame = nullptr;
 SetFovScalePercentFunction g_setFovScalePercent = nullptr;
+GetInputStateFunction g_getInputState = nullptr;
 void* g_client = nullptr;
 GetRigidTransformFunction g_getRigidTransform = nullptr;
 SetRigidTransformFunction g_setRigidTransform = nullptr;
@@ -118,6 +120,12 @@ FearVrPose g_trackingRecenter{};
 volatile LONG g_continuousRenderActive = 0;
 volatile LONG g_continuousStereoLogged = 0;
 volatile LONG g_cameraReadFailures = 0;
+std::uint64_t g_lastInputSampleId = 0;
+std::uint64_t g_inputSamplesObserved = 0;
+std::uint32_t g_lastInputButtons = 0;
+std::uint32_t g_lastInputHands = 0;
+std::uint32_t g_lastInputFlags = 0;
+std::uint32_t g_lastInputPoseMasks = 0;
 
 bool PressedOnce(int virtualKey, bool& wasDown) noexcept {
     const bool down = (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
@@ -215,6 +223,54 @@ void HandleStereoTuningControls() noexcept {
         g_trackingRecenterPending = true;
         LogStereoTuningState("reset");
     }
+}
+
+void SampleControllerInputReadOnly() noexcept {
+    if (!g_continuousStereoTuning || g_getInputState == nullptr ||
+        g_passThroughLog == nullptr) {
+        return;
+    }
+    FearVrInputState input{};
+    if (!g_getInputState(&input) || input.sampleId == 0 ||
+        input.sampleId == g_lastInputSampleId) {
+        return;
+    }
+    g_lastInputSampleId = input.sampleId;
+    ++g_inputSamplesObserved;
+    const std::uint32_t poseMasks =
+        (input.aimPoseValidHands & 0xFFFFU) |
+        ((input.gripPoseValidHands & 0xFFFFU) << 16U);
+    const bool stateChanged =
+        input.buttons != g_lastInputButtons ||
+        input.activeHands != g_lastInputHands ||
+        input.flags != g_lastInputFlags ||
+        poseMasks != g_lastInputPoseMasks;
+    if (g_inputSamplesObserved == 1 || stateChanged ||
+        g_inputSamplesObserved % 180U == 0) {
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "sample=%llu observed=%llu flags=0x%X active_hands=0x%X "
+            "buttons=0x%X aim_hands=0x%X grip_hands=0x%X "
+            "move=(%.3f,%.3f) turn=(%.3f,%.3f) "
+            "trigger=(%.3f,%.3f) squeeze=(%.3f,%.3f) changed=%u "
+            "engine_writes=0",
+            static_cast<unsigned long long>(input.sampleId),
+            static_cast<unsigned long long>(g_inputSamplesObserved),
+            input.flags, input.activeHands, input.buttons,
+            input.aimPoseValidHands, input.gripPoseValidHands,
+            input.moveX, input.moveY, input.turnX, input.turnY,
+            input.trigger[FEARVR_HAND_LEFT],
+            input.trigger[FEARVR_HAND_RIGHT],
+            input.squeeze[FEARVR_HAND_LEFT],
+            input.squeeze[FEARVR_HAND_RIGHT],
+            stateChanged ? 1U : 0U);
+        g_passThroughLog("m4_input_sample", detail);
+    }
+    g_lastInputButtons = input.buttons;
+    g_lastInputHands = input.activeHands;
+    g_lastInputFlags = input.flags;
+    g_lastInputPoseMasks = poseMasks;
 }
 
 bool CameraRightVector(
@@ -343,11 +399,14 @@ bool ResolveDoubleRenderDiagnosticExports(HMODULE bridge) noexcept {
         reinterpret_cast<SetFovScalePercentFunction>(
             GetProcAddress(
                 bridge, "CondemnedVr_SetFovScalePercent"));
+    g_getInputState = reinterpret_cast<GetInputStateFunction>(
+        GetProcAddress(bridge, "CondemnedVr_GetInputState"));
     return g_getRenderRequest != nullptr && g_beginEye != nullptr &&
         g_clearEye != nullptr && g_captureEye != nullptr &&
         g_endStereoDiagnosticFrame != nullptr &&
         g_endStereoFrame != nullptr &&
-        g_setFovScalePercent != nullptr;
+        g_setFovScalePercent != nullptr &&
+        g_getInputState != nullptr;
 }
 
 void ReleaseStereoAttempt(bool retryOneShot) noexcept {
@@ -708,6 +767,7 @@ unsigned long __fastcall HookRenderCamera(
     (void)ignoredEdx;
     const LONG count = InterlockedIncrement(&g_renderCameraCalls);
     HandleStereoTuningControls();
+    SampleControllerInputReadOnly();
     if (g_cameraReadProbe && (count == 1 || count % 600 == 0)) {
         SampleCameraReadOnly(camera, count);
     }
@@ -1229,6 +1289,7 @@ bool InstallRendererPassThroughProbe(
         g_getCameraFov = nullptr;
         g_setCameraFov = nullptr;
         g_setFovScalePercent = nullptr;
+        g_getInputState = nullptr;
         g_cameraReadProbe = false;
         g_eyeOffsetDiagnostic = false;
         g_reverseEyeOffsetDiagnostic = false;
@@ -1279,6 +1340,10 @@ bool InstallRendererPassThroughProbe(
             "fov_scale_percent=130 fov_scale_range=100-150 "
             "hmd_rotation=1 hmd_translation=1 "
             "translation_limit_m=0.25 exact_restore_after_each_eye=1");
+        log(
+            "m4_input_probe_armed",
+            "source=openxr_shared_state polling=render_camera "
+            "engine_writes=0 state_changes_and_periodic_samples=1");
     }
     ReleaseSRWLockExclusive(&g_passThroughLock);
     return true;

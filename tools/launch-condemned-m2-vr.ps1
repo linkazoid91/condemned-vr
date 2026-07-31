@@ -9,6 +9,9 @@
 .PARAMETER ValidateOnly
     Validates the host/runtime/session/swapchains without launching Condemned.
 
+.PARAMETER DesktopWindow
+    Runs Condemned in a smaller desktop window so other applications remain
+    visible. The default window render size is 1920x1080.
 #>
 [CmdletBinding()]
 param(
@@ -23,6 +26,12 @@ param(
     [switch]$ReverseEyeOffsetDiagnostic,
     [switch]$ZeroEyeOffsetDiagnostic,
     [switch]$StereoTuning,
+    [switch]$LocomotionProbe,
+    [switch]$DesktopWindow,
+    [ValidateRange(640, 3840)]
+    [int]$DesktopWindowWidth = 1920,
+    [ValidateRange(480, 2160)]
+    [int]$DesktopWindowHeight = 1080,
     [ValidateRange(100, 200)]
     [int]$RenderScale = 100,
     [switch]$Wait
@@ -223,6 +232,19 @@ if ($StereoTuning) {
         '-condemnedvr-m3-probe',
         '-condemnedvr-m3-pass-through',
         '-condemnedvr-m3-stereo-tuning')
+}
+if ($LocomotionProbe) {
+    $gameArguments += '-condemnedvr-m4-locomotion'
+}
+if ($DesktopWindow) {
+    $gameArguments += @(
+        '+Windowed', '1',
+        '+ScreenWidth',
+        $DesktopWindowWidth.ToString(
+            [Globalization.CultureInfo]::InvariantCulture),
+        '+ScreenHeight',
+        $DesktopWindowHeight.ToString(
+            [Globalization.CultureInfo]::InvariantCulture))
 }
 $game = $null
 try {

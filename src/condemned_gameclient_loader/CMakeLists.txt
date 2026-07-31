@@ -1,3 +1,19 @@
+set(CONDEMNEDVR_MINHOOK_ROOT
+  "${CMAKE_SOURCE_DIR}/vendor-local/minhook"
+  CACHE PATH "Local pinned checkout of MinHook")
+if(NOT EXISTS "${CONDEMNEDVR_MINHOOK_ROOT}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "MinHook missing at ${CONDEMNEDVR_MINHOOK_ROOT}. "
+    "Run tools/prepare-dependencies.ps1 first.")
+endif()
+if(NOT TARGET minhook)
+  add_subdirectory(
+    "${CONDEMNEDVR_MINHOOK_ROOT}"
+    "${CMAKE_BINARY_DIR}/third_party/condemned-minhook"
+    EXCLUDE_FROM_ALL
+  )
+endif()
+
 add_library(condemnedvr-module-identity STATIC
   module_identity.cpp
   module_identity.h
@@ -16,6 +32,8 @@ target_link_libraries(condemnedvr-module-identity PRIVATE
 
 add_library(condemnedvr-gameclient-loader SHARED
   GameClient.def
+  binding_input.cpp
+  binding_input.h
   dllmain.cpp
   renderer_probe.cpp
   renderer_probe.h
@@ -28,6 +46,7 @@ target_link_libraries(condemnedvr-gameclient-loader PRIVATE
   condemnedvr-module-identity
   fearvr-common
   fearvr-warnings
+  minhook
 )
 set_target_properties(condemnedvr-gameclient-loader PROPERTIES
   OUTPUT_NAME "GameClient"

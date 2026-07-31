@@ -44,3 +44,8 @@ extern "C" __declspec(dllexport) void __cdecl
 CondemnedVr_SetFovScalePercent(std::uint32_t percent) {
     fearvr::SetFovScalePercent(percent);
 }
+
+extern "C" __declspec(dllexport) BOOL __cdecl
+CondemnedVr_GetInputState(FearVrInputState* input) {
+    return fearvr::GetInputState(input);
+}

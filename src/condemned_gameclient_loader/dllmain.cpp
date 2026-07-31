@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 
+#include "binding_input.h"
 #include "module_identity.h"
 #include "renderer_probe.h"
 
@@ -200,6 +201,10 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     const auto function = reinterpret_cast<Function>(g_setMasterDatabase);
     function(masterDatabase);
 
+    if (CommandLineContains(L"-condemnedvr-m4-locomotion")) {
+        condemnedvr::InstallBindingLocomotionHook(
+            g_original, g_bridge, AppendLoaderEvent);
+    }
     if (CommandLineContains(L"-condemnedvr-m3-probe")) {
         condemnedvr::ProbeRendererInterfaces(
             masterDatabase, AppendLoaderEvent);
