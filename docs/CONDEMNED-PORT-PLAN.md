@@ -246,7 +246,8 @@ damaging either the retail installation or any third-party files left there.
 
 ## Immediate next step
 
-Proceed to the next bounded M4 input gate. Basic binding-value locomotion and
-physical-keyboard coexistence have passed. Verify Condemned's turning and menu
-command paths, then add right-stick turning and one reversible menu action
-without enabling combat interactions or direct command-state writes.
+Commit the accepted M4 right-stick turning and Retail-state headset menu slice.
+Then extend the verified controller path to recentering and the first basic
+interaction command while preserving mouse, keyboard, and flat-panel fallback.
+Keep physical-Escape, desktop menu controls, and a full movie sequence in the
+release regression pass.

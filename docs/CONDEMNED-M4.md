@@ -94,3 +94,61 @@ window resolution rather than receiving an independently resized stereo target.
 The 1920x1080 window mode was accepted live. The bridge independently observed
 a 1920x1080 source and stereo target at 100% render scale, and the tester
 confirmed that the desktop game no longer covered the entire display.
+
+## Right-stick turning and pause-menu gate
+
+Static analysis found that the Retail player update unconditionally queries
+`CBindMgr::GetExtremalCommandValue` for YawAccel command 23. The verified
+function is at `GameOrig.dll` RVA `0x00009900`. The PC profiles do not contain
+a command-23 binding, so the earlier per-binding locomotion hook cannot supply
+turning. The new `-TurningProbe` gate calls the extremal-value function first
+and may overlay only command 23 with the deadzone-adjusted right-stick X value.
+A stronger existing command-23 value is preserved. Retail's separate mouse
+command 12 remains untouched and is added later by the original player code.
+
+The pause menu has no usable Retail PC binding either. The reversible menu
+gate therefore polls the left-secondary button immediately before the verified
+`IClientShell.Default` version-4 `Update` callback (vtable slot 3,
+`GameOrig.dll` RVA `0x00051150`). On one release-gated rising edge it calls the
+same `OnKeyDown(VK_ESCAPE, 1)` and `OnKeyUp(VK_ESCAPE)` callbacks used by
+Retail. A held button cannot oscillate the menu, and startup, stale samples,
+tracking loss, focus loss, or foreground loss all require a fresh release
+before another toggle. The gate is exposed separately as `-MenuProbe`.
+
+The menu gate now follows Retail's exact game state instead of inferring it
+from controller taps. `IClientShell.Default` vtable slot 30 is verified at
+`GameOrig.dll` RVA `0x0004A5E0` (`lea eax,[ecx+8]; ret`) and returns the
+embedded `CInterfaceMgr`; its state is the dword at manager offset `0x08`.
+Relocation-safe guards also verify Retail's own state read and comparisons for
+playing, screen, and menu. Synthetic Escape is accepted only for playing (1)
+and menu (5), so the controller cannot abort loading, splash, movie, demo,
+exit, or modal-screen states.
+
+Retail draws those non-gameplay surfaces after the stereo world-camera pass.
+The same verified state signal therefore selects the bridge's existing comfort
+panel for every known state except playing. In panel mode the renderer performs
+one normal camera call, Present captures the completed desktop backbuffer, and
+the bridge publishes it to both eyes with stale stereo state cleared. Returning
+to playing clears panel mode and native stereo resumes on the next frame.
+Unreadable or out-of-range state fails safely to a non-interactive flat panel.
+
+Both hooks require exact version-bound code and vtable guards and are disabled
+by default. The launcher now waits for each requested `*_armed` event and aborts
+on a matching `*_rejected` event instead of reporting a successful launch with
+an inactive input gate. Neither path writes the command database or injects
+system input. Pure input-state tests pass on x86 and x64; live acceptance is
+complete for locomotion, right-stick turning, mouse coexistence, and one-edge
+pause toggling.
+
+The headset menu path was accepted live on 31 July 2026 through the
+session-scoped SteamVR OpenXR runtime. The tester confirmed that the pause menu
+appears in the headset, remains usable, closes normally, and immediately
+returns to stereo gameplay. The loader recorded the exact Retail transition
+`playing (1) -> menu (5) -> playing (1)`; the bridge independently recorded
+native stereo disabled on menu entry and eligible to resume on menu exit.
+Initial splash, demo, screen, and loading states also selected the flat panel.
+
+Physical Escape and desktop menu controls use the same Retail state publisher,
+not a controller-side guessed toggle. Repeating those paths and a full movie
+sequence remains release regression coverage rather than a blocker for this
+bounded M4 slice.

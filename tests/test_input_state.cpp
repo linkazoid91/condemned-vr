@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "input_state.h"
+#include "condemned_controller_input.h"
 #include "condemned_locomotion.h"
 
 namespace {
@@ -159,6 +160,154 @@ int main() {
     if (directions.forward || directions.backward ||
         directions.left || directions.right) {
         return Fail("an inactive left hand must resolve to neutral");
+    }
+
+    FearVrInputState turning{};
+    turning.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    turning.activeHands = FEARVR_HAND_MASK_RIGHT;
+    turning.turnX = 0.61F;
+    turning.turnY = -1.0F;
+    auto turnValue = condemnedvr::ResolveTurningValue(
+        turning, true);
+    if (!turnValue.active || !Near(turnValue.value, 0.5F)) {
+        return Fail("right stick must resolve to deadzone-adjusted turning");
+    }
+    turning.turnX = -0.61F;
+    turnValue = condemnedvr::ResolveTurningValue(turning, true);
+    if (!turnValue.active || !Near(turnValue.value, -0.5F)) {
+        return Fail("right-stick turning must preserve polarity");
+    }
+    turning.turnX = 0.21F;
+    if (condemnedvr::ResolveTurningValue(turning, true).active) {
+        return Fail("right-stick turning must respect its deadzone");
+    }
+    turning.turnX = std::numeric_limits<float>::quiet_NaN();
+    if (condemnedvr::ResolveTurningValue(turning, true).active) {
+        return Fail("non-finite right-stick input must resolve to neutral");
+    }
+    turning.turnX = 0.75F;
+    if (condemnedvr::ResolveTurningValue(turning, false).active) {
+        return Fail("stale right-stick input must resolve to neutral");
+    }
+    turning.activeHands = FEARVR_HAND_MASK_LEFT;
+    if (condemnedvr::ResolveTurningValue(turning, true).active) {
+        return Fail("an inactive right hand must not turn");
+    }
+
+    const condemnedvr::TurningValue weakTurn{0.4F, true};
+    const condemnedvr::TurningValue strongTurn{-0.8F, true};
+    if (!Near(
+            condemnedvr::MergeTurningWithRetail(0.6F, weakTurn),
+            0.6F) ||
+        !Near(
+            condemnedvr::MergeTurningWithRetail(0.6F, strongTurn),
+            -0.8F) ||
+        !Near(
+            condemnedvr::MergeTurningWithRetail(
+                0.4F,
+                condemnedvr::TurningValue{-0.4F, true}),
+            0.4F) ||
+        !Near(
+            condemnedvr::MergeTurningWithRetail(
+                0.6F, condemnedvr::TurningValue{}),
+            0.6F)) {
+        return Fail("turning must preserve the strongest Retail or VR value");
+    }
+    const float nonFiniteRetail =
+        std::numeric_limits<float>::quiet_NaN();
+    if (!std::isnan(condemnedvr::MergeTurningWithRetail(
+            nonFiniteRetail, strongTurn))) {
+        return Fail("a non-finite Retail turn value must fail closed");
+    }
+
+    FearVrInputState menu{};
+    menu.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    menu.activeHands = FEARVR_HAND_MASK_LEFT;
+    menu.buttons = FEARVR_IB_LEFT_SECONDARY;
+    condemnedvr::MenuToggleLatch startupHeldLatch;
+    if (condemnedvr::ConsumeMenuTogglePress(
+            startupHeldLatch, menu, true)) {
+        return Fail("a startup-held menu button must require release");
+    }
+    menu.buttons = 0;
+    condemnedvr::ConsumeMenuTogglePress(
+        startupHeldLatch, menu, true);
+    menu.buttons = FEARVR_IB_LEFT_SECONDARY;
+    if (!condemnedvr::ConsumeMenuTogglePress(
+            startupHeldLatch, menu, true)) {
+        return Fail("startup-held menu input must re-arm after release");
+    }
+
+    menu.buttons = 0;
+    condemnedvr::MenuToggleLatch menuLatch;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("menu input must prime from a released button");
+    }
+    menu.buttons = FEARVR_IB_LEFT_PRIMARY;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("only left secondary may toggle the pause menu");
+    }
+    menu.buttons = FEARVR_IB_LEFT_SECONDARY;
+    if (!condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true) ||
+        condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("a held menu button must produce one rising edge");
+    }
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, false)) {
+        return Fail("stale input must not toggle the pause menu");
+    }
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("focus recovery while held must require release");
+    }
+    menu.buttons = 0;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("menu-button release must not toggle");
+    }
+    menu.buttons = FEARVR_IB_LEFT_SECONDARY;
+    if (!condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("a released menu button must re-arm the next edge");
+    }
+    menu.flags = FEARVR_IF_VALID;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("fresh but unfocused menu input must remain neutral");
+    }
+    menu.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("focus recovery while held must still require release");
+    }
+    menu.activeHands = FEARVR_HAND_MASK_RIGHT;
+    if (condemnedvr::ConsumeMenuTogglePress(menuLatch, menu, true)) {
+        return Fail("an inactive left hand must not toggle the menu");
+    }
+
+    for (int gameState = condemnedvr::kCondemnedGameStateUndefined;
+         gameState < condemnedvr::kCondemnedGameStateCount;
+         ++gameState) {
+        const bool expectedFlatPanel =
+            gameState != condemnedvr::kCondemnedGameStatePlaying;
+        if (!condemnedvr::IsKnownCondemnedGameState(gameState) ||
+            condemnedvr::CondemnedGameStateUsesFlatPanel(gameState) !=
+                expectedFlatPanel) {
+            return Fail(
+                "only Retail gameplay state may use native stereo");
+        }
+        const bool expectedMenuToggle =
+            gameState == condemnedvr::kCondemnedGameStatePlaying ||
+            gameState == condemnedvr::kCondemnedGameStateMenu;
+        if (condemnedvr::CondemnedGameStateAllowsMenuToggle(gameState) !=
+            expectedMenuToggle) {
+            return Fail(
+                "synthetic Escape must be limited to gameplay and menu");
+        }
+    }
+    const int unknownGameStates[] = {
+        -1, condemnedvr::kCondemnedGameStateCount};
+    for (const int unknownState : unknownGameStates) {
+        if (condemnedvr::IsKnownCondemnedGameState(unknownState) ||
+            !condemnedvr::CondemnedGameStateUsesFlatPanel(unknownState) ||
+            condemnedvr::CondemnedGameStateAllowsMenuToggle(unknownState)) {
+            return Fail(
+                "an unreadable Retail state must fail to a non-interactive panel");
+        }
     }
 
     // Linkshaenderbelegung: ein einziger Tausch dreht Stoecke, Trigger,

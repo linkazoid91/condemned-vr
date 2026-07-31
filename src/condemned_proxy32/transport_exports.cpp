@@ -49,3 +49,8 @@ extern "C" __declspec(dllexport) BOOL __cdecl
 CondemnedVr_GetInputState(FearVrInputState* input) {
     return fearvr::GetInputState(input);
 }
+
+extern "C" __declspec(dllexport) void __cdecl
+CondemnedVr_SetMenuActive(BOOL active) {
+    fearvr::SetMenuActive(active);
+}

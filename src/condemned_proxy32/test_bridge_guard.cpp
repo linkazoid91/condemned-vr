@@ -24,6 +24,12 @@ int wmain(int argumentCount, wchar_t** arguments) {
         FreeLibrary(bridge);
         return 1;
     }
+    if (GetProcAddress(
+            bridge, "CondemnedVr_SetMenuActive") == nullptr) {
+        std::fputs("Bridge menu-state export is missing.\n", stderr);
+        FreeLibrary(bridge);
+        return 1;
+    }
     const BOOL installed = install();
     FreeLibrary(bridge);
     if (installed) {

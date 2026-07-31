@@ -12,6 +12,13 @@
 .PARAMETER DesktopWindow
     Runs Condemned in a smaller desktop window so other applications remain
     visible. The default window render size is 1920x1080.
+
+.PARAMETER TurningProbe
+    Enables the separately guarded M4 right-stick turning gate.
+
+.PARAMETER MenuProbe
+    Enables the separately guarded M4 left-secondary pause-menu gate and
+    routes verified non-gameplay states to the headset comfort panel.
 #>
 [CmdletBinding()]
 param(
@@ -27,6 +34,8 @@ param(
     [switch]$ZeroEyeOffsetDiagnostic,
     [switch]$StereoTuning,
     [switch]$LocomotionProbe,
+    [switch]$TurningProbe,
+    [switch]$MenuProbe,
     [switch]$DesktopWindow,
     [ValidateRange(640, 3840)]
     [int]$DesktopWindowWidth = 1920,
@@ -236,6 +245,12 @@ if ($StereoTuning) {
 if ($LocomotionProbe) {
     $gameArguments += '-condemnedvr-m4-locomotion'
 }
+if ($TurningProbe) {
+    $gameArguments += '-condemnedvr-m4-turning'
+}
+if ($MenuProbe) {
+    $gameArguments += '-condemnedvr-m4-menu'
+}
 if ($DesktopWindow) {
     $gameArguments += @(
         '+Windowed', '1',
@@ -258,6 +273,7 @@ try {
     $inspectorScript = Join-Path $PSScriptRoot 'inspect-condemned-process32.ps1'
     $proxyLog = $null
     $proxyText = ''
+    $loaderText = ''
     $modules = @()
     $deadline = (Get-Date).AddSeconds(45)
     do {
@@ -283,9 +299,30 @@ try {
         if ($null -ne $proxyLog) {
             $proxyText = Read-LiveLog $proxyLog.FullName
         }
+        $loaderText = Read-LiveLog $deployment.LoaderLog
         $hostText = Read-LiveLog $hostLog.FullName
         if ($proxyText.Contains('"event":"adapter_mismatch"')) {
             throw 'D3D9 and OpenXR selected different GPU adapters.'
+        }
+        if ($LocomotionProbe -and
+            $loaderText.Contains(
+                '"event":"m4_binding_locomotion_rejected"')) {
+            throw 'The guarded M4 locomotion hook was rejected.'
+        }
+        if ($TurningProbe -and
+            $loaderText.Contains(
+                '"event":"m4_binding_turning_rejected"')) {
+            throw 'The guarded M4 turning hook was rejected.'
+        }
+        if ($MenuProbe -and
+            $loaderText.Contains(
+                 '"event":"m4_menu_toggle_rejected"')) {
+            throw 'The guarded M4 menu hook was rejected.'
+        }
+        if ($MenuProbe -and
+            $loaderText.Contains(
+                '"event":"m4_menu_render_state_failed"')) {
+            throw 'The guarded M4 headset menu-state publisher failed.'
         }
         $bridgeReady =
             $proxyText.Contains('"event":"late_hooks_installed"') -and
@@ -296,10 +333,29 @@ try {
             $hostText.Contains('"event":"ipc_connected"') -and
             $hostText.Contains('"event":"ipc_frame"') -and
             $hostText.Contains('"event":"mono_quad_layer"')
-    } until (($bridgeReady -and $hostReady) -or (Get-Date) -ge $deadline)
+        $locomotionReady = -not $LocomotionProbe -or
+            $loaderText.Contains(
+                '"event":"m4_binding_locomotion_armed"')
+        $turningReady = -not $TurningProbe -or
+            $loaderText.Contains(
+                '"event":"m4_binding_turning_armed"')
+        $menuReady = -not $MenuProbe -or
+            ($loaderText.Contains(
+                 '"event":"m4_menu_toggle_armed"') -and
+             $loaderText.Contains(
+                 '"event":"m4_menu_update_hook_called"') -and
+             $loaderText.Contains(
+                 '"event":"m4_menu_render_state"'))
+        $inputHooksReady =
+            $locomotionReady -and $turningReady -and $menuReady
+    } until (($bridgeReady -and $hostReady -and $inputHooksReady) -or
+        (Get-Date) -ge $deadline)
 
     if (-not $bridgeReady -or -not $hostReady) {
         throw 'The mono OpenXR frame path did not become ready within 45 seconds.'
+    }
+    if (-not $inputHooksReady) {
+        throw 'A requested guarded M4 input hook did not arm within 45 seconds.'
     }
     $loadedBridge = $modules | Where-Object {
         $_.Name -ieq 'condemnedvr-d3d9.dll'
@@ -328,6 +384,12 @@ try {
         AsiModules = $asiModules
         HostLog = $hostLog.FullName
         ProxyLog = $proxyLog.FullName
+        LoaderLog = $deployment.LoaderLog
+        M4Input = [pscustomobject][ordered]@{
+            Locomotion = [bool]$LocomotionProbe
+            Turning = [bool]$TurningProbe
+            Menu = [bool]$MenuProbe
+        }
         CaptureEnabled = $true
         OpenXrEnabled = $true
         StereoEnabled = $false

@@ -453,6 +453,13 @@ bool TryDoubleRenderDiagnostic(
         ReleaseStereoAttempt(true);
         return false;
     }
+    if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
+        // Retail composes menus, screens, and movies after RenderCamera. Let
+        // the normal single camera call complete so Present capture can send
+        // the finished backbuffer to both eyes as a world-locked panel.
+        ReleaseStereoAttempt(true);
+        return false;
+    }
 
     RigidTransformAbi originalTransform{};
     float cameraRight[3]{};
