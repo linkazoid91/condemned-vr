@@ -7,7 +7,9 @@
 namespace condemnedvr {
 
 constexpr std::uint32_t kCondemnedYawAccelCommand = 23U;
+constexpr std::uint32_t kCondemnedActivateCommand = 87U;
 constexpr float kCondemnedTurnDeadzone = 0.22F;
+constexpr float kCondemnedActivateSqueezeThreshold = 0.65F;
 constexpr int kCondemnedGameStateUndefined = 0;
 constexpr int kCondemnedGameStatePlaying = 1;
 constexpr int kCondemnedGameStateExiting = 2;
@@ -68,6 +70,67 @@ inline float MergeTurningWithRetail(
     return std::fabs(turning.value) > std::fabs(retailValue)
         ? turning.value
         : retailValue;
+}
+
+struct ActivateValue {
+    float value{0.0F};
+    bool active{false};
+};
+
+inline ActivateValue ResolveActivateValue(
+    const FearVrInputState& state,
+    bool sampleFresh) noexcept {
+    const bool active =
+        fearvr::IsInputStateUsable(state, sampleFresh) &&
+        (state.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        state.squeeze[FEARVR_HAND_RIGHT] >=
+            kCondemnedActivateSqueezeThreshold;
+    return {active ? 1.0F : 0.0F, active};
+}
+
+inline float MergeActivateWithRetail(
+    float retailValue,
+    const ActivateValue& activate) noexcept {
+    if (!activate.active || !std::isfinite(retailValue)) {
+        return retailValue;
+    }
+    return std::fabs(retailValue) >= std::fabs(activate.value)
+        ? retailValue
+        : activate.value;
+}
+
+struct RecenterLatch {
+    bool releaseRequired{true};
+    bool wasDown{false};
+};
+
+inline bool ConsumeRecenterPress(
+    RecenterLatch& latch,
+    const FearVrInputState& state,
+    bool sampleFresh) noexcept {
+    const bool usable =
+        fearvr::IsInputStateUsable(state, sampleFresh) &&
+        (state.activeHands & FEARVR_HAND_MASK_RIGHT) != 0;
+    if (!usable) {
+        latch.releaseRequired = true;
+        latch.wasDown = false;
+        return false;
+    }
+
+    const bool down =
+        (state.buttons & FEARVR_IB_RIGHT_STICK) != 0;
+    if (!down) {
+        latch.releaseRequired = false;
+        latch.wasDown = false;
+        return false;
+    }
+    if (latch.releaseRequired || latch.wasDown) {
+        latch.wasDown = true;
+        return false;
+    }
+
+    latch.wasDown = true;
+    return true;
 }
 
 struct MenuToggleLatch {

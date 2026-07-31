@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "condemned_controller_input.h"
 #include "head_tracking_math.h"
 #include "protocol.h"
 
@@ -114,9 +115,12 @@ bool g_tuningReversePolarity = false;
 float g_tuningUnitsPerMeter = 100.0F;
 float g_tuningFovScale = kCondemnedDefaultFovScale;
 bool g_hmdTranslationEnabled = true;
+bool g_controllerRecenterEnabled = false;
+bool g_controllerRecenterRequested = false;
 bool g_trackingRecenterPending = true;
 bool g_trackingRecenterValid = false;
 FearVrPose g_trackingRecenter{};
+RecenterLatch g_controllerRecenterLatch;
 volatile LONG g_continuousRenderActive = 0;
 volatile LONG g_continuousStereoLogged = 0;
 volatile LONG g_cameraReadFailures = 0;
@@ -237,6 +241,22 @@ void SampleControllerInputReadOnly() noexcept {
     }
     g_lastInputSampleId = input.sampleId;
     ++g_inputSamplesObserved;
+    if (g_controllerRecenterEnabled) {
+        const HWND foreground = GetForegroundWindow();
+        DWORD foregroundProcessId = 0;
+        if (foreground != nullptr) {
+            GetWindowThreadProcessId(
+                foreground, &foregroundProcessId);
+        }
+        const bool foregroundOwned =
+            foreground != nullptr &&
+            foregroundProcessId == GetCurrentProcessId();
+        if (ConsumeRecenterPress(
+                g_controllerRecenterLatch, input,
+                foregroundOwned)) {
+            g_controllerRecenterRequested = true;
+        }
+    }
     const std::uint32_t poseMasks =
         (input.aimPoseValidHands & 0xFFFFU) |
         ((input.gripPoseValidHands & 0xFFFFU) << 16U);
@@ -452,6 +472,22 @@ bool TryDoubleRenderDiagnostic(
         (request.flags & FEARVR_RF_VALID) == 0) {
         ReleaseStereoAttempt(true);
         return false;
+    }
+    if (g_controllerRecenterRequested) {
+        g_controllerRecenterRequested = false;
+        if ((request.flags & FEARVR_RF_FLATSCREEN) == 0) {
+            g_trackingRecenterPending = true;
+            if (g_passThroughLog != nullptr) {
+                g_passThroughLog(
+                    "m4_hmd_recenter_requested",
+                    "button=right_stick path=tracked_camera_origin "
+                    "yaw_only=1 translation_origin_reset=1");
+            }
+        } else if (g_passThroughLog != nullptr) {
+            g_passThroughLog(
+                "m4_panel_recenter_delegated",
+                "button=right_stick path=openxr_host_flat_panel");
+        }
     }
     if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
         // Retail composes menus, screens, and movies after RenderCamera. Let
@@ -1066,7 +1102,8 @@ bool InstallRendererPassThroughProbe(
     bool eyeOffsetDiagnostic,
     bool reverseEyeOffsetDiagnostic,
     bool zeroEyeOffsetDiagnostic,
-    bool continuousStereoTuning) noexcept {
+    bool continuousStereoTuning,
+    bool controllerRecenter) noexcept {
     if (masterDatabase == nullptr || log == nullptr) {
         return false;
     }
@@ -1238,6 +1275,8 @@ bool InstallRendererPassThroughProbe(
     g_reverseEyeOffsetDiagnostic = reverseEyeOffsetDiagnostic;
     g_zeroEyeOffsetDiagnostic = zeroEyeOffsetDiagnostic;
     g_continuousStereoTuning = continuousStereoTuning;
+    g_controllerRecenterEnabled =
+        controllerRecenter && continuousStereoTuning;
     if (continuousStereoTuning) {
         g_tuningUnitsPerMeter = 100.0F;
         g_tuningReversePolarity = false;
@@ -1351,6 +1390,12 @@ bool InstallRendererPassThroughProbe(
             "m4_input_probe_armed",
             "source=openxr_shared_state polling=render_camera "
             "engine_writes=0 state_changes_and_periodic_samples=1");
+    }
+    if (g_controllerRecenterEnabled) {
+        log(
+            "m4_hmd_recenter_armed",
+            "button=right_stick gameplay=yaw_and_translation_origin "
+            "flat_panel=openxr_host release_gated=1 foreground_gated=1");
     }
     ReleaseSRWLockExclusive(&g_passThroughLock);
     return true;

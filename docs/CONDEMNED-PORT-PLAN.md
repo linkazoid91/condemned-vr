@@ -246,8 +246,9 @@ damaging either the retail installation or any third-party files left there.
 
 ## Immediate next step
 
-Commit the accepted M4 right-stick turning and Retail-state headset menu slice.
-Then extend the verified controller path to recentering and the first basic
-interaction command while preserving mouse, keyboard, and flat-panel fallback.
-Keep physical-Escape, desktop menu controls, and a full movie sequence in the
-release regression pass.
+The M4 controller path now has live-accepted locomotion, right-stick turning,
+Retail-state headset menus, right-squeeze Activate, and right-stick recentering
+while preserving mouse, keyboard, and flat-panel fallback. Continue with a
+guarded crouch path and the remaining basic action bindings, then add bounded
+haptic feedback. Keep physical-Escape, desktop menu controls, and a full movie
+sequence in the release regression pass.

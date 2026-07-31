@@ -19,6 +19,13 @@
 .PARAMETER MenuProbe
     Enables the separately guarded M4 left-secondary pause-menu gate and
     routes verified non-gameplay states to the headset comfort panel.
+
+.PARAMETER InteractionProbe
+    Enables the separately guarded M4 right-grip Activate command gate.
+
+.PARAMETER RecenterProbe
+    Enables release-gated right-stick recentering for tracked gameplay and
+    the existing flat headset panel. Requires -StereoTuning.
 #>
 [CmdletBinding()]
 param(
@@ -36,6 +43,8 @@ param(
     [switch]$LocomotionProbe,
     [switch]$TurningProbe,
     [switch]$MenuProbe,
+    [switch]$InteractionProbe,
+    [switch]$RecenterProbe,
     [switch]$DesktopWindow,
     [ValidateRange(640, 3840)]
     [int]$DesktopWindowWidth = 1920,
@@ -49,6 +58,10 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\_condemnedvr-env.ps1"
 $cfg = Get-CondemnedVrConfig
+
+if ($RecenterProbe -and -not $StereoTuning) {
+    throw '-RecenterProbe requires -StereoTuning.'
+}
 
 function Read-LiveLog([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or
@@ -245,11 +258,17 @@ if ($StereoTuning) {
 if ($LocomotionProbe) {
     $gameArguments += '-condemnedvr-m4-locomotion'
 }
+if ($InteractionProbe) {
+    $gameArguments += '-condemnedvr-m4-interaction'
+}
 if ($TurningProbe) {
     $gameArguments += '-condemnedvr-m4-turning'
 }
 if ($MenuProbe) {
     $gameArguments += '-condemnedvr-m4-menu'
+}
+if ($RecenterProbe) {
+    $gameArguments += '-condemnedvr-m4-recenter'
 }
 if ($DesktopWindow) {
     $gameArguments += @(
@@ -314,6 +333,16 @@ try {
                 '"event":"m4_binding_turning_rejected"')) {
             throw 'The guarded M4 turning hook was rejected.'
         }
+        if ($InteractionProbe -and
+            $loaderText.Contains(
+                '"event":"m4_binding_interaction_rejected"')) {
+            throw 'The guarded M4 interaction hook was rejected.'
+        }
+        if ($RecenterProbe -and
+            $loaderText.Contains(
+                '"event":"m4_hmd_recenter_rejected"')) {
+            throw 'The guarded M4 recenter path was rejected.'
+        }
         if ($MenuProbe -and
             $loaderText.Contains(
                  '"event":"m4_menu_toggle_rejected"')) {
@@ -339,6 +368,12 @@ try {
         $turningReady = -not $TurningProbe -or
             $loaderText.Contains(
                 '"event":"m4_binding_turning_armed"')
+        $interactionReady = -not $InteractionProbe -or
+            $loaderText.Contains(
+                '"event":"m4_binding_interaction_armed"')
+        $recenterReady = -not $RecenterProbe -or
+            $loaderText.Contains(
+                '"event":"m4_hmd_recenter_armed"')
         $menuReady = -not $MenuProbe -or
             ($loaderText.Contains(
                  '"event":"m4_menu_toggle_armed"') -and
@@ -347,7 +382,8 @@ try {
              $loaderText.Contains(
                  '"event":"m4_menu_render_state"'))
         $inputHooksReady =
-            $locomotionReady -and $turningReady -and $menuReady
+            $locomotionReady -and $turningReady -and $menuReady -and
+            $interactionReady -and $recenterReady
     } until (($bridgeReady -and $hostReady -and $inputHooksReady) -or
         (Get-Date) -ge $deadline)
 
@@ -389,6 +425,8 @@ try {
             Locomotion = [bool]$LocomotionProbe
             Turning = [bool]$TurningProbe
             Menu = [bool]$MenuProbe
+            Interaction = [bool]$InteractionProbe
+            Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true
         OpenXrEnabled = $true

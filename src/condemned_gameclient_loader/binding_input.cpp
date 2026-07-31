@@ -137,7 +137,7 @@ ClientShellUpdateFunction g_originalClientShellUpdate = nullptr;
 ClientShellKeyUpFunction g_clientShellKeyUp = nullptr;
 ClientShellKeyDownFunction g_clientShellKeyDown = nullptr;
 RendererProbeLogFunction g_log = nullptr;
-void* g_locomotionHookTarget = nullptr;
+void* g_bindingValueHookTarget = nullptr;
 void* g_turningHookTarget = nullptr;
 void* g_menuHookTarget = nullptr;
 void* g_clientShell = nullptr;
@@ -150,7 +150,12 @@ std::uint64_t g_lastSampleId = 0;
 ULONGLONG g_lastSampleTick = 0;
 std::uint32_t g_lastDirectionMask = 0;
 int g_lastTurnDirection = 0;
+volatile LONG g_locomotionEnabled = 0;
+volatile LONG g_interactionEnabled = 0;
+volatile LONG g_lastInteractionActive = 0;
 MenuToggleLatch g_menuToggleLatch;
+
+int ReadRetailGameState(void* interfaceManager) noexcept;
 
 bool ProcessOwnsForegroundWindow() noexcept {
     const HWND foreground = GetForegroundWindow();
@@ -322,6 +327,29 @@ void ReportTurnTransition(
     }
 }
 
+void ReportInteractionTransition(
+    const ActivateValue& activate,
+    float retailValue,
+    float outputValue,
+    int retailGameState) noexcept {
+    const LONG active = activate.active ? 1 : 0;
+    if (InterlockedExchange(
+            &g_lastInteractionActive, active) == active) {
+        return;
+    }
+    if (g_log != nullptr) {
+        char detail[224]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "command=87 controller_active=%ld retail_value=%.3f "
+            "output_value=%.3f game_state=%d "
+            "button=right_squeeze path=retail_binding_value "
+            "direct_command_writes=0 system_input=0",
+            active, retailValue, outputValue, retailGameState);
+        g_log("m4_binding_interaction_applied", detail);
+    }
+}
+
 float ActiveBindingValue(const RetailBinding& binding) noexcept {
     if (!std::isfinite(binding.commandMin) ||
         !std::isfinite(binding.commandMax) ||
@@ -355,20 +383,42 @@ float __fastcall HookGetBindingValue(
     (void)ignoredEdx;
     const float original =
         g_originalGetBindingValue(bindManager, binding);
-    if (binding == nullptr || binding->command > 4U ||
-        binding->command == 2U || g_getInputState == nullptr) {
+    if (binding == nullptr || g_getInputState == nullptr) {
         return original;
     }
 
-    FearVrInputState input{};
-    const bool usable = ReadUsableControllerInput(input);
-    const LocomotionDirections directions =
-        ResolveLocomotionDirections(input, usable);
-    ReportDirectionTransition(DirectionMask(directions));
-    if (!DirectionActive(binding->command, directions)) {
-        return original;
+    const bool locomotionCommand =
+        binding->command <= 4U && binding->command != 2U;
+    if (locomotionCommand && InterlockedCompareExchange(
+            &g_locomotionEnabled, 0, 0) != 0) {
+        FearVrInputState input{};
+        const bool usable = ReadUsableControllerInput(input);
+        const LocomotionDirections directions =
+            ResolveLocomotionDirections(input, usable);
+        ReportDirectionTransition(DirectionMask(directions));
+        if (DirectionActive(binding->command, directions)) {
+            return ActiveBindingValue(*binding);
+        }
     }
-    return ActiveBindingValue(*binding);
+
+    if (binding->command == kCondemnedActivateCommand &&
+        InterlockedCompareExchange(
+            &g_interactionEnabled, 0, 0) != 0) {
+        FearVrInputState input{};
+        const int retailGameState =
+            ReadRetailGameState(g_interfaceManager);
+        const bool usable = ReadUsableControllerInput(input) &&
+            retailGameState == kCondemnedGameStatePlaying;
+        const ActivateValue activate =
+            ResolveActivateValue(input, usable);
+        const float outputValue =
+            MergeActivateWithRetail(original, activate);
+        ReportInteractionTransition(
+            activate, original, outputValue, retailGameState);
+        return outputValue;
+    }
+
+    return original;
 }
 
 float __fastcall HookGetExtremalCommandValue(
@@ -709,21 +759,13 @@ void* ResolveVerifiedInterfaceManager(
     }
 }
 
-} // namespace
-
-bool InstallBindingLocomotionHook(
+bool EnsureBindingValueHook(
     HMODULE gameClientModule,
     HMODULE bridgeModule,
-    RendererProbeLogFunction log) noexcept {
-    AcquireSRWLockExclusive(&g_bindingLock);
-    if (g_locomotionHookTarget != nullptr) {
-        ReleaseSRWLockExclusive(&g_bindingLock);
-        return true;
-    }
-    ReleaseSRWLockExclusive(&g_bindingLock);
-
+    RendererProbeLogFunction log,
+    const char* rejectionEvent) noexcept {
     if (gameClientModule == nullptr || bridgeModule == nullptr ||
-        log == nullptr) {
+        log == nullptr || rejectionEvent == nullptr) {
         return false;
     }
     const auto getInputState = reinterpret_cast<GetInputStateFunction>(
@@ -731,21 +773,34 @@ bool InstallBindingLocomotionHook(
     auto* const target =
         reinterpret_cast<unsigned char*>(gameClientModule) +
         kGetBindingValueRva;
-    if (getInputState == nullptr || !LocomotionTargetMatches(target)) {
+    if (getInputState == nullptr) {
         log(
-            "m4_binding_locomotion_rejected",
-            getInputState == nullptr
-                ? "controller_transport_export_missing"
-                : "GameOrig_rva_000095f0_signature_mismatch");
+            rejectionEvent,
+            "controller_transport_export_missing");
+        return false;
+    }
+
+    AcquireSRWLockExclusive(&g_bindingLock);
+    const bool alreadyInstalled =
+        g_bindingValueHookTarget == target &&
+        g_originalGetBindingValue != nullptr;
+    ReleaseSRWLockExclusive(&g_bindingLock);
+    if (alreadyInstalled) {
+        g_getInputState = getInputState;
+        g_log = log;
+        return true;
+    }
+    if (!LocomotionTargetMatches(target)) {
+        log(
+            rejectionEvent,
+            "GameOrig_rva_000095f0_signature_mismatch");
         return false;
     }
 
     const MH_STATUS initialize = MH_Initialize();
     if (initialize != MH_OK &&
         initialize != MH_ERROR_ALREADY_INITIALIZED) {
-        log(
-            "m4_binding_locomotion_rejected",
-            MH_StatusToString(initialize));
+        log(rejectionEvent, MH_StatusToString(initialize));
         return false;
     }
 
@@ -759,19 +814,77 @@ bool InstallBindingLocomotionHook(
     }
     if (status != MH_OK) {
         MH_RemoveHook(target);
-        log(
-            "m4_binding_locomotion_rejected",
-            MH_StatusToString(status));
+        log(rejectionEvent, MH_StatusToString(status));
         g_originalGetBindingValue = nullptr;
         return false;
     }
 
     AcquireSRWLockExclusive(&g_bindingLock);
-    g_locomotionHookTarget = target;
+    g_bindingValueHookTarget = target;
     ReleaseSRWLockExclusive(&g_bindingLock);
+    return true;
+}
+
+} // namespace
+
+bool InstallBindingLocomotionHook(
+    HMODULE gameClientModule,
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept {
+    if (!EnsureBindingValueHook(
+            gameClientModule, bridgeModule, log,
+            "m4_binding_locomotion_rejected")) {
+        return false;
+    }
+    InterlockedExchange(&g_locomotionEnabled, 1);
     log(
         "m4_binding_locomotion_armed",
         "target=GameOrig+0x000095F0 commands=0,1,3,4 "
+        "binding_size=60 direct_command_writes=0 system_input=0");
+    return true;
+}
+
+bool InstallBindingInteractionHook(
+    void* masterDatabase,
+    HMODULE gameClientModule,
+    HMODULE bridgeModule,
+    RendererProbeLogFunction log) noexcept {
+    if (masterDatabase == nullptr || gameClientModule == nullptr ||
+        bridgeModule == nullptr || log == nullptr) {
+        return false;
+    }
+    void* const clientShell = FindCurrentInterface(
+        masterDatabase, "IClientShell.Default", 4);
+    if (clientShell == nullptr ||
+        !MenuTargetsMatch(gameClientModule, clientShell)) {
+        log(
+            "m4_binding_interaction_rejected",
+            clientShell == nullptr
+                ? "IClientShell_Default_v4_missing"
+                : "IClientShell_Default_v4_state_guard_mismatch");
+        return false;
+    }
+    void* const interfaceManager = ResolveVerifiedInterfaceManager(
+        gameClientModule, clientShell);
+    if (interfaceManager == nullptr) {
+        log(
+            "m4_binding_interaction_rejected",
+            "CInterfaceMgr_state_source_mismatch");
+        return false;
+    }
+    if (!EnsureBindingValueHook(
+            gameClientModule, bridgeModule, log,
+            "m4_binding_interaction_rejected")) {
+        return false;
+    }
+
+    g_interfaceManager = interfaceManager;
+    InterlockedExchange(&g_interactionEnabled, 1);
+    log(
+        "m4_binding_interaction_armed",
+        "target=GameOrig+0x000095F0 command=87 "
+        "button=right_squeeze threshold=0.65 "
+        "state=playing path=retail_binding_value "
         "binding_size=60 direct_command_writes=0 system_input=0");
     return true;
 }

@@ -220,6 +220,74 @@ int main() {
         return Fail("a non-finite Retail turn value must fail closed");
     }
 
+    FearVrInputState interaction{};
+    interaction.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    interaction.activeHands = FEARVR_HAND_MASK_RIGHT;
+    interaction.squeeze[FEARVR_HAND_RIGHT] = 0.64F;
+    if (condemnedvr::ResolveActivateValue(
+            interaction, true).active) {
+        return Fail("right grip must respect the Activate threshold");
+    }
+    interaction.squeeze[FEARVR_HAND_RIGHT] = 0.65F;
+    const condemnedvr::ActivateValue activate =
+        condemnedvr::ResolveActivateValue(interaction, true);
+    if (!activate.active || !Near(activate.value, 1.0F)) {
+        return Fail("right grip must resolve to the Activate command");
+    }
+    if (condemnedvr::ResolveActivateValue(
+            interaction, false).active) {
+        return Fail("stale input must not activate interactions");
+    }
+    interaction.activeHands = FEARVR_HAND_MASK_LEFT;
+    if (condemnedvr::ResolveActivateValue(
+            interaction, true).active) {
+        return Fail("an inactive right hand must not activate interactions");
+    }
+    if (!Near(
+            condemnedvr::MergeActivateWithRetail(0.25F, activate),
+            1.0F) ||
+        !Near(
+            condemnedvr::MergeActivateWithRetail(1.25F, activate),
+            1.25F) ||
+        !Near(
+            condemnedvr::MergeActivateWithRetail(
+                0.25F, condemnedvr::ActivateValue{}),
+            0.25F)) {
+        return Fail("Activate must preserve the strongest Retail or VR value");
+    }
+    if (!std::isnan(condemnedvr::MergeActivateWithRetail(
+            nonFiniteRetail, activate))) {
+        return Fail("a non-finite Retail Activate value must fail closed");
+    }
+
+    FearVrInputState recenter{};
+    recenter.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    recenter.activeHands = FEARVR_HAND_MASK_RIGHT;
+    recenter.buttons = FEARVR_IB_RIGHT_STICK;
+    condemnedvr::RecenterLatch recenterLatch;
+    if (condemnedvr::ConsumeRecenterPress(
+            recenterLatch, recenter, true)) {
+        return Fail("a held recenter button at startup must not trigger");
+    }
+    recenter.buttons = 0;
+    condemnedvr::ConsumeRecenterPress(
+        recenterLatch, recenter, true);
+    recenter.buttons = FEARVR_IB_RIGHT_STICK;
+    if (!condemnedvr::ConsumeRecenterPress(
+            recenterLatch, recenter, true) ||
+        condemnedvr::ConsumeRecenterPress(
+            recenterLatch, recenter, true)) {
+        return Fail("recenter must trigger once per released press");
+    }
+    if (condemnedvr::ConsumeRecenterPress(
+            recenterLatch, recenter, false)) {
+        return Fail("stale input must not recenter tracking");
+    }
+    if (condemnedvr::ConsumeRecenterPress(
+            recenterLatch, recenter, true)) {
+        return Fail("freshness recovery while held must require release");
+    }
+
     FearVrInputState menu{};
     menu.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
     menu.activeHands = FEARVR_HAND_MASK_LEFT;

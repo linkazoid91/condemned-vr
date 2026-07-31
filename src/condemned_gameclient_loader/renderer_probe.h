@@ -22,6 +22,7 @@ bool InstallRendererPassThroughProbe(
     bool eyeOffsetDiagnostic = false,
     bool reverseEyeOffsetDiagnostic = false,
     bool zeroEyeOffsetDiagnostic = false,
-    bool continuousStereoTuning = false) noexcept;
+    bool continuousStereoTuning = false,
+    bool controllerRecenter = false) noexcept;
 
 } // namespace condemnedvr

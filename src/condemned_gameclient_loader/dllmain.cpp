@@ -205,6 +205,11 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
         condemnedvr::InstallBindingLocomotionHook(
             g_original, g_bridge, AppendLoaderEvent);
     }
+    if (CommandLineContains(L"-condemnedvr-m4-interaction")) {
+        condemnedvr::InstallBindingInteractionHook(
+            masterDatabase, g_original, g_bridge,
+            AppendLoaderEvent);
+    }
     if (CommandLineContains(L"-condemnedvr-m4-turning")) {
         condemnedvr::InstallBindingTurningHook(
             g_original, g_bridge, AppendLoaderEvent);
@@ -227,9 +232,12 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             L"-condemnedvr-m3-eye-offset-diagnostic");
         const bool continuousStereoTuning = CommandLineContains(
             L"-condemnedvr-m3-stereo-tuning");
+        const bool controllerRecenter = CommandLineContains(
+            L"-condemnedvr-m4-recenter");
         HMODULE const diagnosticBridge =
             stereoDiagnostic || doubleRenderDiagnostic ||
-                eyeOffsetDiagnostic || continuousStereoTuning
+                eyeOffsetDiagnostic || continuousStereoTuning ||
+                controllerRecenter
             ? g_bridge
             : nullptr;
         condemnedvr::InstallRendererPassThroughProbe(
@@ -243,7 +251,8 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
                 L"-condemnedvr-m3-reverse-eye-offset-diagnostic"),
             CommandLineContains(
                 L"-condemnedvr-m3-zero-eye-offset-diagnostic"),
-            continuousStereoTuning);
+            continuousStereoTuning,
+            controllerRecenter);
     }
 }
 

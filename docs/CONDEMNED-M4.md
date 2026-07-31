@@ -152,3 +152,29 @@ Physical Escape and desktop menu controls use the same Retail state publisher,
 not a controller-side guessed toggle. Repeating those paths and a full movie
 sequence remains release regression coverage rather than a blocker for this
 bounded M4 slice.
+
+## Interaction and recenter gate
+
+`-InteractionProbe` maps the right squeeze to Condemned's verified Activate
+command 87. It shares the version-bound `CBindMgr::GetBindingValue` hook used
+by locomotion, calls Retail first, and preserves a stronger Retail value. The
+controller overlay is enabled only while the exact Retail state is playing and
+the OpenXR sample is fresh, focused, right-hand active, and foreground-owned.
+The squeeze becomes active at 0.65 and returns cleanly to neutral on release;
+menus, loading, tracking loss, focus loss, stale transport, and background
+execution cannot synthesize Activate.
+
+`-RecenterProbe` maps right-stick click through a release-gated edge detector.
+During native stereo gameplay it resets both the yaw reference and translation
+origin used by tracked-camera rendering. During a flat menu or screen it
+delegates to the OpenXR host's existing comfort-panel reanchor path instead.
+Held buttons, startup-held state, stale samples, focus loss, tracking loss, and
+foreground loss all require a fresh release before another recenter.
+
+This slice passed live on 1 August 2026. The tester confirmed that interaction
+and recenter both work in the headset. Loader telemetry recorded command-87
+press and release, native `m4_hmd_recenter_requested` followed by
+`m3_hmd_recentered`, and flat-panel delegation; host telemetry independently
+recorded the panel reanchor requests. The accepted launch also retained the
+previous locomotion, turning, menu, physical keyboard, and mouse paths.
+Automated input tests pass 19/19 on x86 and 16/16 on x64.
