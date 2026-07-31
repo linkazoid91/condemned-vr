@@ -29,6 +29,10 @@ option(FEARVR_BUILD_PROXY "Build x86 d3d9.dll proxy/bridge"          OFF)
 option(FEARVR_BUILD_TESTS "Build automated tests"                    ON)
 option(CONDEMNEDVR_BUILD_M1_LOADER
   "Build the x86 Condemned stock-client pass-through loader" OFF)
+option(CONDEMNEDVR_BUILD_M2_BRIDGE
+  "Build the x86 Condemned diagnostic D3D9 bridge" OFF)
+option(CONDEMNEDVR_BUILD_HOST
+  "Build the x64 Condemned OpenXR host" OFF)
 
 # ---- Nur MSVC / Windows -----------------------------------------------------
 if(NOT WIN32 OR NOT MSVC)
@@ -49,6 +53,18 @@ endif()
 if(CONDEMNEDVR_BUILD_M1_LOADER AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR
     "CONDEMNEDVR_BUILD_M1_LOADER requires an x86 build: -A Win32.")
+endif()
+if(CONDEMNEDVR_BUILD_M2_BRIDGE AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+  message(FATAL_ERROR
+    "CONDEMNEDVR_BUILD_M2_BRIDGE requires an x86 build: -A Win32.")
+endif()
+if(CONDEMNEDVR_BUILD_M2_BRIDGE AND NOT CONDEMNEDVR_BUILD_M1_LOADER)
+  message(FATAL_ERROR
+    "CONDEMNEDVR_BUILD_M2_BRIDGE requires CONDEMNEDVR_BUILD_M1_LOADER.")
+endif()
+if(CONDEMNEDVR_BUILD_HOST AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR
+    "CONDEMNEDVR_BUILD_HOST requires an x64 build: -A x64.")
 endif()
 
 # ---- Globale Einstellungen --------------------------------------------------
@@ -75,7 +91,9 @@ target_include_directories(fearvr-common INTERFACE
 message(STATUS "FearVr ${PROJECT_VERSION} | ptr=${CMAKE_SIZEOF_VOID_P}*8 bit "
                "| HOST=${FEARVR_BUILD_HOST} PROXY=${FEARVR_BUILD_PROXY} "
                "TESTS=${FEARVR_BUILD_TESTS} "
-               "CONDEMNED_M1=${CONDEMNEDVR_BUILD_M1_LOADER}")
+               "CONDEMNED_M1=${CONDEMNEDVR_BUILD_M1_LOADER} "
+               "CONDEMNED_M2=${CONDEMNEDVR_BUILD_M2_BRIDGE} "
+               "CONDEMNED_HOST=${CONDEMNEDVR_BUILD_HOST}")
 
 # ---- Subprojekte ------------------------------------------------------------
 if(FEARVR_BUILD_TESTS)
@@ -84,6 +102,9 @@ endif()
 if(FEARVR_BUILD_HOST)
   add_subdirectory(src/host64)
 endif()
+if(CONDEMNEDVR_BUILD_HOST)
+  add_subdirectory(src/condemned_host64)
+endif()
 if(FEARVR_BUILD_PROXY)
   add_subdirectory(src/proxy32)
   add_subdirectory(src/gameclient_loader)
@@ -91,6 +112,9 @@ if(FEARVR_BUILD_PROXY)
 endif()
 if(CONDEMNEDVR_BUILD_M1_LOADER)
   add_subdirectory(src/condemned_gameclient_loader)
+endif()
+if(CONDEMNEDVR_BUILD_M2_BRIDGE)
+  add_subdirectory(src/condemned_proxy32)
 endif()
 if(FEARVR_BUILD_TESTS)
   add_subdirectory(tests)

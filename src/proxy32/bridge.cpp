@@ -30,6 +30,20 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+#if defined(CONDEMNEDVR_PRODUCT)
+constexpr char kBridgeLogPrefix[] = "condemnedvr-bridge-";
+constexpr wchar_t kTemporaryDirectory[] = L"CondemnedVr";
+constexpr wchar_t kCpuBridgeWindow[] = L"CondemnedVrD3D9CpuBridge";
+constexpr wchar_t kHookProbeWindow[] = L"CondemnedVrD3D9HookProbe";
+constexpr char kGameDisplayName[] = "Condemned";
+#else
+constexpr char kBridgeLogPrefix[] = "proxy-";
+constexpr wchar_t kTemporaryDirectory[] = L"FearVr";
+constexpr wchar_t kCpuBridgeWindow[] = L"FearVrD3D9CpuBridge";
+constexpr wchar_t kHookProbeWindow[] = L"FearVrD3D9HookProbe";
+constexpr char kGameDisplayName[] = "FEAR";
+#endif
+
 thread_local bool g_internalViewportStateChange = false;
 
 std::string JsonEscape(const std::string& value) {
@@ -90,7 +104,7 @@ public:
                 return;
             }
             path_ = directory /
-                    ("proxy-" + UtcTimestamp(true) + ".log");
+                    (kBridgeLogPrefix + UtcTimestamp(true) + ".log");
             stream_.open(path_, std::ios::out | std::ios::trunc);
         } catch (...) {
         }
@@ -152,7 +166,8 @@ CommandLineConfig ReadConfig() noexcept {
         return config;
     }
     for (int index = 1; index < argumentCount; ++index) {
-        if (_wcsicmp(arguments[index], L"-fearvr-session") == 0 &&
+        if ((_wcsicmp(arguments[index], L"-fearvr-session") == 0 ||
+             _wcsicmp(arguments[index], L"-condemnedvr-session") == 0) &&
             index + 1 < argumentCount) {
             wchar_t* end = nullptr;
             const unsigned long long parsed =
@@ -160,7 +175,8 @@ CommandLineConfig ReadConfig() noexcept {
             if (end != arguments[index] && *end == L'\0' && parsed != 0) {
                 config.sessionId = static_cast<std::uint64_t>(parsed);
             }
-        } else if (_wcsicmp(arguments[index], L"-fearvr-logdir") == 0 &&
+        } else if ((_wcsicmp(arguments[index], L"-fearvr-logdir") == 0 ||
+                    _wcsicmp(arguments[index], L"-condemnedvr-logdir") == 0) &&
                    index + 1 < argumentCount) {
             config.logDirectory = arguments[++index];
         } else if (_wcsicmp(
@@ -921,7 +937,8 @@ public:
                 wchar_t temporary[MAX_PATH]{};
                 if (GetTempPathW(MAX_PATH, temporary) != 0) {
                     config_.logDirectory =
-                        std::filesystem::path(temporary) / "FearVr";
+                        std::filesystem::path(temporary) /
+                            kTemporaryDirectory;
                 }
             }
             logger_.Open(config_.logDirectory);
@@ -941,8 +958,9 @@ public:
             if (config_.disableXrFramePacing) {
                 logger_.Write(
                     "WARN", "xr_frame_pacing_disabled",
-                    "FEAR may render duplicate OpenXR requests for "
-                    "diagnostic comparison.");
+                    std::string(kGameDisplayName) +
+                        " may render duplicate OpenXR requests for "
+                        "diagnostic comparison.");
             }
             logger_.Write(
                 "INFO", "render_scale_config",
@@ -2550,7 +2568,7 @@ private:
         }
 
         companionWindow_ = CreateWindowExW(
-            0, L"STATIC", L"FearVrD3D9CpuBridge", WS_OVERLAPPED,
+            0, L"STATIC", kCpuBridgeWindow, WS_OVERLAPPED,
             0, 0, 32, 32, nullptr, nullptr, GetModuleHandleW(nullptr),
             nullptr);
         if (companionWindow_ == nullptr) {
@@ -4083,7 +4101,7 @@ BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
     }
 
     const HWND window = CreateWindowExW(
-        0, L"STATIC", L"FearVrD3D9HookProbe", WS_OVERLAPPED,
+        0, L"STATIC", kHookProbeWindow, WS_OVERLAPPED,
         0, 0, 32, 32, nullptr, nullptr, GetModuleHandleW(nullptr),
         nullptr);
     if (window == nullptr) {

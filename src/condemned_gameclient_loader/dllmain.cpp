@@ -16,7 +16,9 @@ extern "C" int CondemnedVrGameClientCompatData = 0;
 namespace {
 
 INIT_ONCE g_originalOnce = INIT_ONCE_STATIC_INIT;
+INIT_ONCE g_bridgeOnce = INIT_ONCE_STATIC_INIT;
 HMODULE g_original = nullptr;
+HMODULE g_bridge = nullptr;
 FARPROC g_getBuildNumber = nullptr;
 FARPROC g_setMasterDatabase = nullptr;
 
@@ -78,6 +80,48 @@ void AppendLoaderEvent(const char* event, const char* detail) noexcept {
     CloseHandle(file);
 }
 
+BOOL CALLBACK LoadBridge(
+    PINIT_ONCE once,
+    PVOID parameter,
+    PVOID* context) noexcept {
+    (void)once;
+    (void)parameter;
+    (void)context;
+
+    wchar_t path[MAX_PATH]{};
+    if (!ModuleSiblingPath(L"condemnedvr-d3d9.dll", path)) {
+        AppendLoaderEvent("bridge_rejected", "sibling_path_failed");
+        return TRUE;
+    }
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+        return TRUE;
+    }
+
+    g_bridge = LoadLibraryExW(
+        path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (g_bridge == nullptr) {
+        AppendLoaderEvent("bridge_rejected", "load_library_failed");
+        return TRUE;
+    }
+
+    using InstallFunction = BOOL(__cdecl*)();
+    const auto install = reinterpret_cast<InstallFunction>(
+        GetProcAddress(g_bridge, "CondemnedVr_InstallD3D9Hooks"));
+    if (install == nullptr || install() == FALSE) {
+        AppendLoaderEvent("bridge_rejected", "hook_install_failed");
+        FreeLibrary(g_bridge);
+        g_bridge = nullptr;
+        return TRUE;
+    }
+
+    AppendLoaderEvent("bridge_loaded", "verified_d3d9_transport");
+    return TRUE;
+}
+
+void EnsureBridge() noexcept {
+    InitOnceExecuteOnce(&g_bridgeOnce, LoadBridge, nullptr, nullptr);
+}
+
 BOOL CALLBACK LoadOriginal(
     PINIT_ONCE once,
     PVOID parameter,
@@ -131,6 +175,7 @@ HMODULE OriginalModule() noexcept {
 } // namespace
 
 extern "C" unsigned long GetBuildNumber() {
+    EnsureBridge();
     using Function = unsigned long(__cdecl*)();
     if (OriginalModule() == nullptr || g_getBuildNumber == nullptr) {
         return 0UL;
@@ -140,6 +185,7 @@ extern "C" unsigned long GetBuildNumber() {
 }
 
 extern "C" void SetMasterDatabase(void* masterDatabase) {
+    EnsureBridge();
     using Function = void(__cdecl*)(void*);
     if (OriginalModule() == nullptr || g_setMasterDatabase == nullptr) {
         return;

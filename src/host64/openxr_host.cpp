@@ -123,7 +123,12 @@ public:
                                      "werden: " +
                                      error.message());
         }
+#if defined(CONDEMNEDVR_PRODUCT)
+        path_ = directory /
+            ("condemnedvr-host-" + UtcTimestamp(true) + ".log");
+#else
         path_ = directory / ("host-" + UtcTimestamp(true) + ".log");
+#endif
         stream_.open(path_, std::ios::out | std::ios::trunc);
         if (!stream_) {
             throw std::runtime_error("Hostlog konnte nicht geoeffnet werden.");
@@ -473,11 +478,21 @@ private:
             XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
         };
         XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
+#if defined(CONDEMNEDVR_PRODUCT)
+        strncpy_s(createInfo.applicationInfo.applicationName, "Condemned VR",
+                  _TRUNCATE);
+#else
         strncpy_s(createInfo.applicationInfo.applicationName, "F.E.A.R. VR",
                   _TRUNCATE);
+#endif
         createInfo.applicationInfo.applicationVersion = 1;
+#if defined(CONDEMNEDVR_PRODUCT)
+        strncpy_s(createInfo.applicationInfo.engineName, "condemnedvr-host",
+                  _TRUNCATE);
+#else
         strncpy_s(createInfo.applicationInfo.engineName, "fearvr-host",
                   _TRUNCATE);
+#endif
         createInfo.applicationInfo.engineVersion = 1;
         // OpenXR 1.0 is sufficient for M1 and accepted by older runtimes.
         // Khronos hello_xr deliberately makes the same compatibility choice.

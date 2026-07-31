@@ -15,6 +15,12 @@
 
 namespace {
 
+#if defined(CONDEMNEDVR_PRODUCT)
+constexpr char kHostExecutableName[] = "condemnedvr-host";
+#else
+constexpr char kHostExecutableName[] = "fearvr-host";
+#endif
+
 BOOL WINAPI ConsoleControlHandler(DWORD controlType) {
     switch (controlType) {
     case CTRL_C_EVENT:
@@ -31,14 +37,15 @@ BOOL WINAPI ConsoleControlHandler(DWORD controlType) {
 
 void PrintUsage() {
     std::printf(
-        "Aufruf: fearvr-host [Optionen]\n"
+        "Aufruf: %s [Optionen]\n"
         "  --log-dir <Pfad>     Logverzeichnis (Standard: .\\logs)\n"
         "  --max-frames <N>     Nach N eingereichten XR-Frames sauber beenden\n"
         "  --ipc-session <ID>   M2-IPC-ID (dezimal oder 0x-hexadezimal)\n"
         "  --exit-on-game-disconnect  Nach Game-Heartbeat-Timeout beenden\n"
         "  --validate-only      Instance/System/D3D11/Session/Swapchains pruefen\n"
         "  --d3d-debug          D3D11-Debug-Layer anfordern (falls installiert)\n"
-        "  --help               Diese Hilfe anzeigen\n");
+        "  --help               Diese Hilfe anzeigen\n",
+        kHostExecutableName);
 }
 
 bool ParseUnsigned(const char* text, std::uint64_t& value) {
@@ -75,8 +82,8 @@ bool ParseSessionId(const char* text, std::uint64_t& value) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::printf("fearvr-host %s (%s)\n", FEARVR_VERSION_STRING,
-                FEARVR_GIT_HASH);
+    std::printf("%s %s (%s)\n", kHostExecutableName,
+                FEARVR_VERSION_STRING, FEARVR_GIT_HASH);
     std::printf("Protokoll: magic=0x%08X version=%u header=%zu bytes\n",
                 static_cast<unsigned>(FEARVR_PROTOCOL_MAGIC),
                 static_cast<unsigned>(FEARVR_PROTOCOL_VERSION),
