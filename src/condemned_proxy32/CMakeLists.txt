@@ -34,6 +34,7 @@ set_target_properties(condemnedvr-d3d9-diagnostic PROPERTIES
 
 add_library(condemnedvr-d3d9-bridge SHARED
   transport_entry.cpp
+  transport_exports.cpp
   dllmain.cpp
   ../proxy32/bridge.cpp
   ../proxy32/system_d3d9.cpp

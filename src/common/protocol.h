@@ -41,7 +41,7 @@ extern "C" {
 enum {
   FEARVR_FOV_SCALE_DEFAULT_PERCENT = 100u,
   FEARVR_FOV_SCALE_MIN_PERCENT = 100u,
-  FEARVR_FOV_SCALE_MAX_PERCENT = 130u
+  FEARVR_FOV_SCALE_MAX_PERCENT = 150u
 };
 
 /* ---- Augen & Ringpuffer -------------------------------------------------- */

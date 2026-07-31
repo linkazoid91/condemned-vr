@@ -64,7 +64,8 @@ int main(void) {
     CHECK(fearvr::NormalizeFovScalePercent(0) == 100);
     CHECK(fearvr::NormalizeFovScalePercent(90) == 100);
     CHECK(fearvr::NormalizeFovScalePercent(120) == 120);
-    CHECK(fearvr::NormalizeFovScalePercent(140) == 130);
+    CHECK(fearvr::NormalizeFovScalePercent(140) == 140);
+    CHECK(fearvr::NormalizeFovScalePercent(160) == 150);
 
     // --- Ungültige Varianten werden abgelehnt (Laufzeitwerte) ---
     { FearVrSharedHeader b = h; b.magic ^= 0xFFu;      CHECK(!AcceptHeader(b)); }

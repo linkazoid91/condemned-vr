@@ -43,8 +43,11 @@ BOOL WaitForNewRenderRequest(
 BOOL GetInputState(FearVrInputState* input) noexcept;
 BOOL SubmitHapticRequest(const FearVrHapticRequest* request) noexcept;
 void BeginEye(std::uint32_t eye) noexcept;
+BOOL ClearEye(std::uint32_t eye) noexcept;
 void CaptureEye(std::uint32_t eye) noexcept;
 void EndStereoFrame(std::uint64_t frameId) noexcept;
+BOOL EndStereoDiagnosticFrame(std::uint64_t frameId) noexcept;
+BOOL SubmitStereoDiagnostic() noexcept;
 void ReportHookStatus(const char* level, const char* event,
                       const char* message) noexcept;
 

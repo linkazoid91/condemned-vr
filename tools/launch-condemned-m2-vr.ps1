@@ -14,6 +14,17 @@
 param(
     [string]$RuntimeManifest,
     [switch]$ValidateOnly,
+    [switch]$RendererProbe,
+    [switch]$RendererPassThrough,
+    [switch]$StereoDiagnostic,
+    [switch]$DoubleRenderDiagnostic,
+    [switch]$CameraReadProbe,
+    [switch]$EyeOffsetDiagnostic,
+    [switch]$ReverseEyeOffsetDiagnostic,
+    [switch]$ZeroEyeOffsetDiagnostic,
+    [switch]$StereoTuning,
+    [ValidateRange(100, 200)]
+    [int]$RenderScale = 100,
     [switch]$Wait
 )
 
@@ -158,7 +169,61 @@ $gameArguments = @(
     '-condemnedvr-session', $sessionText,
     '-condemnedvr-logdir', "`"$runLogDirectory`"",
     '-archcfg', "`"$($deployment.ArchiveConfig)`"",
-    '-userdirectory', "`"$($deployment.UserDirectory)`"")
+    '-userdirectory', "`"$($deployment.UserDirectory)`"",
+    '-fearvr-render-scale',
+    $RenderScale.ToString([Globalization.CultureInfo]::InvariantCulture))
+if ($RendererProbe) {
+    $gameArguments += '-condemnedvr-m3-probe'
+}
+if ($RendererPassThrough) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through')
+}
+if ($StereoDiagnostic) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-stereo-diagnostic')
+}
+if ($DoubleRenderDiagnostic) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-double-render-diagnostic')
+}
+if ($CameraReadProbe) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-camera-read-probe')
+}
+if ($EyeOffsetDiagnostic) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-eye-offset-diagnostic')
+}
+if ($ReverseEyeOffsetDiagnostic) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-eye-offset-diagnostic',
+        '-condemnedvr-m3-reverse-eye-offset-diagnostic')
+}
+if ($ZeroEyeOffsetDiagnostic) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-eye-offset-diagnostic',
+        '-condemnedvr-m3-zero-eye-offset-diagnostic')
+}
+if ($StereoTuning) {
+    $gameArguments += @(
+        '-condemnedvr-m3-probe',
+        '-condemnedvr-m3-pass-through',
+        '-condemnedvr-m3-stereo-tuning')
+}
 $game = $null
 try {
     $game = Start-Process -FilePath $deployment.RuntimeExe `

@@ -1233,11 +1233,19 @@ public:
             // presented. If the staging query is not ready, the game keeps
             // running and the headset reuses its last complete image.
             ProcessCpuCaptureQueue(device);
+            if (!stereo && diagnosticStereoHoldUntilTick_ != 0 &&
+                GetTickCount64() < diagnosticStereoHoldUntilTick_) {
+                return;
+            }
             const std::uint64_t queuedStereoFrameId = stereoFrameId_;
             if (QueueCpuCapture(device, backBuffer.Get(), stereo) &&
                 stereo) {
                 lastStagedStereoFrameId_ = queuedStereoFrameId;
             }
+            return;
+        }
+        if (!stereo && diagnosticStereoHoldUntilTick_ != 0 &&
+            GetTickCount64() < diagnosticStereoHoldUntilTick_) {
             return;
         }
         std::uint32_t slotIndex = 0;
@@ -1783,11 +1791,35 @@ public:
         stereoEyeCaptured_[eye] = true;
     }
 
-    void EndStereoFrame(std::uint64_t frameId) noexcept {
+    BOOL ClearStereoEye(std::uint32_t eye) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (eye >= FEARVR_EYE_COUNT || !stereoAccepting_ ||
+            device_ == nullptr || !resourcesReady_ ||
+            stereoFrameReady_ || !stereoCapture_[eye]) {
+            return FALSE;
+        }
+        if (stereoSupersamplingReady_ &&
+            (!stereoRenderTargetActive_ ||
+             stereoRenderTargetEye_ != eye)) {
+            return FALSE;
+        }
+        const HRESULT result = device_->Clear(
+            0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+            D3DCOLOR_ARGB(0, 0, 0, 0), 1.0F, 0);
+        if (FAILED(result)) {
+            LogHresult("stereo_diagnostic_clear_failed", result);
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    BOOL EndStereoFrame(
+        std::uint64_t frameId,
+        bool diagnosticHold = false) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         RestoreStereoRenderTarget();
         if (!stereoAccepting_) {
-            return;
+            return FALSE;
         }
         stereoAccepting_ = false;
         if (frameId == 0 ||
@@ -1801,10 +1833,81 @@ public:
             }
             stereoEyeCaptured_.fill(false);
             stereoFrameId_ = 0;
-            return;
+            return FALSE;
         }
         stereoFrameId_ = frameId;
         stereoFrameReady_ = true;
+        if (diagnosticHold) {
+            constexpr ULONGLONG kDiagnosticHoldMilliseconds = 3000;
+            diagnosticStereoHoldUntilTick_ =
+                GetTickCount64() + kDiagnosticHoldMilliseconds;
+            logger_.Write(
+                "INFO", "stereo_double_render_diagnostic_ready",
+                "A completed pair rendered through the world path twice "
+                "and will be held for 3000ms.");
+        }
+        return TRUE;
+    }
+
+    BOOL SubmitStereoDiagnostic() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc() || !hostConnected_ || device_ == nullptr ||
+            !resourcesReady_ || stereoFrameReady_ ||
+            !stereoCapture_[FEARVR_EYE_LEFT] ||
+            !stereoCapture_[FEARVR_EYE_RIGHT]) {
+            return FALSE;
+        }
+        FearVrRenderRequest request{};
+        if (!ReadRenderRequestLocked(&request) || request.frameId == 0) {
+            return FALSE;
+        }
+
+        RestoreStereoRenderTarget();
+        ComPtr<IDirect3DSurface9> backBuffer;
+        HRESULT result = device_->GetBackBuffer(
+            0, 0, D3DBACKBUFFER_TYPE_MONO,
+            backBuffer.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            LogHresult("diagnostic_get_backbuffer_failed", result);
+            return FALSE;
+        }
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            result = device_->StretchRect(
+                backBuffer.Get(), nullptr, stereoCapture_[eye].Get(),
+                nullptr, D3DTEXF_NONE);
+            if (FAILED(result)) {
+                LogHresult("diagnostic_eye_copy_failed", result);
+                stereoEyeCaptured_.fill(false);
+                return FALSE;
+            }
+            stereoEyeCaptured_[eye] = true;
+        }
+
+        const LONG markerSize = static_cast<LONG>((std::min)(
+            192U, (std::min)(width_, height_) / 4U));
+        const RECT marker{
+            static_cast<LONG>(width_) - markerSize,
+            0,
+            static_cast<LONG>(width_),
+            markerSize};
+        result = device_->ColorFill(
+            stereoCapture_[FEARVR_EYE_RIGHT].Get(), &marker,
+            D3DCOLOR_ARGB(255, 255, 0, 255));
+        if (FAILED(result)) {
+            LogHresult("diagnostic_marker_failed", result);
+            stereoEyeCaptured_.fill(false);
+            return FALSE;
+        }
+
+        stereoAccepting_ = false;
+        stereoFrameId_ = request.frameId;
+        stereoFrameReady_ = true;
+        diagnosticStereoHoldUntilTick_ = GetTickCount64() + 1000;
+        logger_.Write(
+            "INFO", "stereo_diagnostic_captured",
+            "One normal frame was copied to both eyes; the right eye has "
+            "a magenta corner marker and is held for 1000ms.");
+        return TRUE;
     }
 
 private:
@@ -3680,6 +3783,7 @@ private:
     std::uint64_t lastHostHeartbeat_{0};
     ULONGLONG lastHostHeartbeatTick_{0};
     ULONGLONG nextResourceRetryTick_{0};
+    ULONGLONG diagnosticStereoHoldUntilTick_{0};
     HWND companionWindow_{nullptr};
     std::size_t cpuCaptureRead_{0};
     std::size_t cpuCaptureWrite_{0};
@@ -4394,12 +4498,24 @@ void BeginEye(std::uint32_t eye) noexcept {
     GetBridge().BeginStereoEye(eye);
 }
 
+BOOL ClearEye(std::uint32_t eye) noexcept {
+    return GetBridge().ClearStereoEye(eye);
+}
+
 void CaptureEye(std::uint32_t eye) noexcept {
     GetBridge().CaptureStereoEye(eye);
 }
 
 void EndStereoFrame(std::uint64_t frameId) noexcept {
     GetBridge().EndStereoFrame(frameId);
+}
+
+BOOL EndStereoDiagnosticFrame(std::uint64_t frameId) noexcept {
+    return GetBridge().EndStereoFrame(frameId, true);
+}
+
+BOOL SubmitStereoDiagnostic() noexcept {
+    return GetBridge().SubmitStereoDiagnostic();
 }
 
 void ReportHookStatus(const char* level, const char* event,

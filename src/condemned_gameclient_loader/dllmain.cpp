@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 #include "module_identity.h"
+#include "renderer_probe.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -21,6 +22,12 @@ HMODULE g_original = nullptr;
 HMODULE g_bridge = nullptr;
 FARPROC g_getBuildNumber = nullptr;
 FARPROC g_setMasterDatabase = nullptr;
+
+bool CommandLineContains(const wchar_t* option) noexcept {
+    const wchar_t* const commandLine = GetCommandLineW();
+    return commandLine != nullptr && option != nullptr &&
+        std::wcsstr(commandLine, option) != nullptr;
+}
 
 bool ModuleSiblingPath(
     const wchar_t* fileName,
@@ -192,6 +199,38 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     }
     const auto function = reinterpret_cast<Function>(g_setMasterDatabase);
     function(masterDatabase);
+
+    if (CommandLineContains(L"-condemnedvr-m3-probe")) {
+        condemnedvr::ProbeRendererInterfaces(
+            masterDatabase, AppendLoaderEvent);
+    }
+    if (CommandLineContains(L"-condemnedvr-m3-pass-through")) {
+        const bool stereoDiagnostic = CommandLineContains(
+            L"-condemnedvr-m3-stereo-diagnostic");
+        const bool doubleRenderDiagnostic = CommandLineContains(
+            L"-condemnedvr-m3-double-render-diagnostic");
+        const bool eyeOffsetDiagnostic = CommandLineContains(
+            L"-condemnedvr-m3-eye-offset-diagnostic");
+        const bool continuousStereoTuning = CommandLineContains(
+            L"-condemnedvr-m3-stereo-tuning");
+        HMODULE const diagnosticBridge =
+            stereoDiagnostic || doubleRenderDiagnostic ||
+                eyeOffsetDiagnostic || continuousStereoTuning
+            ? g_bridge
+            : nullptr;
+        condemnedvr::InstallRendererPassThroughProbe(
+            masterDatabase,
+            AppendLoaderEvent,
+            diagnosticBridge,
+            doubleRenderDiagnostic,
+            CommandLineContains(L"-condemnedvr-m3-camera-read-probe"),
+            eyeOffsetDiagnostic,
+            CommandLineContains(
+                L"-condemnedvr-m3-reverse-eye-offset-diagnostic"),
+            CommandLineContains(
+                L"-condemnedvr-m3-zero-eye-offset-diagnostic"),
+            continuousStereoTuning);
+    }
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {

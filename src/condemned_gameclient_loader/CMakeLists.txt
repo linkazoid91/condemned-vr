@@ -17,6 +17,8 @@ target_link_libraries(condemnedvr-module-identity PRIVATE
 add_library(condemnedvr-gameclient-loader SHARED
   GameClient.def
   dllmain.cpp
+  renderer_probe.cpp
+  renderer_probe.h
 )
 target_compile_definitions(condemnedvr-gameclient-loader PRIVATE
   WIN32_LEAN_AND_MEAN
@@ -24,6 +26,7 @@ target_compile_definitions(condemnedvr-gameclient-loader PRIVATE
 )
 target_link_libraries(condemnedvr-gameclient-loader PRIVATE
   condemnedvr-module-identity
+  fearvr-common
   fearvr-warnings
 )
 set_target_properties(condemnedvr-gameclient-loader PROPERTIES
