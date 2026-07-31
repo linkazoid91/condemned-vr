@@ -1,0 +1,5 @@
+LIBRARY GameClient
+EXPORTS
+    CondemnedVrGameClientCompatData @1 NONAME DATA
+    GetBuildNumber @2
+    SetMasterDatabase @3
