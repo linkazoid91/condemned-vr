@@ -202,13 +202,19 @@ CommandLineConfig ReadConfig() noexcept {
                        arguments[index],
                        L"-fearvr-no-capture") == 0) {
             config.disableCapture = true;
-        } else if (_wcsicmp(
-                       arguments[index],
-                       L"-fearvr-no-hid-fps-fix") == 0) {
+        } else if ((_wcsicmp(
+                        arguments[index],
+                        L"-fearvr-no-hid-fps-fix") == 0 ||
+                    _wcsicmp(
+                        arguments[index],
+                        L"-condemnedvr-no-hid-fps-fix") == 0)) {
             config.disableHidFpsFix = true;
-        } else if (_wcsicmp(
-                       arguments[index],
-                       L"-fearvr-no-xr-frame-pacing") == 0) {
+        } else if ((_wcsicmp(
+                        arguments[index],
+                        L"-fearvr-no-xr-frame-pacing") == 0 ||
+                    _wcsicmp(
+                        arguments[index],
+                        L"-condemnedvr-no-xr-frame-pacing") == 0)) {
             config.disableXrFramePacing = true;
         } else if (_wcsicmp(
                        arguments[index],
@@ -237,14 +243,39 @@ enum class HidFpsFixResult {
 };
 
 HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
+#if defined(CONDEMNEDVR_PRODUCT)
+    // Condemned 1.0.314.0. The caller independently verifies the complete
+    // executable hash; this path checks the PE identity and all three live
+    // instruction ranges again before touching executable memory.
+    constexpr DWORD kHidFpsExecutableTimestamp = 0x43FCFF00;
+#else
     // Steam F.E.A.R. 1.08, identified independently by the release installer
     // and verified here again before touching executable memory.
-    constexpr DWORD kFearSteam108Timestamp = 0x44EF6AE6;
+    constexpr DWORD kHidFpsExecutableTimestamp = 0x44EF6AE6;
+#endif
     struct Patch {
         std::uintptr_t rva;
         const std::uint8_t* expected;
         std::size_t size;
     };
+#if defined(CONDEMNEDVR_PRODUCT)
+    static constexpr std::uint8_t kHidControllerInit1[] = {
+        0x6A, 0x00, 0x6A, 0x00, 0xFF, 0x15, 0x8C, 0xA0, 0x54, 0x00,
+        0x50, 0x68, 0x50, 0xF5, 0x47, 0x00, 0x6A, 0x0D, 0xFF, 0x15,
+        0x94, 0xA3, 0x54, 0x00, 0xA3, 0xE4, 0xED, 0x56, 0x00};
+    static constexpr std::uint8_t kHidControllerInit2[] = {
+        0x8B, 0x3F, 0x8B, 0x0F, 0x6A, 0x01, 0x8D, 0x54, 0x24, 0x0C,
+        0x52, 0x68, 0x60, 0x16, 0x48, 0x00, 0x6A, 0x01, 0x57, 0xFF,
+        0x51, 0x10};
+    static constexpr std::uint8_t kLegacyJoystickInit[] = {
+        0x6A, 0x02, 0x57, 0x8B, 0xCE, 0xE8, 0x66, 0xFE, 0xFF, 0xFF,
+        0x8B, 0x44, 0x24, 0x14, 0x83, 0xC7, 0x10, 0x3B, 0xF8, 0x75,
+        0xEB, 0x8B, 0x7C, 0x24, 0x10};
+    static constexpr Patch kPatches[] = {
+        {0x82670, kHidControllerInit1, sizeof(kHidControllerInit1)},
+        {0x826F6, kHidControllerInit2, sizeof(kHidControllerInit2)},
+        {0x82780, kLegacyJoystickInit, sizeof(kLegacyJoystickInit)}};
+#else
     static constexpr std::uint8_t kHidControllerInit1[] = {
         0x6A, 0x00, 0x6A, 0x00, 0xFF, 0x15, 0x70, 0xC0, 0x54, 0x00,
         0x50, 0x68, 0xC0, 0x0C, 0x48, 0x00, 0x6A, 0x0D, 0xFF, 0x15,
@@ -261,6 +292,7 @@ HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
         {0x84057, kHidControllerInit1, sizeof(kHidControllerInit1)},
         {0x840DD, kHidControllerInit2, sizeof(kHidControllerInit2)},
         {0x84166, kLegacyJoystickInit, sizeof(kLegacyJoystickInit)}};
+#endif
 
     auto* const base = reinterpret_cast<std::uint8_t*>(
         GetModuleHandleW(nullptr));
@@ -275,7 +307,8 @@ HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
     const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
         base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE ||
-        nt->FileHeader.TimeDateStamp != kFearSteam108Timestamp) {
+        nt->FileHeader.TimeDateStamp != kHidFpsExecutableTimestamp ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
         return HidFpsFixResult::UnsupportedExecutable;
     }
 
@@ -296,9 +329,10 @@ HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
         return HidFpsFixResult::AlreadyApplied;
     }
 
-    constexpr std::uintptr_t kFirstRva = 0x84057;
+    constexpr std::uintptr_t kFirstRva = kPatches[0].rva;
     constexpr std::uintptr_t kLastRva =
-        0x84166 + sizeof(kLegacyJoystickInit);
+        kPatches[(sizeof(kPatches) / sizeof(kPatches[0])) - 1].rva +
+        kPatches[(sizeof(kPatches) / sizeof(kPatches[0])) - 1].size;
     DWORD oldProtection = 0;
     if (!VirtualProtect(
             base + kFirstRva, kLastRva - kFirstRva,
@@ -1114,8 +1148,14 @@ public:
         case HidFpsFixResult::Applied:
             logger_.Write(
                 "INFO", "hid_fps_fix_applied",
+#if defined(CONDEMNEDVR_PRODUCT)
+                "Verified Condemned 1.0.314.0 ranges 0x82670, 0x826F6 "
+                "and 0x82780 disabled redundant HID/joystick "
+                "initialization.");
+#else
                 "Verified Steam 1.08 ranges 0x84057, 0x840DD and "
                 "0x84166 disabled redundant HID/joystick initialization.");
+#endif
             break;
         case HidFpsFixResult::AlreadyApplied:
             logger_.Write(
@@ -1126,8 +1166,13 @@ public:
         case HidFpsFixResult::UnsupportedExecutable:
             logger_.Write(
                 "WARN", "hid_fps_fix_unsupported_executable",
+#if defined(CONDEMNEDVR_PRODUCT)
+                "Executable identity is not Condemned 1.0.314.0; no bytes "
+                "were changed.");
+#else
                 "Executable timestamp is not Steam F.E.A.R. 1.08; no bytes "
                 "were changed.");
+#endif
             break;
         case HidFpsFixResult::ByteMismatch:
             logger_.Write(

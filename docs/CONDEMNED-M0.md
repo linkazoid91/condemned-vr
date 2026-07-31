@@ -137,18 +137,18 @@ Initial classification of the five external behaviors:
 |---|---|
 | `FixAspectRatio` | Not required for native per-eye world projection; desktop widescreen is optional and deferred. |
 | `FixMenu` | Do not assume it is needed; preserve original UI proportions on the comfort panel first. |
-| `FixLowFramerate` | Must be investigated because sustained frame rate matters directly in VR. |
+| `FixLowFramerate` | Implemented in-repo as a byte-verified Jupiter EX HID correction; OpenXR-request pacing handles the separate stale-frame problem. See `CONDEMNED-PERFORMANCE.md`. |
 | `FixSavePath` | Prefer the repository-owned isolated `-userdirectory`; verify persistence there. |
 | `BorderlessWindowed` | Not required for headset presentation; keep only if later needed for a desktop mirror or reliable focus handling. |
 
-Menu behavior, save/load persistence, and the long-session low-frame-rate
-behavior remain unverified.
+Menu behavior and the HID-dependent low-frame-rate behavior are live verified.
+Save/load persistence and a longer release soak remain unverified.
 
 ## Remaining M0 gates
 
-- Compare the VR-relevant Widescreen Fix behaviors, especially
-  `FixLowFramerate` and `FixSavePath`, recording objective differences rather
-  than relying only on the INI descriptions.
+- Verify `FixSavePath` behavior against the repository-owned isolated user
+  directory. The VR-relevant `FixLowFramerate` behavior is now measured and
+  implemented in-repo.
 - Record window style, client/back-buffer dimensions, D3D9 adapter and device
   creation parameters, presentation parameters, active swap chain, `Present`,
   and `Reset`.

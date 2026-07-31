@@ -20,5 +20,6 @@ CondemnedVr_InstallD3D9Hooks() {
         return FALSE;
     }
 
+    fearvr::ApplyEngineFixes();
     return fearvr::InstallLateD3D9Hooks();
 }

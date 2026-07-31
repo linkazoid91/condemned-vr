@@ -31,6 +31,18 @@
     Enables bounded M4 Fire, Block, and Activate confirmation pulses.
     Requires -CoreActionsProbe or -InteractionProbe.
 
+.PARAMETER NoHidFpsFix
+    Diagnostic rollback that leaves Condemned's redundant Jupiter EX
+    HID/joystick initialization unmodified.
+
+.PARAMETER NoXrFramePacing
+    Diagnostic A/B rollback that allows multiple stereo renders to use the
+    same OpenXR request again.
+
+.PARAMETER PerformanceProbe
+    Opens a separate live telemetry window showing game/XR frame rates,
+    image age, reuse, per-eye/copy timing, and pipeline drops.
+
 .PARAMETER RecenterProbe
     Enables release-gated right-stick recentering for tracked gameplay and
     the existing flat headset panel. Requires -StereoTuning.
@@ -54,6 +66,9 @@ param(
     [switch]$InteractionProbe,
     [switch]$CoreActionsProbe,
     [switch]$HapticsProbe,
+    [switch]$NoHidFpsFix,
+    [switch]$NoXrFramePacing,
+    [switch]$PerformanceProbe,
     [switch]$RecenterProbe,
     [switch]$DesktopWindow,
     [ValidateRange(640, 3840)]
@@ -281,6 +296,12 @@ if ($CoreActionsProbe) {
 if ($HapticsProbe) {
     $gameArguments += '-condemnedvr-m4-haptics'
 }
+if ($NoHidFpsFix) {
+    $gameArguments += '-condemnedvr-no-hid-fps-fix'
+}
+if ($NoXrFramePacing) {
+    $gameArguments += '-condemnedvr-no-xr-frame-pacing'
+}
 if ($TurningProbe) {
     $gameArguments += '-condemnedvr-m4-turning'
 }
@@ -343,6 +364,15 @@ try {
         if ($proxyText.Contains('"event":"adapter_mismatch"')) {
             throw 'D3D9 and OpenXR selected different GPU adapters.'
         }
+        if (-not $NoHidFpsFix -and
+            ($proxyText.Contains(
+                 '"event":"hid_fps_fix_unsupported_executable"') -or
+             $proxyText.Contains(
+                 '"event":"hid_fps_fix_byte_mismatch"') -or
+             $proxyText.Contains(
+                 '"event":"hid_fps_fix_protect_failed"'))) {
+            throw 'The guarded Condemned HID/FPS fix was rejected.'
+        }
         if ($LocomotionProbe -and
             $loaderText.Contains(
                 '"event":"m4_binding_locomotion_rejected"')) {
@@ -393,6 +423,10 @@ try {
             $proxyText.Contains('"event":"adapter_match"') -and
             $proxyText.Contains('"event":"shared_resources"') -and
             $proxyText.Contains('"event":"frame_ready"')
+        $hidFpsFixReady = $NoHidFpsFix -or
+            $proxyText.Contains('"event":"hid_fps_fix_applied"') -or
+            $proxyText.Contains(
+                '"event":"hid_fps_fix_already_applied"')
         $hostReady =
             $hostText.Contains('"event":"ipc_connected"') -and
             $hostText.Contains('"event":"ipc_frame"') -and
@@ -426,10 +460,12 @@ try {
             $locomotionReady -and $turningReady -and $menuReady -and
             $interactionReady -and $coreActionsReady -and $hapticsReady -and
             $recenterReady
-    } until (($bridgeReady -and $hostReady -and $inputHooksReady) -or
+    } until (($bridgeReady -and $hostReady -and $hidFpsFixReady -and
+              $inputHooksReady) -or
         (Get-Date) -ge $deadline)
 
-    if (-not $bridgeReady -or -not $hostReady) {
+    if (-not $bridgeReady -or -not $hostReady -or
+        -not $hidFpsFixReady) {
         throw 'The mono OpenXR frame path did not become ready within 45 seconds.'
     }
     if (-not $inputHooksReady) {
@@ -473,6 +509,9 @@ try {
             Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true
+        HidFpsFixEnabled = -not [bool]$NoHidFpsFix
+        XrFramePacingEnabled = -not [bool]$NoXrFramePacing
+        PerformanceProbe = [bool]$PerformanceProbe
         OpenXrEnabled = $true
         StereoEnabled = $false
     }
@@ -487,6 +526,22 @@ try {
     Write-Host "Proxy log: $($proxyLog.FullName)"
     Write-Host "Report:    $reportPath"
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
+    if ($PerformanceProbe) {
+        $watcherScript = Join-Path $PSScriptRoot (
+            'watch-condemned-performance.ps1')
+        $watcherArguments = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', ('"{0}"' -f $watcherScript),
+            '-Run', ('"{0}"' -f $runLogDirectory),
+            '-GameProcessId', $game.Id.ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList $watcherArguments | Out-Null
+        Write-Host 'Live performance telemetry opened in a separate window.' `
+            -ForegroundColor Cyan
+    }
 } catch {
     if ($null -ne $game) {
         $game.Refresh()

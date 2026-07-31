@@ -15,6 +15,15 @@ CondemnedVr_GetRenderRequest(FearVrRenderRequest* request) {
     return fearvr::GetRenderRequest(request);
 }
 
+extern "C" __declspec(dllexport) BOOL __cdecl
+CondemnedVr_WaitForNewRenderRequest(
+    std::uint64_t previousFrameId,
+    std::uint32_t timeoutMilliseconds,
+    FearVrRenderRequest* request) {
+    return fearvr::WaitForNewRenderRequest(
+        previousFrameId, timeoutMilliseconds, request);
+}
+
 extern "C" __declspec(dllexport) void __cdecl
 CondemnedVr_BeginEye(std::uint32_t eye) {
     fearvr::BeginEye(eye);

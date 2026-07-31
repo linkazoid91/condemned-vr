@@ -246,11 +246,14 @@ damaging either the retail installation or any third-party files left there.
 
 ## Immediate next step
 
-The M4 controller path now has live-accepted locomotion, right-stick turning,
-Retail-state headset menus, right-squeeze Activate, right-stick recentering,
-the remaining Retail gameplay actions, and bounded confirmation haptics.
-Manual crouch is not a Condemned control and was removed after live evidence.
-Next, suppress mouse look only while focused VR tracking is active, make the
-player's aim follow HMD look, and drive the flashlight from that same head
-basis. Keep physical-Escape, desktop menu controls, and a full movie sequence
-in the release regression pass.
+The M4 controller path is live accepted. The repository-owned Jupiter EX
+HID/FPS correction and OpenXR-request pacing are also live accepted; see
+`CONDEMNED-PERFORMANCE.md`. The accepted pacing run held the game and VDXR
+near 90 fps with one-frame average image age and was reported substantially
+smoother during motion.
+
+The active M5 work suppresses mouse look only while focused VR tracking is
+fresh, makes the player's aim follow HMD look, and drives the flashlight from
+that same head basis. Complete its focused/unfocused and menu regression,
+then verify physical Escape, desktop menu controls, save/load persistence,
+and a full movie sequence before release packaging.

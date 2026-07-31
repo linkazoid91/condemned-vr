@@ -28,6 +28,8 @@ using RenderCameraOverrideFunction =
     unsigned long(__thiscall*)(void*, void*, const char*);
 using SubmitStereoDiagnosticFunction = BOOL(__cdecl*)();
 using GetRenderRequestFunction = BOOL(__cdecl*)(FearVrRenderRequest*);
+using WaitForNewRenderRequestFunction = BOOL(__cdecl*)(
+    std::uint64_t, std::uint32_t, FearVrRenderRequest*);
 using BeginEyeFunction = void(__cdecl*)(std::uint32_t);
 using ClearEyeFunction = BOOL(__cdecl*)(std::uint32_t);
 using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
@@ -93,6 +95,7 @@ SubmitStereoDiagnosticFunction g_submitStereoDiagnostic = nullptr;
 volatile LONG g_stereoDiagnosticState = 0;
 bool g_doubleRenderDiagnostic = false;
 GetRenderRequestFunction g_getRenderRequest = nullptr;
+WaitForNewRenderRequestFunction g_waitForNewRenderRequest = nullptr;
 BeginEyeFunction g_beginEye = nullptr;
 ClearEyeFunction g_clearEye = nullptr;
 CaptureEyeFunction g_captureEye = nullptr;
@@ -122,6 +125,7 @@ bool g_trackingRecenterValid = false;
 FearVrPose g_trackingRecenter{};
 RecenterLatch g_controllerRecenterLatch;
 volatile LONG g_continuousRenderActive = 0;
+std::uint64_t g_lastStereoRenderRequestId = 0;
 volatile LONG g_continuousStereoLogged = 0;
 volatile LONG g_cameraReadFailures = 0;
 std::uint64_t g_lastInputSampleId = 0;
@@ -403,6 +407,10 @@ void SampleCameraReadOnly(void* camera, LONG renderCount) noexcept {
 bool ResolveDoubleRenderDiagnosticExports(HMODULE bridge) noexcept {
     g_getRenderRequest = reinterpret_cast<GetRenderRequestFunction>(
         GetProcAddress(bridge, "CondemnedVr_GetRenderRequest"));
+    g_waitForNewRenderRequest =
+        reinterpret_cast<WaitForNewRenderRequestFunction>(
+            GetProcAddress(
+                bridge, "CondemnedVr_WaitForNewRenderRequest"));
     g_beginEye = reinterpret_cast<BeginEyeFunction>(
         GetProcAddress(bridge, "CondemnedVr_BeginEye"));
     g_clearEye = reinterpret_cast<ClearEyeFunction>(
@@ -421,7 +429,8 @@ bool ResolveDoubleRenderDiagnosticExports(HMODULE bridge) noexcept {
                 bridge, "CondemnedVr_SetFovScalePercent"));
     g_getInputState = reinterpret_cast<GetInputStateFunction>(
         GetProcAddress(bridge, "CondemnedVr_GetInputState"));
-    return g_getRenderRequest != nullptr && g_beginEye != nullptr &&
+    return g_getRenderRequest != nullptr &&
+        g_waitForNewRenderRequest != nullptr && g_beginEye != nullptr &&
         g_clearEye != nullptr && g_captureEye != nullptr &&
         g_endStereoDiagnosticFrame != nullptr &&
         g_endStereoFrame != nullptr &&
@@ -472,6 +481,19 @@ bool TryDoubleRenderDiagnostic(
         (request.flags & FEARVR_RF_VALID) == 0) {
         ReleaseStereoAttempt(true);
         return false;
+    }
+    if (g_continuousStereoTuning &&
+        request.frameId == g_lastStereoRenderRequestId) {
+        FearVrRenderRequest freshRequest{};
+        constexpr std::uint32_t kMaximumPacingWaitMilliseconds = 20;
+        if (g_waitForNewRenderRequest(
+                request.frameId,
+                kMaximumPacingWaitMilliseconds,
+                &freshRequest) &&
+            freshRequest.frameId != 0 &&
+            (freshRequest.flags & FEARVR_RF_VALID) != 0) {
+            request = freshRequest;
+        }
     }
     if (g_controllerRecenterRequested) {
         g_controllerRecenterRequested = false;
@@ -758,6 +780,8 @@ bool TryDoubleRenderDiagnostic(
         result = eyeResult[renderedEyes - 1];
         return !g_continuousStereoTuning;
     }
+
+    g_lastStereoRenderRequestId = request.frameId;
 
     if (g_continuousStereoTuning) {
         ReleaseStereoAttempt(false);
