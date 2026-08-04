@@ -27,6 +27,8 @@ add_executable(condemnedvr-host
   ../host64/main.cpp
   ../host64/openxr_host.cpp
   ../host64/openxr_host.h
+  ../host64/startup_image.cpp
+  ../host64/startup_image.h
   ../host64/xr_input.cpp
   ../host64/xr_input.h
   ../host64/texture_renderer.cpp
@@ -50,6 +52,8 @@ target_link_libraries(condemnedvr-host PRIVATE
   d3d11
   d3dcompiler
   dxgi
+  ole32
+  windowscodecs
 )
 set_target_properties(condemnedvr-host PROPERTIES
   OUTPUT_NAME "condemnedvr-host"

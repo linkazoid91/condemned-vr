@@ -58,6 +58,48 @@ control.
 M2 is accepted. M3 may now investigate Condemned-specific renderer interfaces
 and camera calls while retaining this mono transport as its fallback.
 
+## Startup panel anchor and desktop focus
+
+The OpenXR host is intentionally started and validated before Condemned. The
+original panel logic world-locked the quad on the host's first renderable
+frame, so the pose could be captured many seconds before a game image existed.
+If the headset moved during game startup, the eventual splash/main-menu image
+could consequently appear well above or beside the current view.
+
+The host now treats the first complete image from a connected game as the
+definitive startup anchor. On that frame it discards the pre-game pose and
+places the panel centre exactly two metres along the current binocular HMD
+gaze ray, while retaining the existing level, yaw-only panel orientation. A
+game reconnect receives the same one-time behavior. Stereo-to-menu transitions
+and explicit right-stick/F9 recentering retain their existing re-anchor paths.
+
+The launcher also restores Condemned's verified main window to the foreground
+when the handle first becomes available and once more as its final handoff.
+This prevents the launcher's PowerShell window or a diagnostics window from
+owning initial keyboard, mouse, and foreground-gated VR input. A refused
+Windows foreground request remains non-fatal and is reported explicitly. The
+anchor geometry, first-image edge, reconnect reset, and fail-closed inputs are
+covered by the cross-architecture `mono_panel_anchor` test.
+
+Before that first game frame, the launcher optionally supplies
+`images/title.png` (or an explicit `-StartupImage` path) to the host. Windows
+Imaging Component decodes PNG/JPEG data into an immutable sRGB D3D11 texture,
+which replaces the red/blue diagnostic eye colors and is drawn identically in
+both eyes. The real game image always has priority and replaces it without a
+transition. A missing or invalid optional image logs a warning and retains the
+diagnostic colors rather than blocking OpenXR startup. The artwork remains a
+local, user-supplied file unless its redistribution rights are established; it
+is not embedded into the project binary.
+
+This startup slice passed live on 4 August 2026 in run
+`run-20260804-093251`. The host recorded `startup_image_loaded` at the exact
+1448x1086 source size, `startup_image_displayed`, a first-game-image
+`mono_quad_startup_recenter_requested`, and the replacement
+`mono_quad_anchored` in the same frame. The launch report independently
+recorded `GameWindowFocusRestored: true`. The tester confirmed the title art,
+clean game-frame handoff, centred initial panel, and foreground focus all
+worked in-headset.
+
 ## OpenXR startup availability
 
 `XR_ERROR_FORM_FACTOR_UNAVAILABLE` is temporary by definition, so the shared

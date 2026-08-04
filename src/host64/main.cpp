@@ -39,6 +39,7 @@ void PrintUsage() {
     std::printf(
         "Usage: %s [options]\n"
         "  --log-dir <path>     Log directory (default: .\\logs)\n"
+        "  --startup-image <path>  Optional PNG/JPEG shown before the game\n"
         "  --max-frames <N>     Exit cleanly after N submitted XR frames\n"
         "  --ipc-session <ID>   M2 IPC ID (decimal or 0x hexadecimal)\n"
         "  --exit-on-game-disconnect  Exit after game heartbeat timeout\n"
@@ -114,6 +115,14 @@ int main(int argc, char** argv) {
                 return 2;
             }
             options.logDirectory = std::filesystem::u8path(argv[index]);
+            continue;
+        }
+        if (argument == "--startup-image") {
+            if (++index >= argc) {
+                std::fprintf(stderr, "--startup-image requires a path.\n");
+                return 2;
+            }
+            options.startupImage = std::filesystem::u8path(argv[index]);
             continue;
         }
         if (argument == "--max-frames") {

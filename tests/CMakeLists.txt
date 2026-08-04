@@ -31,6 +31,8 @@ add_condemnedvr_test(test_condemned_tool_menu
   test_condemned_tool_menu.cpp condemned_tool_menu)
 add_condemnedvr_test(test_condemned_menu_input
   test_condemned_menu_input.cpp condemned_menu_input)
+add_condemnedvr_test(test_mono_panel_anchor
+  test_mono_panel_anchor.cpp mono_panel_anchor)
 add_condemnedvr_test(test_loader_event_format
   test_loader_event_format.cpp loader_event_format)
 add_condemnedvr_test(test_condemned_background_render

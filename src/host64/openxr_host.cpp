@@ -32,7 +32,9 @@
 #include "fearvr-version.h"
 #include "head_tracking_math.h"
 #include "ipc_bridge.h"
+#include "mono_panel_anchor.h"
 #include "protocol_utils.h"
+#include "startup_image.h"
 #include "stereo_math.h"
 #include "texture_renderer.h"
 #include "xr_input.h"
@@ -672,6 +674,25 @@ private:
         logger_.Write("INFO", "d3d11_adapter", adapterMessage.str());
 
         textureRenderer_.Initialize(device_.Get());
+        if (!options_.startupImage.empty()) {
+            std::string error;
+            if (startupImage_.Load(
+                    device_.Get(), options_.startupImage, error)) {
+                std::ostringstream message;
+                message << "path=" << options_.startupImage.u8string()
+                        << " size=" << startupImage_.Width() << 'x'
+                        << startupImage_.Height()
+                        << " sampling=srgb";
+                logger_.Write(
+                    "INFO", "startup_image_loaded", message.str());
+            } else {
+                logger_.Write(
+                    "WARN", "startup_image_failed",
+                    "path=" + options_.startupImage.u8string() +
+                        " error=" + error +
+                        "; using the diagnostic eye colors.");
+            }
+        }
         if (options_.ipcSessionId != 0) {
             const LUID& luid = adapterDescription_.AdapterLuid;
             const std::uint64_t packedLuid =
@@ -1149,6 +1170,22 @@ private:
                     ipcBridge_->PublishRenderRequest(request);
                     ipcBridge_->ConsumeLatestPair();
                 }
+                const bool gameConnected =
+                    ipcBridge_ && ipcBridge_->GameConnected();
+                const bool completeGameImage = gameConnected &&
+                    ipcBridge_->HasImage(FEARVR_EYE_LEFT) &&
+                    ipcBridge_->HasImage(FEARVR_EYE_RIGHT);
+                if (ConsumeFirstGameImageAnchor(
+                        monoPanelStartupAnchor_,
+                        gameConnected,
+                        completeGameImage)) {
+                    monoQuadAnchored_ = false;
+                    logger_.Write(
+                        "INFO", "mono_quad_startup_recenter_requested",
+                        "The first complete game image will anchor the "
+                        "panel at the current HMD view; the pre-game host "
+                        "pose is discarded.");
+                }
                 const RenderPoseSample* imagePose = nullptr;
                 if (nativeStereo && ipcBridge_) {
                     const std::uint64_t imageFrameId =
@@ -1213,77 +1250,42 @@ private:
                 } else {
                     RenderEye(FEARVR_EYE_LEFT);
                     if (!monoQuadAnchored_) {
-                        TrackingQuaternion leftRotation{
-                            locatedViews_[FEARVR_EYE_LEFT]
-                                .pose.orientation.x,
-                            locatedViews_[FEARVR_EYE_LEFT]
-                                .pose.orientation.y,
-                            locatedViews_[FEARVR_EYE_LEFT]
-                                .pose.orientation.z,
-                            locatedViews_[FEARVR_EYE_LEFT]
-                                .pose.orientation.w};
-                        TrackingQuaternion rightRotation{
-                            locatedViews_[FEARVR_EYE_RIGHT]
-                                .pose.orientation.x,
-                            locatedViews_[FEARVR_EYE_RIGHT]
-                                .pose.orientation.y,
-                            locatedViews_[FEARVR_EYE_RIGHT]
-                                .pose.orientation.z,
-                            locatedViews_[FEARVR_EYE_RIGHT]
-                                .pose.orientation.w};
-                        leftRotation = Normalize(leftRotation);
-                        rightRotation = Normalize(rightRotation);
-                        if (Dot(leftRotation, rightRotation) < 0.0F) {
-                            rightRotation = {
-                                -rightRotation.x, -rightRotation.y,
-                                -rightRotation.z, -rightRotation.w};
+                        FearVrPose eyePose[FEARVR_EYE_COUNT]{};
+                        for (std::uint32_t eye = 0;
+                             eye < FEARVR_EYE_COUNT; ++eye) {
+                            const XrPosef& source =
+                                locatedViews_[eye].pose;
+                            eyePose[eye] = {
+                                source.position.x,
+                                source.position.y,
+                                source.position.z,
+                                source.orientation.x,
+                                source.orientation.y,
+                                source.orientation.z,
+                                source.orientation.w};
                         }
-                        const TrackingQuaternion centerRotation =
-                            Normalize({
-                                leftRotation.x + rightRotation.x,
-                                leftRotation.y + rightRotation.y,
-                                leftRotation.z + rightRotation.z,
-                                leftRotation.w + rightRotation.w});
-                        const TrackingVector forward = Rotate(
-                            centerRotation, {0.0F, 0.0F, -1.0F});
-                        FearVrPose centerPose{};
-                        centerPose.px =
-                            (locatedViews_[FEARVR_EYE_LEFT]
-                                 .pose.position.x +
-                             locatedViews_[FEARVR_EYE_RIGHT]
-                                 .pose.position.x) *
-                            0.5F;
-                        centerPose.py =
-                            (locatedViews_[FEARVR_EYE_LEFT]
-                                 .pose.position.y +
-                             locatedViews_[FEARVR_EYE_RIGHT]
-                                 .pose.position.y) *
-                            0.5F;
-                        centerPose.pz =
-                            (locatedViews_[FEARVR_EYE_LEFT]
-                                 .pose.position.z +
-                             locatedViews_[FEARVR_EYE_RIGHT]
-                                 .pose.position.z) *
-                            0.5F;
-                        centerPose.qx = centerRotation.x;
-                        centerPose.qy = centerRotation.y;
-                        centerPose.qz = centerRotation.z;
-                        centerPose.qw = centerRotation.w;
-                        const FearVrPose levelAnchor =
-                            YawOnlyRecenterPose(centerPose);
-                        monoQuadPose_ = {};
-                        monoQuadPose_.orientation = {
-                            levelAnchor.qx, levelAnchor.qy,
-                            levelAnchor.qz, levelAnchor.qw};
-                        monoQuadPose_.position = {
-                            centerPose.px + forward.x * 2.0F,
-                            centerPose.py + forward.y * 2.0F,
-                            centerPose.pz + forward.z * 2.0F};
-                        monoQuadAnchored_ = true;
-                        logger_.Write(
-                            "INFO", "mono_quad_anchored",
-                            "Menu panel centered at the current gaze point "
-                            "with a level, yaw-only orientation.");
+                        const MonoPanelAnchor anchor =
+                            ResolveMonoPanelAnchor(
+                                eyePose[FEARVR_EYE_LEFT],
+                                eyePose[FEARVR_EYE_RIGHT]);
+                        if (anchor.valid) {
+                            monoQuadPose_ = {};
+                            monoQuadPose_.orientation = {
+                                anchor.orientation.x,
+                                anchor.orientation.y,
+                                anchor.orientation.z,
+                                anchor.orientation.w};
+                            monoQuadPose_.position = {
+                                anchor.positionMeters.x,
+                                anchor.positionMeters.y,
+                                anchor.positionMeters.z};
+                            monoQuadAnchored_ = true;
+                            logger_.Write(
+                                "INFO", "mono_quad_anchored",
+                                "Menu panel centered at the current HMD "
+                                "gaze point with a level, yaw-only "
+                                "orientation.");
+                        }
                     }
                     quad.space = appSpace_;
                     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -1535,6 +1537,19 @@ private:
                 ipcBridge_->ImageView(eye),
                 static_cast<float>(swapchain.width),
                 static_cast<float>(swapchain.height));
+        } else if (startupImage_.Available()) {
+            textureRenderer_.Draw(
+                deviceContext_.Get(), renderTarget.Get(),
+                startupImage_.View(),
+                static_cast<float>(swapchain.width),
+                static_cast<float>(swapchain.height));
+            if (!startupImageDisplayed_) {
+                logger_.Write(
+                    "INFO", "startup_image_displayed",
+                    "The optional startup image replaces the diagnostic "
+                    "red/blue eye colors until the first game frame.");
+                startupImageDisplayed_ = true;
+            }
         } else {
             constexpr std::array<float, 4> leftColor{
                 0.90F, 0.03F, 0.03F, 1.0F};
@@ -1632,6 +1647,7 @@ private:
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> deviceContext_;
     TextureRenderer textureRenderer_;
+    StartupImage startupImage_;
     std::unique_ptr<IpcBridge> ipcBridge_;
     std::unique_ptr<XrInput> xrInput_;
     std::vector<XrViewConfigurationView> viewConfiguration_;
@@ -1672,8 +1688,10 @@ private:
     std::uint64_t requestFrameId_{0};
     std::uint32_t loggedFovScalePercent_{0};
     bool imagePoseMatchLogged_{false};
+    bool startupImageDisplayed_{false};
     bool monoQuadLogged_{false};
     bool monoQuadAnchored_{false};
+    MonoPanelStartupAnchorState monoPanelStartupAnchor_{};
     bool rightStickWasDown_{false};
     std::uint32_t panelRecenterGeneration_{0};
     XrPosef monoQuadPose_{{0.0F, 0.0F, 0.0F, 1.0F},

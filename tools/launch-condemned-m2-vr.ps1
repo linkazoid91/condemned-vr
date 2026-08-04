@@ -6,6 +6,10 @@
     Optional OpenXR runtime JSON applied only to the new host process. When
     omitted, the system-wide active x64 OpenXR runtime is used.
 
+.PARAMETER StartupImage
+    Optional PNG/JPEG displayed in both eyes until Condemned publishes its
+    first frame. When omitted, images\title.png is used if present.
+
 .PARAMETER ValidateOnly
     Validates the host/runtime/session/swapchains without launching Condemned.
 
@@ -106,6 +110,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeManifest,
+    [string]$StartupImage,
     [switch]$ValidateOnly,
     [switch]$RendererProbe,
     [switch]$RendererPassThrough,
@@ -148,6 +153,21 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\_condemnedvr-env.ps1"
 $cfg = Get-CondemnedVrConfig
+
+if ($PSBoundParameters.ContainsKey('StartupImage')) {
+    $StartupImage = [IO.Path]::GetFullPath($StartupImage.Trim('"'))
+    if (-not (Test-Path -LiteralPath $StartupImage -PathType Leaf)) {
+        throw "Startup image not found: $StartupImage"
+    }
+} else {
+    $defaultStartupImage = Assert-UnderCondemnedVrProjectRoot (
+        Join-Path $cfg.ProjectRoot 'images\title.png')
+    if (Test-Path -LiteralPath $defaultStartupImage -PathType Leaf) {
+        $StartupImage = $defaultStartupImage
+    } else {
+        $StartupImage = $null
+    }
+}
 
 if ($RecenterProbe -and -not $StereoTuning) {
     throw '-RecenterProbe requires -StereoTuning.'
@@ -209,6 +229,66 @@ function Read-LiveLog([string]$Path) {
         $stream.Dispose()
     }
 }
+
+if (-not ('CondemnedVrLauncherWindow' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CondemnedVrLauncherWindow {
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindowAsync(IntPtr window, int command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(
+        IntPtr window, out uint processId);
+
+    public static bool Focus(IntPtr window, uint expectedProcessId) {
+        if (window == IntPtr.Zero || expectedProcessId == 0) {
+            return false;
+        }
+        if (IsIconic(window)) {
+            ShowWindowAsync(window, 9); // SW_RESTORE
+        }
+        SetForegroundWindow(window);
+        uint foregroundProcessId;
+        GetWindowThreadProcessId(
+            GetForegroundWindow(), out foregroundProcessId);
+        return foregroundProcessId == expectedProcessId;
+    }
+}
+'@
+}
+
+function Set-CondemnedVrForegroundWindow(
+    [Diagnostics.Process]$Process) {
+    if ($null -eq $Process) {
+        return $false
+    }
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.MainWindowHandle -eq 0) {
+            return $false
+        }
+        return [CondemnedVrLauncherWindow]::Focus(
+            $Process.MainWindowHandle,
+            [uint32]$Process.Id)
+    } catch {
+        return $false
+    }
+}
 $deploymentPath = Assert-UnderCondemnedVrProjectRoot (
     Join-Path $cfg.ProjectRoot (
         'stage\condemned-m2-mono\m2-mono-deployment.json'))
@@ -263,6 +343,9 @@ $sessionId = $sessionId -bxor ([uint64]$PID -shl 32)
 if ($sessionId -eq 0) { $sessionId = 1 }
 $sessionText = '0x{0:X16}' -f $sessionId
 $hostArguments = @('--log-dir', "`"$runLogDirectory`"")
+if (-not [string]::IsNullOrWhiteSpace($StartupImage)) {
+    $hostArguments += @('--startup-image', "`"$StartupImage`"")
+}
 if ($ValidateOnly) {
     $hostArguments += '--validate-only'
 } else {
@@ -453,6 +536,8 @@ try {
         -ArgumentList $gameArguments `
         -WorkingDirectory $deployment.WorkingDirectory `
         -PassThru
+    $gameFocusAttempted = $false
+    $gameFocusRestored = $false
 
     $inspectorPowerShell = Join-Path $env:WINDIR (
         'SysWOW64\WindowsPowerShell\v1.0\powershell.exe')
@@ -471,6 +556,12 @@ try {
         }
         if ($hostProcess.HasExited) {
             throw "OpenXR host exited during transport verification (code $($hostProcess.ExitCode))."
+        }
+        if (-not $gameFocusAttempted -and
+            $game.MainWindowHandle -ne 0) {
+            $gameFocusAttempted = $true
+            $gameFocusRestored =
+                Set-CondemnedVrForegroundWindow $game
         }
         $inspectionJson = & $inspectorPowerShell -NoProfile `
             -ExecutionPolicy Bypass -File $inspectorScript -ProcessId $game.Id
@@ -703,6 +794,9 @@ try {
     if ($asiModules.Count -ne 0) {
         throw 'M2 mono unexpectedly loaded an ASI module.'
     }
+    $gameFocusRestored =
+        (Set-CondemnedVrForegroundWindow $game) -or
+        $gameFocusRestored
 
     $reportPath = Assert-UnderCondemnedVrProjectRoot (
         Join-Path $runLogDirectory 'm2-mono-live.json')
@@ -739,6 +833,8 @@ try {
         BackgroundRenderingEnabled = $backgroundRenderRequired
         XrFramePacingEnabled = -not [bool]$NoXrFramePacing
         PerformanceProbe = [bool]$PerformanceProbe
+        GameWindowFocusRestored = [bool]$gameFocusRestored
+        StartupImage = $StartupImage
         OpenXrEnabled = $true
         StereoEnabled = $false
     }
@@ -752,6 +848,9 @@ try {
     Write-Host "Host log:  $($hostLog.FullName)"
     Write-Host "Proxy log: $($proxyLog.FullName)"
     Write-Host "Report:    $reportPath"
+    if (-not [string]::IsNullOrWhiteSpace($StartupImage)) {
+        Write-Host "Startup:   $StartupImage"
+    }
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
     if ($MenuControlsProbe) {
         Write-Host 'VR menu controls: left stick = navigate; A/trigger = accept; B = back.' `
@@ -782,6 +881,9 @@ try {
             -ArgumentList $watcherArguments | Out-Null
         Write-Host 'Live performance telemetry opened in a separate window.' `
             -ForegroundColor Cyan
+    }
+    if (-not (Set-CondemnedVrForegroundWindow $game)) {
+        Write-Warning 'Condemned was ready, but Windows refused the foreground focus handoff.'
     }
 } catch {
     if ($null -ne $game) {
