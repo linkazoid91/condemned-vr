@@ -237,10 +237,13 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             CommandLineContains(
                 L"-condemnedvr-m5-weapon-grip-calibration"));
     }
-    if (CommandLineContains(L"-condemnedvr-m4-menu")) {
+    const bool menuControls = CommandLineContains(
+        L"-condemnedvr-m6-menu-controls");
+    if (CommandLineContains(L"-condemnedvr-m4-menu") ||
+        menuControls) {
         condemnedvr::InstallMenuToggleHook(
             masterDatabase, g_original, g_bridge,
-            AppendLoaderEvent);
+            AppendLoaderEvent, menuControls);
     }
     if (CommandLineContains(L"-condemnedvr-m3-probe")) {
         condemnedvr::ProbeRendererInterfaces(

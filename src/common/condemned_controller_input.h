@@ -56,6 +56,14 @@ inline bool CondemnedGameStateAllowsMenuToggle(int state) noexcept {
         state == kCondemnedGameStateMenu;
 }
 
+// Retail uses Menu for the in-game pause menu and Screen for its front-end
+// main/options menus. Its verified key callback handles both states. Loading,
+// movie, splash, demo, paused, and exiting states remain excluded.
+inline bool CondemnedGameStateAllowsMenuNavigation(int state) noexcept {
+    return state == kCondemnedGameStateMenu ||
+        state == kCondemnedGameStateScreen;
+}
+
 struct TurningValue {
     float value{0.0F};
     bool active{false};

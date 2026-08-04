@@ -64,12 +64,15 @@ bool InstallHeadAimHooks(
     bool weaponGripCalibration = false) noexcept;
 
 // Polls a release-gated left-secondary edge from the Retail client-shell
-// update and routes it through the game's own Escape key callbacks.
+// update and routes it through the game's own Escape key callbacks. The
+// optional menu-control overlay uses the same verified callbacks for arrow,
+// Enter, and Escape edges only while Retail reports its menu state.
 bool InstallMenuToggleHook(
     void* masterDatabase,
     HMODULE gameClientModule,
     HMODULE bridgeModule,
-    RendererProbeLogFunction log) noexcept;
+    RendererProbeLogFunction log,
+    bool menuControls = false) noexcept;
 
 // Snapshot consumed by the in-headset Debug and Melee tabs. Values are
 // copied under the physical-melee lock; the renderer never reads hook-owned

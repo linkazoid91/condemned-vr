@@ -26,6 +26,11 @@
     Enables the separately guarded M4 left-secondary pause-menu gate and
     routes verified non-gameplay states to the headset comfort panel.
 
+.PARAMETER MenuControlsProbe
+    Enables VR interaction with Retail menus: left stick navigates, A or the
+    right trigger accepts, and B goes back. Requires -MenuProbe. Keyboard and
+    mouse menu input remain available.
+
 .PARAMETER InteractionProbe
     Enables the separately guarded M4 right-grip Activate command gate.
 
@@ -114,6 +119,7 @@ param(
     [switch]$LocomotionProbe,
     [switch]$TurningProbe,
     [switch]$MenuProbe,
+    [switch]$MenuControlsProbe,
     [switch]$InteractionProbe,
     [switch]$CoreActionsProbe,
     [switch]$HapticsProbe,
@@ -145,6 +151,9 @@ $cfg = Get-CondemnedVrConfig
 
 if ($RecenterProbe -and -not $StereoTuning) {
     throw '-RecenterProbe requires -StereoTuning.'
+}
+if ($MenuControlsProbe -and -not $MenuProbe) {
+    throw '-MenuControlsProbe requires -MenuProbe.'
 }
 if ($HapticsProbe -and
     -not ($CoreActionsProbe -or $InteractionProbe)) {
@@ -419,6 +428,9 @@ if ($TurningProbe) {
 if ($MenuProbe) {
     $gameArguments += '-condemnedvr-m4-menu'
 }
+if ($MenuControlsProbe) {
+    $gameArguments += '-condemnedvr-m6-menu-controls'
+}
 if ($RecenterProbe) {
     $gameArguments += '-condemnedvr-m4-recenter'
 }
@@ -654,8 +666,12 @@ try {
                  '"event":"m4_menu_update_hook_called"') -and
              $loaderText.Contains(
                  '"event":"m4_menu_render_state"'))
+        $menuControlsReady = -not $MenuControlsProbe -or
+            $loaderText.Contains(
+                '"event":"m6_menu_controls_armed"')
         $inputHooksReady =
             $locomotionReady -and $turningReady -and $menuReady -and
+            $menuControlsReady -and
             $interactionReady -and $coreActionsReady -and $hapticsReady -and
             $headAimReady -and $aimPathReady -and $meleeAimReady -and
             $physicalMeleeReady -and $physicalMeleeWallProxyReady -and
@@ -671,7 +687,7 @@ try {
         throw 'The mono OpenXR frame path did not become ready within 45 seconds.'
     }
     if (-not $inputHooksReady) {
-        throw 'A requested guarded M4 input hook did not arm within 45 seconds.'
+        throw 'A requested guarded controller input hook did not arm within 45 seconds.'
     }
     $loadedBridge = $modules | Where-Object {
         $_.Name -ieq 'condemnedvr-d3d9.dll'
@@ -705,6 +721,7 @@ try {
             Locomotion = [bool]$LocomotionProbe
             Turning = [bool]$TurningProbe
             Menu = [bool]$MenuProbe
+            MenuControls = [bool]$MenuControlsProbe
             Interaction = [bool]$InteractionProbe
             CoreActions = [bool]$CoreActionsProbe
             Haptics = [bool]$HapticsProbe
@@ -736,6 +753,10 @@ try {
     Write-Host "Proxy log: $($proxyLog.FullName)"
     Write-Host "Report:    $reportPath"
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
+    if ($MenuControlsProbe) {
+        Write-Host 'VR menu controls: left stick = navigate; A/trigger = accept; B = back.' `
+            -ForegroundColor Cyan
+    }
     if ($WeaponGripCalibration) {
         Write-Host 'Live weapon-grip calibration is active:' `
             -ForegroundColor Cyan

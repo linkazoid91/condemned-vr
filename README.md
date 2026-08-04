@@ -89,7 +89,7 @@ Then launch the tested feature set:
 ```powershell
 .\tools\launch-condemned-m2-vr.ps1 `
   -StereoTuning -RenderScale 100 `
-  -LocomotionProbe -TurningProbe -MenuProbe `
+  -LocomotionProbe -TurningProbe -MenuProbe -MenuControlsProbe `
   -InteractionProbe -CoreActionsProbe -HapticsProbe `
   -HeadAimProbe -RecenterProbe -DesktopWindow
 ```

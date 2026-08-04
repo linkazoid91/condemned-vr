@@ -170,6 +170,40 @@ not a controller-side guessed toggle. Repeating those paths and a full movie
 sequence remains release regression coverage rather than a blocker for this
 bounded M4 slice.
 
+### VR interaction with Retail menus
+
+`-MenuControlsProbe` extends the verified client-shell key-callback path so
+Retail menus can be operated without reaching for the desktop mouse or
+keyboard. It requires `-MenuProbe` and maps only these controls:
+
+| VR control | Native Retail menu edge |
+|---|---|
+| Left stick | Up, Down, Left, or Right arrow |
+| Right primary (A) or right trigger | Enter / accept |
+| Right secondary (B) | Escape / back |
+
+The stick emits one immediate direction, waits 350 ms, then repeats every
+110 ms while held. A dominant-axis rule prevents diagonal input from emitting
+two actions. Entering a menu, regaining focus, reacquiring tracking, or losing
+either controller requires every mapped control to return to neutral before
+input is accepted again. At most one menu action is dispatched per client
+update.
+
+Navigation is allowed only while the verified `CInterfaceMgr` state is menu
+(5) or screen (6). Live telemetry identifies state 5 as the gameplay pause
+menu and state 6 as the front-end/main and options screens; Retail's verified
+key callback explicitly handles both. Navigation therefore cannot activate
+during gameplay, loading, movies, splash/demo sequences, paused, exiting, or
+undefined states. The implementation calls Retail's own
+`IClientShell.Default.v4` key callbacks and does not use `SendInput`, write the
+command database, move the system cursor, or replace existing keyboard/mouse
+handling. The extension passed live headset acceptance on 4 August 2026. In
+run `run-20260804-091054`, the tester confirmed navigation and selection in
+the pause menu while the loader recorded native key edges in menu state 5.
+Run `run-20260804-091433` then confirmed the same controls throughout the
+front-end/main menu in screen state 6. The separate launcher gate remains for
+diagnostic rollback.
+
 ## Interaction and recenter gate
 
 `-InteractionProbe` maps the right squeeze to Condemned's verified Activate

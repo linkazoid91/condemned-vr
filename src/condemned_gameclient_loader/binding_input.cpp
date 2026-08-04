@@ -17,8 +17,9 @@
 
 #include "binding_input.h"
 #include "condemned_controller_input.h"
-#include "condemned_physical_melee.h"
 #include "condemned_locomotion.h"
+#include "condemned_menu_input.h"
+#include "condemned_physical_melee.h"
 #include "head_tracking_math.h"
 #include "protocol.h"
 
@@ -255,6 +256,7 @@ volatile LONG g_menuUpdateObserved = 0;
 volatile LONG g_lastPublishedRetailGameState =
     kUnpublishedRetailGameState;
 volatile LONG g_menuRenderPublishFailed = 0;
+volatile LONG g_menuControlsEnabled = 0;
 std::uint64_t g_lastSampleId = 0;
 ULONGLONG g_lastSampleTick = 0;
 std::uint32_t g_lastDirectionMask = 0;
@@ -302,6 +304,7 @@ volatile LONG g_physicalMeleeContactAccepted = 0;
 volatile LONG g_physicalMeleeContactRearmed = 0;
 unsigned char* g_gameClientBase = nullptr;
 MenuToggleLatch g_menuToggleLatch;
+MenuNavigationState g_menuNavigationState;
 
 int ReadRetailGameState(void* interfaceManager) noexcept;
 
@@ -1998,7 +2001,7 @@ int PublishMenuRenderState() noexcept {
     return state;
 }
 
-void PollMenuToggle(
+bool PollMenuToggle(
     void* clientShell,
     int retailGameState) noexcept {
     FearVrInputState input{};
@@ -2009,7 +2012,7 @@ void PollMenuToggle(
     if (!ConsumeMenuTogglePress(
             g_menuToggleLatch, input,
             usable && !calibrationCaptured)) {
-        return;
+        return false;
     }
 
     __try {
@@ -2029,6 +2032,89 @@ void PollMenuToggle(
                 "IClientShell_v4_escape_callback_exception");
         }
     }
+    return true;
+}
+
+int MenuNavigationVirtualKey(
+    MenuNavigationAction action) noexcept {
+    switch (action) {
+    case MenuNavigationAction::up:
+        return VK_UP;
+    case MenuNavigationAction::down:
+        return VK_DOWN;
+    case MenuNavigationAction::left:
+        return VK_LEFT;
+    case MenuNavigationAction::right:
+        return VK_RIGHT;
+    case MenuNavigationAction::accept:
+        return VK_RETURN;
+    case MenuNavigationAction::back:
+        return VK_ESCAPE;
+    default:
+        return 0;
+    }
+}
+
+const char* MenuNavigationControlName(
+    MenuNavigationAction action) noexcept {
+    switch (action) {
+    case MenuNavigationAction::up:
+    case MenuNavigationAction::down:
+    case MenuNavigationAction::left:
+    case MenuNavigationAction::right:
+        return "left_stick";
+    case MenuNavigationAction::accept:
+        return "right_primary_or_trigger";
+    case MenuNavigationAction::back:
+        return "right_secondary";
+    default:
+        return "none";
+    }
+}
+
+void PollMenuNavigation(
+    void* clientShell,
+    int retailGameState) noexcept {
+    FearVrInputState input{};
+    const bool usable = ReadUsableControllerInput(input);
+    const bool calibrationCaptured =
+        WeaponGripCalibrationCapturesInput(input, usable);
+    const MenuNavigationAction action = UpdateMenuNavigation(
+        g_menuNavigationState,
+        input,
+        usable && !calibrationCaptured,
+        CondemnedGameStateAllowsMenuNavigation(retailGameState),
+        GetTickCount64());
+    const int virtualKey = MenuNavigationVirtualKey(action);
+    if (virtualKey == 0) {
+        return;
+    }
+
+    bool dispatched = false;
+    __try {
+        g_clientShellKeyDown(clientShell, virtualKey, 1);
+        g_clientShellKeyUp(clientShell, virtualKey);
+        dispatched = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        dispatched = false;
+    }
+    if (g_log == nullptr) {
+        return;
+    }
+
+    char detail[256]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s key=0x%02X control=%s game_state=%d "
+        "path=IClientShell_v4_key_edge direct_command_writes=0 "
+        "system_input=0",
+        MenuNavigationActionName(action), virtualKey,
+        MenuNavigationControlName(action), retailGameState);
+    g_log(
+        dispatched
+            ? "m6_menu_control_dispatched"
+            : "m6_menu_control_failed",
+        detail);
 }
 
 void __fastcall HookClientShellUpdate(
@@ -2047,7 +2133,12 @@ void __fastcall HookClientShellUpdate(
                 "poll_before_retail=1 render_state_pre_post=1");
         }
         const int stateBeforeInput = PublishMenuRenderState();
-        PollMenuToggle(clientShell, stateBeforeInput);
+        if (PollMenuToggle(clientShell, stateBeforeInput)) {
+            RequireMenuNavigationRelease(g_menuNavigationState);
+        } else if (InterlockedCompareExchange(
+                       &g_menuControlsEnabled, 0, 0) != 0) {
+            PollMenuNavigation(clientShell, stateBeforeInput);
+        }
         PublishMenuRenderState();
     }
     g_originalClientShellUpdate(clientShell);
@@ -3041,9 +3132,13 @@ bool InstallMenuToggleHook(
     void* masterDatabase,
     HMODULE gameClientModule,
     HMODULE bridgeModule,
-    RendererProbeLogFunction log) noexcept {
+    RendererProbeLogFunction log,
+    bool menuControls) noexcept {
     AcquireSRWLockExclusive(&g_bindingLock);
     if (g_menuHookTarget != nullptr) {
+        InterlockedExchange(
+            &g_menuControlsEnabled, menuControls ? 1 : 0);
+        RequireMenuNavigationRelease(g_menuNavigationState);
         ReleaseSRWLockExclusive(&g_bindingLock);
         return true;
     }
@@ -3110,6 +3205,9 @@ bool InstallMenuToggleHook(
     g_clientShellKeyUp = keyUp;
     g_clientShellKeyDown = keyDown;
     g_menuToggleLatch = {};
+    g_menuNavigationState = {};
+    InterlockedExchange(
+        &g_menuControlsEnabled, menuControls ? 1 : 0);
     InterlockedExchange(&g_menuUpdateObserved, 0);
     InterlockedExchange(
         &g_lastPublishedRetailGameState,
@@ -3130,6 +3228,7 @@ bool InstallMenuToggleHook(
         g_setMenuActive = nullptr;
         g_interfaceManager = nullptr;
         g_clientShell = nullptr;
+        InterlockedExchange(&g_menuControlsEnabled, 0);
         return false;
     }
 
@@ -3144,6 +3243,16 @@ bool InstallMenuToggleHook(
         "state_source=CInterfaceMgr+0x08 flat_panel_nonplaying=1 "
         "escape_states=playing,menu "
         "direct_command_writes=0 system_input=0");
+    if (menuControls) {
+        log(
+            "m6_menu_controls_armed",
+            "states=menu,screen left_stick=arrow_keys "
+            "right_primary_or_trigger=enter right_secondary=escape "
+            "initial_repeat_ms=350 repeat_ms=110 "
+            "neutral_on_entry=1 both_hands_required=1 "
+            "path=IClientShell_v4_key_edges mouse_keyboard_unchanged=1 "
+            "direct_command_writes=0 system_input=0");
+    }
     PublishMenuRenderState();
     return true;
 }
