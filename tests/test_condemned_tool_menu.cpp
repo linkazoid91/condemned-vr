@@ -32,11 +32,13 @@ bool FitsCompleteMenuOverlay(
     AddToolMenuText(
         overlay, -0.79F, 0.70F, 0.0054F, 0.0090F,
         "CONDEMNED VR TOOLS", 0xFF76DBF4U);
+    const float tabWidth = 1.60F /
+        static_cast<float>(ToolMenuTab::Count);
     for (std::uint32_t index = 0;
          index < static_cast<std::uint32_t>(ToolMenuTab::Count);
          ++index) {
         AddToolMenuText(
-            overlay, -0.80F + static_cast<float>(index) * 0.265F,
+            overlay, -0.80F + static_cast<float>(index) * tabWidth,
             0.535F, 0.00375F, 0.0064F,
             ToolMenuTabName(static_cast<ToolMenuTab>(index)),
             0xFFFFFFFFU);
@@ -76,6 +78,66 @@ int main() {
             ToolMenuTabName(ToolMenuTab::TwoHand),
             "2-HAND") != 0) {
         return Fail("two-hand setup must have a dedicated bounded menu tab");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::HandIk) != 9U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::HandIk),
+            "HAND IK") != 0) {
+        return Fail(
+            "right-hand alignment must have a dedicated bounded menu tab");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::ElbowIk) != 6U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::ElbowIk),
+            "ELBOW") != 0) {
+        return Fail(
+            "elbow pole tuning must have a dedicated bounded menu tab");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::LeftHandIk) != 8U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::LeftHandIk),
+            "LEFT IK") != 0) {
+        return Fail(
+            "left-hand alignment must have a dedicated bounded menu tab");
+    }
+    fearvr::ArmIkTuning leftTuning{};
+    leftTuning.leftHandRightMeters = 0.01F;
+    leftTuning.leftHandUpMeters = 0.02F;
+    leftTuning.leftHandForwardMeters = -0.03F;
+    leftTuning.leftHandYawDegrees = 90.0F;
+    const PhysicalMeleeRigidTransform leftTarget =
+        ResolveToolMenuLeftHandIkTarget(
+            {{10.0F, 20.0F, 30.0F},
+             {0.0F, 0.0F, 0.0F, 1.0F}},
+            leftTuning, 100.0F);
+    if (!PhysicalMeleeRigidTransformIsValid(leftTarget) ||
+        !Near(leftTarget.positionUnits.x, 11.0F) ||
+        !Near(leftTarget.positionUnits.y, 22.0F) ||
+        !Near(leftTarget.positionUnits.z, 27.0F) ||
+        PhysicalMeleeRigidTransformIsValid(
+            ResolveToolMenuLeftHandIkTarget(
+                {{10.0F, 20.0F, 30.0F},
+                 {0.0F, 0.0F, 0.0F, 1.0F}},
+                leftTuning, 0.0F))) {
+        return Fail(
+            "left-hand correction must remain controller-local and bounded");
+    }
+    if (ClassifyRetailWeaponAnimationProperty(
+            "WEAP_1HandedDebris") !=
+            RetailWeaponPoseFamily::OneHandedDebris ||
+        ClassifyRetailWeaponAnimationProperty(
+            "weap_2handeddebris") !=
+            RetailWeaponPoseFamily::TwoHandedDebris ||
+        ClassifyRetailWeaponAnimationProperty("WEAP_FireAxe") !=
+            RetailWeaponPoseFamily::WeaponSpecific ||
+        ClassifyRetailWeaponAnimationProperty(nullptr) !=
+            RetailWeaponPoseFamily::Unknown ||
+        std::strcmp(
+            RetailWeaponPoseFamilyLabel(
+                RetailWeaponPoseFamily::OneHandedDebris),
+            "1-HANDED DEBRIS") != 0) {
+        return Fail(
+            "Retail animation properties must retain their diagnostic pose family");
     }
 
     ToolMenuState state{};
@@ -122,6 +184,27 @@ int main() {
         !Near(settings.swingTriggerSpeedMetersPerSecond, 3.0F)) {
         return Fail("tool-menu melee defaults must be safe and valid");
     }
+    ToolMenuRightHandIkSettings handIk{};
+    handIk.positionOffsetUnits = {1.0F, 2.0F, 3.0F};
+    handIk.rotationOffsetDegrees = {0.0F, 90.0F, 0.0F};
+    const PhysicalMeleeRigidTransform adjustedHandTarget =
+        ResolveToolMenuRightHandIkTarget(
+            {{10.0F, 20.0F, 30.0F},
+             {0.0F, 0.0F, 0.0F, 1.0F}},
+            handIk);
+    if (!ToolMenuRightHandIkSettingsAreValid(handIk) ||
+        !Near(adjustedHandTarget.positionUnits.x, 11.0F) ||
+        !Near(adjustedHandTarget.positionUnits.y, 22.0F) ||
+        !Near(adjustedHandTarget.positionUnits.z, 33.0F) ||
+        !Near(std::fabs(adjustedHandTarget.rotation.y), 0.707107F) ||
+        !Near(std::fabs(adjustedHandTarget.rotation.w), 0.707107F)) {
+        return Fail(
+            "right-hand IK settings must resolve in weapon-local space");
+    }
+    handIk.positionOffsetUnits.x = 100.01F;
+    if (ToolMenuRightHandIkSettingsAreValid(handIk)) {
+        return Fail("out-of-range right-hand IK offsets must fail closed");
+    }
     PhysicalMeleeProfile axe =
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(
             kCondemnedFireAxeWeaponIndex);
@@ -133,6 +216,32 @@ int main() {
         !Near(axe.massKilograms, 6.0F) ||
         !Near(axe.handlingWeight, 3.5F)) {
         return Fail("live menu settings must update the axe profile");
+    }
+    const PhysicalMeleeProfile pipe =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            kCondemnedPipeLeverWeaponIndex);
+    if (pipe.id != PhysicalMeleeProfileId::Pipe ||
+        !ToolMenuProfileSupportsSwingAttack(pipe.id) ||
+        !ToolMenuMeleeSettingsFromProfile(pipe).swingAttackEnabled ||
+        std::strcmp(
+            ToolMenuWeaponProfileLabel(pipe.id), "PIPE") != 0) {
+        return Fail(
+            "pipe_lever must expose its independent one-hand tool profile");
+    }
+    const PhysicalMeleeProfile plank =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            kCondemned2x4WeaponIndices.front());
+    if (plank.id != PhysicalMeleeProfileId::Plank ||
+        !ToolMenuProfileSupportsSwingAttack(plank.id) ||
+        !ToolMenuMeleeSettingsFromProfile(plank).swingAttackEnabled ||
+        std::strcmp(
+            ToolMenuWeaponProfileLabel(plank.id), "PLANK") != 0 ||
+        !Near(
+            plank.modelLocalGripPositionUnits.y,
+            pipe.modelLocalGripPositionUnits.y) ||
+        !Near(plank.handlingWeight, pipe.handlingWeight)) {
+        return Fail(
+            "the verified 2x4 family must expose the shared pipe preset as PLANK");
     }
     PhysicalMeleeProfile fallback{};
     ApplyToolMenuMeleeSettings(settings, fallback);
@@ -168,6 +277,7 @@ int main() {
             "each Retail weapon index must receive isolated profile defaults");
     }
     axeSlot->settings.swingTriggerSpeedMetersPerSecond = 5.25F;
+    axeSlot->rightHandIkSettings.positionOffsetUnits.x = 2.5F;
     genericSlot->settings.massKilograms = 2.75F;
     axeSlot = ResolveToolMenuWeaponSettingsSlot(
         registry, kCondemnedFireAxeWeaponIndex, catalogAxe);
@@ -176,7 +286,9 @@ int main() {
     if (axeSlot == nullptr || genericSlot == nullptr ||
         !Near(axeSlot->settings.swingTriggerSpeedMetersPerSecond, 5.25F) ||
         !Near(axeSlot->settings.massKilograms, 4.5F) ||
+        !Near(axeSlot->rightHandIkSettings.positionOffsetUnits.x, 2.5F) ||
         !Near(genericSlot->settings.massKilograms, 2.75F) ||
+        !Near(genericSlot->rightHandIkSettings.positionOffsetUnits.x, 0.0F) ||
         std::strcmp(
             ToolMenuWeaponProfileLabel(axeSlot->profileId),
             "FIRE AXE") != 0) {

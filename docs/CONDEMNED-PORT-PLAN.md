@@ -298,6 +298,25 @@ preserving raw controller pose for the calibration gizmo. This remains a
 stepping stone to the collision-constrained standalone body required by the
 final physical-combat design.
 
+The equipped-weapon path now resolves Retail's own database name and
+`AnimationProperty` through the verified player-weapon list. Runtime evidence
+identifies index 32 as `pipe_lever` using `WEAP_1HandedDebris`. It now owns a
+provisional one-hand pipe record with separate model calibration, modest
+one-hand inertia, and the bounded swing-to-Retail-attack adapter. It shares the
+axe's 10/8 virtual-coupling stiffness family but uses lower hand inertia and
+higher damping, so it remains quicker while its inertia control has an obvious
+range. Impact mass remains a separate contact-energy parameter. This is the
+control case for deciding which one-hand values can be reused by related
+2x4/plank variants and split later if live model evidence requires it.
+
+The verified player-weapon catalog identifies the complete one-handed 2x4
+family as indices 0 (`2x4`), 1 (`2x4_nails`), 64 (`2x4_burn`), and 65
+(`2x4_Burned`). For the initial control pass these records intentionally copy
+the accepted pipe grip plus its handling and swing defaults. Editable
+Melee/Weapon values are now persisted by stable Retail index under
+`%LOCALAPPDATA%\\CondemnedVR`, including the swing ON/OFF state; the stored
+profile identity prevents an old setting from crossing into a later remap.
+
 As a temporary play-test bridge, a deliberate tracking-space fire-axe sweep at
 3.00 m/s now emits one 100 ms Retail attack-command pulse. Measuring before
 Retail's camera transform prevents locomotion and turning from counting as a

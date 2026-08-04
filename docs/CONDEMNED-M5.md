@@ -104,11 +104,17 @@ gate. Native impact dispatch remains blocked throughout this diagnostic.
 Weapon-specific behavior is data, not another hook. `PhysicalMeleeProfile`
 owns the local base/tip geometry, model-local primary grip, optional support
 grip offset and grab volume, radius, world scale, mass, impact thresholds,
-maximum sweep, contact separation, and sample bounds. The current generic
-one-handed pipe profile is the fallback until a stable Retail model/weapon
-identity lookup is verified. Pipe, crowbar, fire axe, plank, and later
-two-handed profiles will select different records while sharing the same pose,
-visual calibration, collision, qualification, damage, and haptic adapters.
+maximum sweep, contact separation, and sample bounds. A read-only Retail
+database lookup now publishes the equipped record name and `AnimationProperty`
+to the tool menu and loader log. `pipe_lever` is verified as player-weapon
+index 32 with `WEAP_1HandedDebris`; it owns the first provisional one-hand pipe
+record. The Retail catalog probe also verifies the one-handed 2x4 family as
+indices 0 (`2x4`), 1 (`2x4_nails`), 64 (`2x4_burn`), and 65 (`2x4_Burned`),
+all using `WEAP_1HandedDebris`. Those four records deliberately share the
+accepted pipe grip, handling, and swing defaults for their first control pass.
+Crowbar, fire axe, and later weapons continue to share the pose, visual
+calibration, collision, qualification, damage, and haptic adapters without
+being forced into that preset.
 
 ## Live weapon-grip calibration
 
@@ -158,8 +164,8 @@ permanent profile data.
 Add `-TwoHandedMelee` to a launch that already enables
 `-PhysicalMeleeVisualProxy`. For setup, also add
 `-WeaponGripCalibration`. This is the first reusable support-grip layer; the
-fire axe is the first profile to opt in, while unmapped and one-handed weapons
-continue through the unchanged one-hand path.
+fire axe is the first profile to opt in. The mapped `pipe_lever` and unmapped
+one-handed weapons continue through the independent one-hand path.
 
 ```powershell
 .\tools\launch-condemned-m2-vr.ps1 `
@@ -229,6 +235,165 @@ standalone physical item. The current solver is structured as profile data and
 a shared select/pose layer so that work carries forward rather than becoming
 an axe-only visual exception.
 
+## Arm IK handoff and discovery
+
+The engine-independent two-bone solver from `DR-89/fear-vr` commit
+`4bcd610d904478a310b0dfc39a612b576115027a` is now present in
+`src/common/arm_ik.h`. Its original clamped-reach, mirrored-pole, invalid-input,
+and elbow-continuity tests run on both x86 and x64. This imports only the
+portable geometry; no F.E.A.R. skeleton names or engine addresses are treated
+as Condemned facts.
+
+Condemned's first read-only discovery gate is enabled with
+`-ArmIkDiscovery` on `launch-condemned-m2-vr.ps1`. It requires
+`-StereoTuning`, then samples the verified render path until the live player
+body exists. Before invoking any model query it verifies all of the following:
+
+- the Retail `CPlayerBodyMgr::Instance` signature and encoded return address
+  at `GameOrig+0x2EA0`, without invoking the singleton;
+- its expected manager object at `GameOrig+0x167A50` and player-body field at
+  offset `0x10`;
+- the registered `ILTModelClient.Default` version 0 object;
+- equality with Retail's own `g_pModelLT` global once Retail initializes it;
+  discovery remains armed but makes no model calls while that global is null;
+  and
+- executable targets for every model-interface slot used by the dump.
+
+On success the loader emits `arm_ik_discovery_player_body`, node, and socket
+records followed by `arm_ik_discovery_complete`. Node records
+include pre-order index, handle, parent, and name. To avoid forcing a full
+animation reevaluation for every bone in one render frame, world transforms
+are sampled only for arm-relevant node names; socket transforms are sampled
+for every resolved candidate. The model API has no general socket enumerator,
+so the first pass probes known
+player/weapon candidates including `RightHand` and `LeftHand`; further names
+can be added after the node dump. Retail's node and socket slots match the
+public `ILTModel` header. The overloaded piece methods are ordered differently,
+and the later filename/material slots also do not match this executable despite
+the unchanged interface version. Discovery therefore excludes those
+unnecessary calls instead of guessing at their ABI. Any caught query fault
+records its exact read phase. The pass is observation-only: it does
+not add node controls, hide pieces, replace materials, or alter animation.
+
+The live Retail capture completed with 75 nodes and established these exact
+chains:
+
+| Side | Shoulder | Upper arm | Forearm | Hand | Socket |
+|---|---|---|---|---|---|
+| Left | `Left_shoulder` | `Left_armu` | `Left_arml` | `Left_hand` | `LeftHand` |
+| Right | `Right_shoulder` | `Right_armu` | `Right_arml` | `Right_hand` | `RightHand` |
+
+The sampled right upper-arm segment was approximately 29 engine units and the
+right forearm-to-socket segment approximately 36 units. Both hand sockets and
+all eight arm transforms resolved without a fault.
+
+## Right-hand socket proof
+
+`-ArmIkRightHandProof` is the first opt-in mutation gate. It requires
+`-StereoTuning` and `-HeadAimProbe`, installs one callback on `Right_hand`, and
+solves the authored `RightHand` socket exactly onto the same fresh, weighted
+VR weapon pose already shared by the visible model and collision path. It does
+not yet rotate `Right_armu` or `Right_arml`; an expected disconnected-looking
+arm is therefore useful evidence during this isolated socket/alignment test.
+
+Before registering the callback, the gate repeats the singleton and model
+interface checks above and additionally requires exact Condemned.exe
+1.0.314.0 vtable targets for `GetNode`, `GetSocket`, their world-transform
+queries, and the node-specific control registration/removal methods. Retail
+orders the overloaded methods differently from the public header: the
+node-specific `AddNodeControlFn` and `RemoveNodeControlFn` methods are slots 22
+and 24. The gate rejects any other layout.
+
+The cached transform is `inverse(handNodeWorld) * handSocketWorld`. During
+skeletal evaluation the callback applies
+`desiredSocketWorld * inverse(socketFromNode)`, converts that node pose through
+the current model-world transform, and writes only the `Right_hand` local
+position and rotation. Target snapshots expire after 250 ms, flat/menu frames
+invalidate them before Retail renders, and every callback verifies that the
+manager still owns the same live player body. Player-body changes clear the
+state and remove the old callback when the old model object is still valid.
+
+The second opt-in gate, `-ArmIkRightArm`, now measures the authored local bone
+vectors at installation and controls both complete arm chains around their
+exact socket targets. The legacy switch name is retained for compatibility.
+It is mutually exclusive with `-ArmIkRightHandProof`, retaining the right
+hand-only path as a clean A/B and safety fallback.
+
+The full gate resolves both exact verified chains in parent-to-child order. It
+measures each upper arm to forearm and each forearm to wrist, then requires all
+segment lengths to be finite and between 1 and 200 engine units. It registers
+each upper arm, forearm, and hand callback transactionally. Failure on either
+side removes every installed callback, so a half-controlled body cannot remain
+active. Body replacement clears both histories and removes the old callbacks
+in child-to-parent order when the old model remains valid.
+
+During evaluation, each upper callback builds the pole from the player-body
+right/up/forward axes and the imported elbow tuning, mirrors the outward sign,
+solves the elbow,
+and rotates the authored upper-arm vector toward it. The forearm callback only
+runs when the upper callback has published a solve for the same fresh OpenXR
+sample, then rotates the authored forearm-to-socket vector toward the target.
+The hand callback retains the validated exact socket placement and calibrated
+per-weapon correction. Live testing validated callback order, wrist placement,
+and player-local locomotion anchoring. Elbow-pole tuning is therefore exposed
+through its own global tool-menu tab.
+
+The first full-arm run exposed two Condemned-specific corrections. Its
+`RightHand` socket is approximately 13.5 units away from the `Right_hand`
+wrist node. Solving the arm length and direction to that displaced socket,
+then independently placing the wrist from the socket, made controller rotation
+swing the unresolved offset around and visibly compress/stretch the wrist.
+The arm now solves to the fully resolved desired wrist-node position and
+measures the lower segment from forearm to wrist; only the final hand callback
+uses `socketFromNode` to retain exact grip-socket placement and orientation.
+
+The skeleton may also evaluate before the latest render-path controller target
+is published. Retaining the previous target as an absolute world position made
+smooth locomotion move the player body away from its hand for that interval.
+Once a live player-body model transform has been observed, each published
+socket target is therefore cached in player-body local space. Every callback
+reconstructs it through the current body model transform. This is the arm
+equivalent of the weapon-weight filter's player-local locomotion frame: body
+movement and turning are rigid parent motion, while controller motion remains
+the only relative hand motion. A bounded world-space fallback is used only
+before the first valid body transform. Each side maintains an independent
+body-local target and bend-continuity history.
+
+While free, the left target uses the raw OpenXR grip pose. On two-hand
+attachment, its position becomes the authored support point reconstructed from
+the final weighted weapon pose, and its current rotation is captured relative
+to that same weapon pose. Position and orientation therefore remain one rigid
+weapon-relative grip instead of floating or swivelling independently. Release
+restores the raw controller pose. Display-only calibration is applied after
+either base pose and is never fed back into the weapon solve.
+
+The **Hand IK** tab now provides the live alignment pass for that proven
+socket target. The selected weapon has independent local X/Y/Z position and
+pitch/yaw/roll corrections. Position is rotated by the current weighted weapon
+pose before being added in world space; rotation is composed after the same
+pose, so the correction follows the controller instead of becoming a fixed
+world offset. The paired adjustment step ranges from 0.10 to 5.00 LithTech
+units and 0.25 to 10.00 degrees. Reset restores the zero-offset proof behavior,
+and the status row reports whether the node callback is active.
+
+Each changed value is saved immediately under the stable Retail weapon index
+as the `right_hand_ik` record in
+`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini`. The record includes the
+resolved profile identity and therefore fails closed if that weapon mapping is
+later changed. `LOG RIGHT HAND SNAPSHOT` is diagnostic only; adjustment and
+reset actions have already persisted before the snapshot is requested.
+
+The first live alignment pass produced these accepted starting records:
+
+| Weapon | Retail index | Position offset | Rotation offset |
+|---|---:|---|---|
+| `pipe_lever` | 32 | `(-5.0, 5.5, 4.5)` units | `(70, -43, -90)` degrees |
+| Fire axe | 17 | `(-5.5, 9.5, 1.0)` units | `(-51, -140, 23)` degrees |
+
+Both were observed in the settings file after successful
+`m5_right_hand_ik_settings_saved` events. They remain user calibration data,
+not hard-coded profile constants.
+
 ## VR tool menu
 
 Continuous stereo now includes a simple in-headset tool menu rendered after
@@ -241,15 +406,20 @@ gameplay controls while open and keeps capturing until the close buttons,
 grips, triggers, and sticks have returned to neutral, preventing a menu action
 from leaking into Retail gameplay.
 
-The menu has seven tabs:
+The menu has ten tabs:
 
 - **Melee:** for a verified melee profile, enable the temporary
   swing-to-attack adapter and tune trigger speed, re-arm speed, pulse duration,
   and cooldown while seeing live swing speed and trigger count. Unmapped
   weapons show the adapter as unavailable rather than inheriting the axe's
   attack behavior.
-- **Weapon:** tune mass, handling weight, positional/rotational follow,
+- **Weapon:** tune impact mass, hand inertia, positional/rotational follow,
   catch-up, and damping for the currently equipped weapon's own profile.
+  Impact mass is reserved for contact energy; hand inertia and the follow
+  parameters control the visible virtual-weight response.
+  Melee and Weapon tab changes are persisted by Retail weapon index in
+  `%LOCALAPPDATA%\\CondemnedVR\\weapon-settings.ini`; profile identity is
+  stored with each record so stale values fail closed if a mapping changes.
 - **Grip:** adjust the equipped model's local XYZ position and rotation,
   adjustment step, reset, and log a profile snapshot. This tab requires the
   `-WeaponGripCalibration` launch option and shows the controller wireframe.
@@ -257,6 +427,22 @@ The menu has seven tabs:
   radius, capture the current left-hand pose, reset, and log a combined
   profile snapshot. Live attachment distance/error remains visible on the
   tab.
+- **Hand IK:** adjust the rendered dominant hand's per-weapon local XYZ socket
+  target and pitch/yaw/roll while seeing the result immediately. The tab has
+  independent fine/coarse steps, zero-offset reset, callback status, and a
+  diagnostic snapshot action. Its corrections save immediately and do not
+  modify the weapon model's Grip-tab calibration or physical handling.
+- **Left IK:** adjust the support hand in its controller-local frame by up to
+  20 cm along right/up/forward and by pitch/yaw/roll in five-degree steps.
+  These global display-only corrections apply to both the free grip and the
+  attached weapon-support target. Reset and snapshot actions are provided,
+  and edits save immediately in the versioned `[arm_ik] elbow` record.
+- **Elbow:** tune the full-arm solver's body-relative outward, downward, and
+  backward pole components in 0.05 increments. Elbow continuity keeps the
+  remembered bend hemisphere stable as the hand crosses difficult poses; it
+  can be disabled for diagnosis. Adjustments reset bend memory immediately,
+  include a defaults action and diagnostic snapshot, and persist globally as
+  `[arm_ik] elbow` in `weapon-settings.ini` rather than following a weapon.
 - **Display:** tune FOV scale, world scale, menu size, and menu convergence
   distance; toggle HMD translation, eye polarity, and stereo; recenter; or
   restore display defaults.
@@ -267,14 +453,16 @@ The menu has seven tabs:
 Use the left/right triggers to change tabs, left-stick up/down to choose a row,
 right-stick left/right to change a value, A to activate a row, and B to close.
 The keyboard equivalents are left/right square brackets, arrow keys, Enter,
-and F12. All values take effect immediately but remain session-local until a
-tested value is deliberately promoted into a profile.
+and F12. All values take effect immediately. Melee, Weapon, Hand IK, Left IK,
+and Elbow values are persisted automatically; the existing Grip and 2-Hand setup
+snapshots remain the path for deliberately promoting tested model/profile
+values.
 
 The cyan `EQUIPPED ... INDEX ...` banner identifies exactly which weapon is
 being edited. Settings use the stable Retail weapon index rather than runtime
 pointers. A fixed 64-slot allocation-free registry keeps each observed
-weapon's Melee and Weapon values isolated: switching away and back restores
-that weapon's values. Known catalog entries start from their authored defaults
+weapon's Melee, Weapon, and Hand IK values isolated: switching away and back
+restores that weapon's values. Known catalog entries start from their authored defaults
 (weapon 17 therefore retains the heavy fire-axe setup); unmapped indices start
 from conservative one-handed handling with swing attack disabled. Grip
 alignment follows the same per-index lifetime rule.
@@ -312,6 +500,13 @@ recenter events. This is an initial weight response; later
 collision-constrained virtual coupling will replace it when the weapon becomes
 a standalone physical object.
 
+The provisional `pipe_lever` profile uses the same 10/8 follow-stiffness
+family and 0.80 bounded catch-up as the axe, but a lower 1.75 hand-inertia
+value and higher 0.65 damping ratio. This makes changes to hand inertia
+perceptible while keeping the pipe quicker and less prone to follow-through
+than the axe. Its 1.75 kg impact mass remains independent because it describes
+contact energy rather than the current render-pose approximation.
+
 ## Fire-axe swing attack bridge
 
 Until native physical-contact damage is enabled, the fire axe uses its
@@ -330,7 +525,8 @@ This is deliberately a transitional adapter, not the final damage authority.
 It does not claim a hit merely because the swing was fast: Retail still owns
 the attack animation and its existing attack/collision window, while native
 physical impact dispatch remains blocked. The adapter is enabled only for the
-measured fire-axe profile. Tracking loss, an invalid sweep, menus, focus loss,
+explicitly mapped fire-axe and provisional `pipe_lever` profiles. Tracking
+loss, an invalid sweep, menus, focus loss,
 weapon changes, stale input, and captured grip-calibration controls cancel the
 pulse and reset its latch. Each accepted gesture is logged as
 `m5_physical_melee_swing_attack_triggered` with the measured speed and timing

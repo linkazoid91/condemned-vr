@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <cstring>
 #include <intrin.h>
 
@@ -22,6 +23,7 @@
 #include "condemned_physical_melee.h"
 #include "head_tracking_math.h"
 #include "protocol.h"
+#include "weapon_identity_reader.h"
 
 namespace condemnedvr {
 namespace {
@@ -286,6 +288,7 @@ PhysicalMeleeKinematicsState g_physicalMeleeSwingKinematicsState{};
 PhysicalMeleeFrame g_physicalMeleeFrame{};
 PhysicalMeleeProfile g_physicalMeleeProfile{};
 std::int32_t g_physicalMeleeProfileWeaponIndex = -1;
+RetailWeaponIdentitySnapshot g_equippedWeaponIdentity{};
 PhysicalMeleeContactState g_physicalMeleeContactState{};
 PhysicalMeleeSwingAttackState g_physicalMeleeSwingAttackState{};
 std::uint64_t g_physicalMeleeSampleId = 0;
@@ -302,11 +305,56 @@ volatile LONG g_physicalMeleeVisualProxyEnabled = 0;
 volatile LONG g_physicalMeleeWallProxyAppliedLogged = 0;
 volatile LONG g_physicalMeleeContactAccepted = 0;
 volatile LONG g_physicalMeleeContactRearmed = 0;
+volatile LONG g_weaponCatalogProbeState = 0;
 unsigned char* g_gameClientBase = nullptr;
 MenuToggleLatch g_menuToggleLatch;
 MenuNavigationState g_menuNavigationState;
 
 int ReadRetailGameState(void* interfaceManager) noexcept;
+
+bool CommandLineContains(const wchar_t* option) noexcept {
+    const wchar_t* const commandLine = GetCommandLineW();
+    return commandLine != nullptr && option != nullptr &&
+        std::wcsstr(commandLine, option) != nullptr;
+}
+
+void TryLogRetailWeaponCatalog() noexcept {
+    if (!CommandLineContains(
+            L"-condemnedvr-m5-weapon-catalog-probe") ||
+        g_log == nullptr ||
+        InterlockedCompareExchange(
+            &g_weaponCatalogProbeState, 1, 0) != 0) {
+        return;
+    }
+    RetailWeaponIdentityCatalog catalog{};
+    const RetailWeaponIdentityReadResult result =
+        ReadRetailWeaponIdentityCatalog(catalog);
+    char summary[160]{};
+    std::snprintf(
+        summary, sizeof(summary), "result=%s count=%u",
+        RetailWeaponIdentityReadResultName(result), catalog.count);
+    g_log("m5_weapon_catalog_probe", summary);
+    if (result != RetailWeaponIdentityReadResult::Ok) {
+        InterlockedExchange(&g_weaponCatalogProbeState, 0);
+        return;
+    }
+    for (std::uint32_t index = 0U; index < catalog.count; ++index) {
+        const RetailWeaponIdentitySnapshot& entry =
+            catalog.entries[index];
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld weapon_name=%s animation_property=%s "
+            "pose_family=%s",
+            static_cast<long>(entry.playerWeaponIndex),
+            entry.recordName,
+            entry.animationPropertyResolved
+                ? entry.animationProperty : "UNKNOWN",
+            RetailWeaponPoseFamilyLabel(entry.poseFamily));
+        g_log("m5_weapon_catalog_entry", detail);
+    }
+    InterlockedExchange(&g_weaponCatalogProbeState, 2);
+}
 
 bool ProcessOwnsForegroundWindow() noexcept {
     const HWND foreground = GetForegroundWindow();
@@ -821,15 +869,44 @@ void UpdatePhysicalMeleeProbe() noexcept {
 
 void SelectPhysicalMeleeProfileForWeaponIndex(
     std::int32_t weaponIndex) noexcept {
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    const bool alreadySelected =
+        weaponIndex == g_physicalMeleeProfileWeaponIndex;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    if (alreadySelected) {
+        return;
+    }
     PhysicalMeleeProfile selected =
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
     ApplyToolMenuMeleeSettings(
         ReadVrToolMenuMeleeSettings(weaponIndex), selected);
+    RetailWeaponIdentitySnapshot identity{};
+    const RetailWeaponIdentityReadResult identityResult =
+        weaponIndex >= 0
+        ? ReadRetailWeaponIdentity(weaponIndex, identity)
+        : RetailWeaponIdentityReadResult::InvalidIndex;
+    if (identityResult == RetailWeaponIdentityReadResult::Ok) {
+        TryLogRetailWeaponCatalog();
+    }
+    if (!identity.nameResolved) {
+        std::snprintf(
+            identity.recordName, sizeof(identity.recordName), "%s",
+            weaponIndex >= 0
+                ? ToolMenuWeaponProfileLabel(selected.id)
+                : "NO WEAPON");
+    }
+    if (!identity.animationPropertyResolved) {
+        std::snprintf(
+            identity.animationProperty,
+            sizeof(identity.animationProperty), "UNKNOWN");
+        identity.poseFamily = RetailWeaponPoseFamily::Unknown;
+    }
     bool changed = false;
     AcquireSRWLockExclusive(&g_physicalMeleeLock);
     if (weaponIndex != g_physicalMeleeProfileWeaponIndex) {
         g_physicalMeleeProfileWeaponIndex = weaponIndex;
         g_physicalMeleeProfile = selected;
+        g_equippedWeaponIdentity = identity;
         g_physicalMeleeState = {};
         g_physicalMeleeSwingKinematicsState = {};
         g_physicalMeleeFrame = {};
@@ -851,7 +928,11 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
         char detail[896]{};
         std::snprintf(
             detail, sizeof(detail),
-            "weapon_index=%ld profile=%s mass_kg=%.2f "
+            "weapon_index=%ld profile=%s "
+            "weapon_name=%s animation_property=%s pose_family=%s "
+            "identity_result=%s identity_name_resolved=%u "
+            "identity_animation_resolved=%u "
+            "mass_kg=%.2f "
             "handling_weight=%.2f positional_follow=%.2f "
             "rotational_follow=%.2f catch_up=%.2f damping_ratio=%.2f "
             "swing_attack=%u swing_trigger_mps=%.2f "
@@ -865,6 +946,11 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
             "kinematics_reset=1",
             static_cast<long>(weaponIndex),
             PhysicalMeleeProfileName(selected.id),
+            identity.recordName, identity.animationProperty,
+            RetailWeaponPoseFamilyLabel(identity.poseFamily),
+            RetailWeaponIdentityReadResultName(identityResult),
+            identity.nameResolved ? 1U : 0U,
+            identity.animationPropertyResolved ? 1U : 0U,
             selected.massKilograms, selected.handlingWeight,
             selected.positionalFollow, selected.rotationalFollow,
             selected.catchUpStrength, selected.dampingRatio,
@@ -890,16 +976,18 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
 }
 
 void UpdateEquippedWeaponVisualSource() noexcept {
-    if (InterlockedCompareExchange(
-            &g_physicalMeleeVisualProxyEnabled, 0, 0) == 0 ||
-        g_gameClientBase == nullptr) {
+    if (g_gameClientBase == nullptr) {
         return;
     }
+    const bool visualProxyEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeVisualProxyEnabled, 0, 0) != 0;
     if (g_interfaceManager != nullptr &&
         ReadRetailGameState(g_interfaceManager) !=
             kCondemnedGameStatePlaying) {
         SelectPhysicalMeleeProfileForWeaponIndex(-1);
-        InvalidatePhysicalMeleeVisualProxySource();
+        if (visualProxyEnabled) {
+            InvalidatePhysicalMeleeVisualProxySource();
+        }
         return;
     }
 
@@ -930,7 +1018,7 @@ void UpdateEquippedWeaponVisualSource() noexcept {
                 &currentWeapon, currentWeaponReference,
                 sizeof(currentWeapon));
         }
-        if (currentWeapon != nullptr) {
+        if (visualProxyEnabled && currentWeapon != nullptr) {
             modelObjectReference =
                 reinterpret_cast<void* const*>(
                     static_cast<unsigned char*>(currentWeapon) +
@@ -942,19 +1030,27 @@ void UpdateEquippedWeaponVisualSource() noexcept {
         readable = weaponManager != nullptr &&
             currentWeaponIndex != -1 &&
             currentWeaponReference != nullptr &&
-            currentWeapon != nullptr &&
-            modelObjectReference != nullptr &&
-            modelObject != nullptr;
+            currentWeapon != nullptr;
+        if (visualProxyEnabled) {
+            readable = readable &&
+                modelObjectReference != nullptr &&
+                modelObject != nullptr;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         readable = false;
     }
     if (!readable) {
         SelectPhysicalMeleeProfileForWeaponIndex(-1);
-        InvalidatePhysicalMeleeVisualProxySource();
+        if (visualProxyEnabled) {
+            InvalidatePhysicalMeleeVisualProxySource();
+        }
         return;
     }
 
     SelectPhysicalMeleeProfileForWeaponIndex(currentWeaponIndex);
+    if (!visualProxyEnabled) {
+        return;
+    }
 
     float localGripPosition[3]{};
     float localGripRotation[4]{};
@@ -3028,6 +3124,7 @@ bool InstallHeadAimHooks(
     g_physicalMeleeFrame = {};
     g_physicalMeleeProfile = {};
     g_physicalMeleeProfileWeaponIndex = -1;
+    g_equippedWeaponIdentity = {};
     g_physicalMeleeContactState = {};
     g_physicalMeleeSwingAttackState = {};
     g_physicalMeleeSampleId = 0;
@@ -3097,9 +3194,15 @@ bool InstallHeadAimHooks(
             "retail_locomotion_and_turning_excluded=1 "
             "profile=generic_one_handed_fallback "
             "catalog=pipe,crowbar,fire_axe,plank "
+            "2x4_retail_indices=0,1,64,65 "
+            "2x4_pose=WEAP_1HandedDebris "
+            "pipe_lever_retail_index=32 pipe_lever_mass_kg=1.75 "
+            "pipe_lever_handling_weight=1.75 "
+            "pipe_lever_pose=WEAP_1HandedDebris "
             "fire_axe_retail_index=17 fire_axe_mass_kg=4.5 "
             "fire_axe_handling_weight=4.0 "
-            "fire_axe_swing_attack=retail_fire_command_17 "
+            "mapped_swing_attack=2x4_family,pipe_lever,fire_axe "
+            "retail_fire_command=17 "
             "swing_trigger_mps=3.00 swing_rearm_mps=0.75 "
             "swing_pulse_ms=100 swing_cooldown_ms=450 "
             "length_m=0.75 radius_m=0.04 mass_kg=1.5 "
@@ -3299,6 +3402,20 @@ void ReadPhysicalMeleeToolTelemetry(
     const ULONGLONG now = GetTickCount64();
     AcquireSRWLockShared(&g_physicalMeleeLock);
     telemetry.weaponIndex = g_physicalMeleeProfileWeaponIndex;
+    std::memcpy(
+        telemetry.weaponName,
+        g_equippedWeaponIdentity.recordName,
+        sizeof(telemetry.weaponName));
+    std::memcpy(
+        telemetry.weaponAnimationProperty,
+        g_equippedWeaponIdentity.animationProperty,
+        sizeof(telemetry.weaponAnimationProperty));
+    telemetry.weaponPoseFamily =
+        g_equippedWeaponIdentity.poseFamily;
+    telemetry.weaponNameResolved =
+        g_equippedWeaponIdentity.nameResolved;
+    telemetry.weaponAnimationPropertyResolved =
+        g_equippedWeaponIdentity.animationPropertyResolved;
     telemetry.trackingFresh =
         g_physicalMeleeSwingSampleId != 0 &&
         g_physicalMeleeSwingSampleTick != 0 &&

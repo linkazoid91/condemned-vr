@@ -6,6 +6,8 @@
 #endif
 #include <Windows.h>
 
+#include "arm_ik_discovery.h"
+#include "arm_ik_integration.h"
 #include "binding_input.h"
 #include "loader_event_format.h"
 #include "module_identity.h"
@@ -250,6 +252,19 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     if (CommandLineContains(L"-condemnedvr-m3-probe")) {
         condemnedvr::ProbeRendererInterfaces(
             masterDatabase, AppendLoaderEvent);
+    }
+    if (CommandLineContains(L"-condemnedvr-arm-ik-discovery")) {
+        condemnedvr::InstallArmIkDiscovery(
+            masterDatabase, g_original, AppendLoaderEvent);
+    }
+    if (CommandLineContains(
+            L"-condemnedvr-arm-ik-right-arm")) {
+        condemnedvr::InstallArmIkRightArm(
+            masterDatabase, g_original, AppendLoaderEvent);
+    } else if (CommandLineContains(
+                   L"-condemnedvr-arm-ik-right-hand-proof")) {
+        condemnedvr::InstallArmIkRightHandProof(
+            masterDatabase, g_original, AppendLoaderEvent);
     }
     if (CommandLineContains(L"-condemnedvr-m3-pass-through")) {
         const bool stereoDiagnostic = CommandLineContains(

@@ -17,6 +17,8 @@ add_condemnedvr_test(test_stereo_math
   test_stereo_math.cpp stereo_math)
 add_condemnedvr_test(test_head_tracking_math
   test_head_tracking_math.cpp head_tracking_math)
+add_condemnedvr_test(test_arm_ik
+  test_arm_ik.cpp arm_ik)
 add_condemnedvr_test(test_stereo_hud_math
   test_stereo_hud_math.cpp stereo_hud_math)
 add_condemnedvr_test(test_input_state

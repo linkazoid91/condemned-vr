@@ -16,6 +16,8 @@
 
 #include <MinHook.h>
 
+#include "arm_ik_discovery.h"
+#include "arm_ik_integration.h"
 #include "binding_input.h"
 #include "condemned_calibration_gizmo.h"
 #include "condemned_controller_input.h"
@@ -24,6 +26,7 @@
 #include "protocol.h"
 #include "stereo_math.h"
 #include "weapon_weight.h"
+#include "weapon_settings_store.h"
 
 namespace condemnedvr {
 namespace {
@@ -227,6 +230,8 @@ WeaponGripCalibrationMode g_weaponGripCalibrationMode =
     WeaponGripCalibrationMode::Position;
 std::size_t g_weaponGripCalibrationStepIndex = 2;
 fearvr::WeaponWeightFilterState g_physicalMeleeWeaponWeightFilter{};
+PhysicalMeleeSupportHandOrientationState
+    g_physicalMeleeSupportHandOrientation{};
 std::int32_t g_physicalMeleeWeightedWeaponIndex = -1;
 std::uint64_t g_physicalMeleeWeightedSourceGeneration = 0;
 std::uint64_t g_physicalMeleeWeightedSampleId = 0;
@@ -236,6 +241,7 @@ bool g_physicalMeleeWeightedPoseValid = false;
 volatile LONG g_physicalMeleeWeightActiveLogged = 0;
 SRWLOCK g_toolMenuSettingsLock = SRWLOCK_INIT;
 ToolMenuWeaponSettingsRegistry g_toolMenuWeaponSettingsRegistry{};
+std::size_t g_rightHandIkCalibrationStepIndex = 2U;
 ToolMenuState g_toolMenuState{};
 ToolMenuOverlay g_toolMenuOverlay{};
 ToolMenuPanelPlacement g_toolMenuPanelPlacement{};
@@ -255,6 +261,7 @@ void ResetPhysicalMeleeWeaponWeight(
     g_physicalMeleeWeightedSampleId = 0;
     g_physicalMeleeWeightedLocalPose = {};
     g_physicalMeleeWeightedPoseValid = false;
+    g_physicalMeleeSupportHandOrientation = {};
 }
 
 const char* PhysicalMeleeSecondaryGripReleaseReasonName(
@@ -1064,15 +1071,40 @@ ToolMenuMeleeSettings CopyToolMenuMeleeSettings(
     if (weaponIndex < 0) {
         return settings;
     }
+    WeaponSettingsStoreResult loadResult =
+        WeaponSettingsStoreResult::NotFound;
+    bool loadAttempted = false;
     AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
     ToolMenuWeaponSettingsSlot* slot =
         ResolveToolMenuWeaponSettingsSlot(
             g_toolMenuWeaponSettingsRegistry,
             weaponIndex, baseProfile);
     if (slot != nullptr) {
+        if (!slot->persistentLoadAttempted) {
+            slot->persistentLoadAttempted = true;
+            ToolMenuMeleeSettings persisted{};
+            loadResult = LoadWeaponToolSettings(
+                weaponIndex, baseProfile.id, persisted);
+            if (loadResult == WeaponSettingsStoreResult::Ok) {
+                slot->settings = persisted;
+            }
+            loadAttempted = true;
+        }
         settings = slot->settings;
     }
     ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (loadAttempted && g_passThroughLog != nullptr) {
+        char detail[192]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s result=%s source=%s",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(baseProfile.id),
+            WeaponSettingsStoreResultName(loadResult),
+            loadResult == WeaponSettingsStoreResult::Ok
+                ? "local_app_data" : "profile_defaults");
+        g_passThroughLog("m5_weapon_settings_loaded", detail);
+    }
     return settings;
 }
 
@@ -1093,10 +1125,194 @@ bool StoreToolMenuMeleeSettings(
             weaponIndex, baseProfile);
     if (slot != nullptr) {
         slot->settings = settings;
+        slot->persistentLoadAttempted = true;
         stored = true;
     }
     ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (stored) {
+        const WeaponSettingsStoreResult saveResult =
+            SaveWeaponToolSettings(
+                weaponIndex, baseProfile.id, settings);
+        if (g_passThroughLog != nullptr) {
+            char detail[192]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld profile=%s result=%s",
+                static_cast<long>(weaponIndex),
+                PhysicalMeleeProfileName(baseProfile.id),
+                WeaponSettingsStoreResultName(saveResult));
+            g_passThroughLog(
+                saveResult == WeaponSettingsStoreResult::Ok
+                    ? "m5_weapon_settings_saved"
+                    : "m5_weapon_settings_save_failed",
+                detail);
+        }
+    }
     return stored;
+}
+
+ToolMenuRightHandIkSettings CopyToolMenuRightHandIkSettings(
+    std::int32_t weaponIndex) noexcept {
+    ToolMenuRightHandIkSettings settings{};
+    if (weaponIndex < 0) {
+        return settings;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    WeaponSettingsStoreResult loadResult =
+        WeaponSettingsStoreResult::NotFound;
+    bool loadAttempted = false;
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        if (!slot->rightHandIkPersistentLoadAttempted) {
+            slot->rightHandIkPersistentLoadAttempted = true;
+            ToolMenuRightHandIkSettings persisted{};
+            loadResult = LoadWeaponRightHandIkSettings(
+                weaponIndex, baseProfile.id, persisted);
+            if (loadResult == WeaponSettingsStoreResult::Ok) {
+                slot->rightHandIkSettings = persisted;
+            }
+            loadAttempted = true;
+        }
+        settings = slot->rightHandIkSettings;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (loadAttempted && g_passThroughLog != nullptr) {
+        char detail[224]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s result=%s source=%s",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(baseProfile.id),
+            WeaponSettingsStoreResultName(loadResult),
+            loadResult == WeaponSettingsStoreResult::Ok
+                ? "local_app_data" : "zero_offsets");
+        g_passThroughLog("m5_right_hand_ik_settings_loaded", detail);
+    }
+    return settings;
+}
+
+bool StoreToolMenuRightHandIkSettings(
+    std::int32_t weaponIndex,
+    const ToolMenuRightHandIkSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !ToolMenuRightHandIkSettingsAreValid(settings)) {
+        return false;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    bool stored = false;
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        slot->rightHandIkSettings = settings;
+        slot->rightHandIkPersistentLoadAttempted = true;
+        stored = true;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (stored) {
+        const WeaponSettingsStoreResult saveResult =
+            SaveWeaponRightHandIkSettings(
+                weaponIndex, baseProfile.id, settings);
+        if (g_passThroughLog != nullptr) {
+            char detail[256]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld profile=%s result=%s "
+                "position_units=(%.3f,%.3f,%.3f) "
+                "rotation_degrees=(%.2f,%.2f,%.2f)",
+                static_cast<long>(weaponIndex),
+                PhysicalMeleeProfileName(baseProfile.id),
+                WeaponSettingsStoreResultName(saveResult),
+                settings.positionOffsetUnits.x,
+                settings.positionOffsetUnits.y,
+                settings.positionOffsetUnits.z,
+                settings.rotationOffsetDegrees.x,
+                settings.rotationOffsetDegrees.y,
+                settings.rotationOffsetDegrees.z);
+            g_passThroughLog(
+                saveResult == WeaponSettingsStoreResult::Ok
+                    ? "m5_right_hand_ik_settings_saved"
+                    : "m5_right_hand_ik_settings_save_failed",
+                detail);
+        }
+    }
+    return stored;
+}
+
+void LogToolMenuRightHandIkState(
+    const char* action,
+    std::int32_t weaponIndex) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    const PhysicalMeleeProfile profile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    const ToolMenuRightHandIkSettings settings =
+        CopyToolMenuRightHandIkSettings(weaponIndex);
+    char detail[384]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s weapon_index=%ld profile=%s callback_active=%u "
+        "position_units=(%.3f,%.3f,%.3f) "
+        "rotation_degrees=(%.2f,%.2f,%.2f) "
+        "translation_step_units=%.2f rotation_step_degrees=%.2f",
+        action,
+        static_cast<long>(weaponIndex),
+        PhysicalMeleeProfileName(profile.id),
+        ArmIkRightHandProofIsActive() ? 1U : 0U,
+        settings.positionOffsetUnits.x,
+        settings.positionOffsetUnits.y,
+        settings.positionOffsetUnits.z,
+        settings.rotationOffsetDegrees.x,
+        settings.rotationOffsetDegrees.y,
+        settings.rotationOffsetDegrees.z,
+        kWeaponGripTranslationSteps[
+            g_rightHandIkCalibrationStepIndex],
+        kWeaponGripRotationSteps[
+            g_rightHandIkCalibrationStepIndex]);
+    g_passThroughLog("m5_right_hand_ik_calibration", detail);
+}
+
+void LogToolMenuElbowIkState(const char* action) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    const fearvr::ArmIkTuning tuning = ReadArmIkTuning();
+    char detail[256]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s callback_active=%u outward=%.3f down=%.3f "
+        "back=%.3f continuity=%u",
+        action, ArmIkRightArmIsActive() ? 1U : 0U,
+        tuning.elbowOutward, tuning.elbowDown, tuning.elbowBack,
+        tuning.preserveElbowContinuity ? 1U : 0U);
+    g_passThroughLog("m5_elbow_ik_calibration", detail);
+}
+
+void LogToolMenuLeftHandIkState(const char* action) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    const fearvr::ArmIkTuning tuning = ReadArmIkTuning();
+    char detail[320]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s callback_active=%u position_m=(%.3f,%.3f,%.3f) "
+        "rotation_degrees=(%.2f,%.2f,%.2f)",
+        action, ArmIkLeftHandIsActive() ? 1U : 0U,
+        tuning.leftHandRightMeters, tuning.leftHandUpMeters,
+        tuning.leftHandForwardMeters,
+        tuning.leftHandPitchDegrees, tuning.leftHandYawDegrees,
+        tuning.leftHandRollDegrees);
+    g_passThroughLog("m5_left_hand_ik_calibration", detail);
 }
 
 void LogToolMenuState(const char* action) noexcept {
@@ -1149,7 +1365,9 @@ void UpdateToolMenuCalibrationVisibility() noexcept {
     const bool calibrationVisible =
         InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 &&
         (g_toolMenuState.tab == ToolMenuTab::Grip ||
-         g_toolMenuState.tab == ToolMenuTab::TwoHand) &&
+         g_toolMenuState.tab == ToolMenuTab::TwoHand ||
+         g_toolMenuState.tab == ToolMenuTab::HandIk ||
+         g_toolMenuState.tab == ToolMenuTab::LeftHandIk) &&
         InterlockedCompareExchange(
             &g_weaponGripCalibrationEnabled, 0, 0) != 0;
     InterlockedExchange(
@@ -1356,6 +1574,207 @@ bool ApplyToolMenuGripAdjustment(
         return true;
     }
     return false;
+}
+
+bool ApplyToolMenuRightHandIkAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate,
+    std::int32_t weaponIndex) noexcept {
+    if (weaponIndex < 0) {
+        return false;
+    }
+    ToolMenuRightHandIkSettings settings =
+        CopyToolMenuRightHandIkSettings(weaponIndex);
+    const ToolMenuRightHandIkSettings original = settings;
+    if (row <= 2U && delta != 0) {
+        const float amount =
+            kWeaponGripTranslationSteps[
+                g_rightHandIkCalibrationStepIndex] *
+            static_cast<float>(delta);
+        float* const component = row == 0U
+            ? &settings.positionOffsetUnits.x
+            : row == 1U
+                ? &settings.positionOffsetUnits.y
+                : &settings.positionOffsetUnits.z;
+        *component = std::clamp(
+            *component + amount,
+            -kToolMenuRightHandIkMaximumPositionOffsetUnits,
+            kToolMenuRightHandIkMaximumPositionOffsetUnits);
+    } else if (row >= 3U && row <= 5U && delta != 0) {
+        const float amount =
+            kWeaponGripRotationSteps[
+                g_rightHandIkCalibrationStepIndex] *
+            static_cast<float>(delta);
+        float* const component = row == 3U
+            ? &settings.rotationOffsetDegrees.x
+            : row == 4U
+                ? &settings.rotationOffsetDegrees.y
+                : &settings.rotationOffsetDegrees.z;
+        *component = PhysicalMeleeWrapDegrees(*component + amount);
+    } else if (row == 6U && delta != 0) {
+        const int next = std::clamp(
+            static_cast<int>(g_rightHandIkCalibrationStepIndex) + delta,
+            0, static_cast<int>(kWeaponGripStepCount - 1U));
+        const bool changed = next !=
+            static_cast<int>(g_rightHandIkCalibrationStepIndex);
+        g_rightHandIkCalibrationStepIndex =
+            static_cast<std::size_t>(next);
+        return changed;
+    } else if (row == 7U && activate) {
+        settings = {};
+    } else if (row == 8U && activate) {
+        LogToolMenuRightHandIkState(
+            "vr_tool_menu_snapshot", weaponIndex);
+        return true;
+    } else {
+        return false;
+    }
+    if (std::memcmp(
+            &settings, &original, sizeof(settings)) == 0 &&
+        !(row == 7U && activate)) {
+        return false;
+    }
+    return StoreToolMenuRightHandIkSettings(weaponIndex, settings);
+}
+
+bool ApplyToolMenuElbowIkAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    fearvr::ArmIkTuning tuning = ReadArmIkTuning();
+    const fearvr::ArmIkTuning original = tuning;
+    constexpr float kElbowStep = 0.05F;
+    if (row <= 2U && delta != 0) {
+        float* const component = row == 0U
+            ? &tuning.elbowOutward
+            : row == 1U
+                ? &tuning.elbowDown
+                : &tuning.elbowBack;
+        const float minimum = row == 0U
+            ? 0.20F : row == 1U ? 0.0F : -1.0F;
+        const float maximum = row == 0U
+            ? 2.0F : row == 1U ? 1.5F : 1.0F;
+        *component = std::clamp(
+            *component + static_cast<float>(delta) * kElbowStep,
+            minimum, maximum);
+    } else if (row == 3U && (delta != 0 || activate)) {
+        tuning.preserveElbowContinuity =
+            !tuning.preserveElbowContinuity;
+    } else if (row == 4U && activate) {
+        const fearvr::ArmIkTuning defaults{};
+        tuning.elbowOutward = defaults.elbowOutward;
+        tuning.elbowDown = defaults.elbowDown;
+        tuning.elbowBack = defaults.elbowBack;
+        tuning.preserveElbowContinuity =
+            defaults.preserveElbowContinuity;
+    } else if (row == 5U && activate) {
+        LogToolMenuElbowIkState("vr_tool_menu_snapshot");
+        return true;
+    } else {
+        return false;
+    }
+    const bool changed =
+        tuning.elbowOutward != original.elbowOutward ||
+        tuning.elbowDown != original.elbowDown ||
+        tuning.elbowBack != original.elbowBack ||
+        tuning.preserveElbowContinuity !=
+            original.preserveElbowContinuity;
+    if (!changed) {
+        return false;
+    }
+
+    ApplyArmIkTuning(tuning);
+    const WeaponSettingsStoreResult saveResult =
+        SaveArmIkTuning(tuning);
+    if (g_passThroughLog != nullptr) {
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "result=%s outward=%.3f down=%.3f back=%.3f continuity=%u",
+            WeaponSettingsStoreResultName(saveResult),
+            tuning.elbowOutward, tuning.elbowDown, tuning.elbowBack,
+            tuning.preserveElbowContinuity ? 1U : 0U);
+        g_passThroughLog(
+            saveResult == WeaponSettingsStoreResult::Ok
+                ? "m5_elbow_ik_settings_saved"
+                : "m5_elbow_ik_settings_save_failed",
+            detail);
+    }
+    return true;
+}
+
+bool ApplyToolMenuLeftHandIkAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    fearvr::ArmIkTuning tuning = ReadArmIkTuning();
+    const fearvr::ArmIkTuning original = tuning;
+    if (row <= 2U && delta != 0) {
+        float* const component = row == 0U
+            ? &tuning.leftHandRightMeters
+            : row == 1U
+                ? &tuning.leftHandUpMeters
+                : &tuning.leftHandForwardMeters;
+        *component = std::clamp(
+            *component + static_cast<float>(delta) * 0.005F,
+            -0.20F, 0.20F);
+    } else if (row >= 3U && row <= 5U && delta != 0) {
+        float* const component = row == 3U
+            ? &tuning.leftHandPitchDegrees
+            : row == 4U
+                ? &tuning.leftHandYawDegrees
+                : &tuning.leftHandRollDegrees;
+        *component = PhysicalMeleeWrapDegrees(
+            *component + static_cast<float>(delta) * 5.0F);
+    } else if (row == 6U && activate) {
+        const fearvr::ArmIkTuning defaults{};
+        tuning.leftHandRightMeters = defaults.leftHandRightMeters;
+        tuning.leftHandUpMeters = defaults.leftHandUpMeters;
+        tuning.leftHandForwardMeters =
+            defaults.leftHandForwardMeters;
+        tuning.leftHandPitchDegrees = defaults.leftHandPitchDegrees;
+        tuning.leftHandYawDegrees = defaults.leftHandYawDegrees;
+        tuning.leftHandRollDegrees = defaults.leftHandRollDegrees;
+    } else if (row == 7U && activate) {
+        LogToolMenuLeftHandIkState("vr_tool_menu_snapshot");
+        return true;
+    } else {
+        return false;
+    }
+    const bool changed =
+        tuning.leftHandRightMeters != original.leftHandRightMeters ||
+        tuning.leftHandUpMeters != original.leftHandUpMeters ||
+        tuning.leftHandForwardMeters !=
+            original.leftHandForwardMeters ||
+        tuning.leftHandPitchDegrees != original.leftHandPitchDegrees ||
+        tuning.leftHandYawDegrees != original.leftHandYawDegrees ||
+        tuning.leftHandRollDegrees != original.leftHandRollDegrees;
+    if (!changed) {
+        return false;
+    }
+
+    ApplyArmIkTuning(tuning);
+    const WeaponSettingsStoreResult saveResult =
+        SaveArmIkTuning(tuning);
+    if (g_passThroughLog != nullptr) {
+        char detail[320]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "result=%s position_m=(%.3f,%.3f,%.3f) "
+            "rotation_degrees=(%.2f,%.2f,%.2f)",
+            WeaponSettingsStoreResultName(saveResult),
+            tuning.leftHandRightMeters, tuning.leftHandUpMeters,
+            tuning.leftHandForwardMeters,
+            tuning.leftHandPitchDegrees, tuning.leftHandYawDegrees,
+            tuning.leftHandRollDegrees);
+        g_passThroughLog(
+            saveResult == WeaponSettingsStoreResult::Ok
+                ? "m5_left_hand_ik_settings_saved"
+                : "m5_left_hand_ik_settings_save_failed",
+            detail);
+    }
+    return true;
 }
 
 bool ApplyToolMenuTwoHandAdjustment(
@@ -1663,6 +2082,20 @@ void HandleVrToolMenuControls() noexcept {
         valueChanged = ApplyToolMenuTwoHandAdjustment(
             g_toolMenuState.row, transition.valueDelta,
             transition.activate, input, fresh);
+    } else if (g_toolMenuState.tab == ToolMenuTab::HandIk) {
+        ToolMenuMeleeTelemetry telemetry{};
+        ReadPhysicalMeleeToolTelemetry(telemetry);
+        valueChanged = ApplyToolMenuRightHandIkAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate, telemetry.weaponIndex);
+    } else if (g_toolMenuState.tab == ToolMenuTab::LeftHandIk) {
+        valueChanged = ApplyToolMenuLeftHandIkAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
+    } else if (g_toolMenuState.tab == ToolMenuTab::ElbowIk) {
+        valueChanged = ApplyToolMenuElbowIkAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
     } else if (g_toolMenuState.tab == ToolMenuTab::Display) {
         valueChanged = ApplyToolMenuDisplayAdjustment(
             g_toolMenuState.row, transition.valueDelta,
@@ -1674,6 +2107,21 @@ void HandleVrToolMenuControls() noexcept {
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_changed",
             "vr_tool_menu_adjust");
+    }
+    if (valueChanged &&
+        g_toolMenuState.tab == ToolMenuTab::HandIk) {
+        ToolMenuMeleeTelemetry telemetry{};
+        ReadPhysicalMeleeToolTelemetry(telemetry);
+        LogToolMenuRightHandIkState(
+            "vr_tool_menu_adjust", telemetry.weaponIndex);
+    }
+    if (valueChanged &&
+        g_toolMenuState.tab == ToolMenuTab::ElbowIk) {
+        LogToolMenuElbowIkState("vr_tool_menu_adjust");
+    }
+    if (valueChanged &&
+        g_toolMenuState.tab == ToolMenuTab::LeftHandIk) {
+        LogToolMenuLeftHandIkState("vr_tool_menu_adjust");
     }
     if (transition.selectionChanged || valueChanged) {
         LogToolMenuState(
@@ -1750,6 +2198,9 @@ void DrawVrToolMenuOverlay(
             telemetry.weaponIndex);
     const ToolMenuMeleeSettings settings =
         CopyToolMenuMeleeSettings(telemetry.weaponIndex);
+    const ToolMenuRightHandIkSettings rightHandIkSettings =
+        CopyToolMenuRightHandIkSettings(telemetry.weaponIndex);
+    const fearvr::ArmIkTuning armIkTuning = ReadArmIkTuning();
     PhysicalMeleeGripCalibration grip{};
     void* gripWeapon = nullptr;
     void* gripModel = nullptr;
@@ -1769,7 +2220,9 @@ void DrawVrToolMenuOverlay(
         std::snprintf(
             rowText, sizeof(rowText),
             "EQUIPPED  %s   INDEX %ld",
-            ToolMenuWeaponProfileLabel(baseProfile.id),
+            telemetry.weaponName[0] != '\0'
+                ? telemetry.weaponName
+                : ToolMenuWeaponProfileLabel(baseProfile.id),
             static_cast<long>(telemetry.weaponIndex));
     } else {
         std::snprintf(
@@ -1816,11 +2269,11 @@ void DrawVrToolMenuOverlay(
         break;
     case ToolMenuTab::Weapon:
         std::snprintf(rowText, sizeof(rowText),
-            "MASS                          %.2F KG",
+            "IMPACT MASS                   %.2F KG",
             settings.massKilograms);
         Row(0U, rowText);
         std::snprintf(rowText, sizeof(rowText),
-            "HANDLING WEIGHT               %.2F",
+            "HAND INERTIA                  %.2F",
             settings.handlingWeight);
         Row(1U, rowText);
         std::snprintf(rowText, sizeof(rowText),
@@ -1923,6 +2376,117 @@ void DrawVrToolMenuOverlay(
             telemetry.secondaryGripAttached
                 ? 0xFF50FF80U : 0xFF76DBF4U);
         break;
+    case ToolMenuTab::HandIk:
+        if (telemetry.weaponIndex < 0) {
+            AddToolMenuRow(
+                overlay, 0U,
+                "NO EQUIPPED WEAPON AVAILABLE FOR HAND IK",
+                false, 0xFFFFB060U);
+            break;
+        }
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND POSITION X               %.3F U",
+            rightHandIkSettings.positionOffsetUnits.x);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND POSITION Y               %.3F U",
+            rightHandIkSettings.positionOffsetUnits.y);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND POSITION Z               %.3F U",
+            rightHandIkSettings.positionOffsetUnits.z);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND PITCH X                  %.2F DEG",
+            rightHandIkSettings.rotationOffsetDegrees.x);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND YAW Y                    %.2F DEG",
+            rightHandIkSettings.rotationOffsetDegrees.y);
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND ROLL Z                   %.2F DEG",
+            rightHandIkSettings.rotationOffsetDegrees.z);
+        Row(5U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ADJUSTMENT STEP               %.2F U  %.2F DEG",
+            kWeaponGripTranslationSteps[
+                g_rightHandIkCalibrationStepIndex],
+            kWeaponGripRotationSteps[
+                g_rightHandIkCalibrationStepIndex]);
+        Row(6U, rowText);
+        Row(7U, "RESET RIGHT HAND ALIGNMENT");
+        Row(8U, "LOG RIGHT HAND SNAPSHOT");
+        std::snprintf(rowText, sizeof(rowText),
+            "RIGHT HAND CALLBACK           %s",
+            ArmIkRightHandProofIsActive() ? "ACTIVE" : "WAITING");
+        AddToolMenuRow(
+            overlay, 9U, rowText, false,
+            ArmIkRightHandProofIsActive()
+                ? 0xFF50FF80U : 0xFFFFB060U);
+        break;
+    case ToolMenuTab::ElbowIk:
+        std::snprintf(rowText, sizeof(rowText),
+            "ELBOW OUTWARD                 %.2F",
+            armIkTuning.elbowOutward);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ELBOW DOWN                    %.2F",
+            armIkTuning.elbowDown);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ELBOW BACK                    %.2F",
+            armIkTuning.elbowBack);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ELBOW CONTINUITY              %s",
+            armIkTuning.preserveElbowContinuity ? "ON" : "OFF");
+        Row(3U, rowText);
+        Row(4U, "RESET ELBOW DEFAULTS");
+        Row(5U, "LOG ARM IK SNAPSHOT");
+        std::snprintf(rowText, sizeof(rowText),
+            "FULL ARM CALLBACK             %s   STEP 0.05",
+            ArmIkRightArmIsActive() ? "ACTIVE" : "WAITING");
+        AddToolMenuRow(
+            overlay, 6U, rowText, false,
+            ArmIkRightArmIsActive()
+                ? 0xFF50FF80U : 0xFFFFB060U);
+        break;
+    case ToolMenuTab::LeftHandIk:
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND RIGHT                    %.1F CM",
+            armIkTuning.leftHandRightMeters * 100.0F);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND UP                       %.1F CM",
+            armIkTuning.leftHandUpMeters * 100.0F);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND FORWARD                  %.1F CM",
+            armIkTuning.leftHandForwardMeters * 100.0F);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND PITCH                    %.1F DEG",
+            armIkTuning.leftHandPitchDegrees);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND YAW                      %.1F DEG",
+            armIkTuning.leftHandYawDegrees);
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HAND ROLL                     %.1F DEG",
+            armIkTuning.leftHandRollDegrees);
+        Row(5U, rowText);
+        Row(6U, "RESET LEFT HAND ALIGNMENT");
+        Row(7U, "LOG LEFT HAND SNAPSHOT");
+        std::snprintf(rowText, sizeof(rowText),
+            "LEFT ARM CALLBACK             %s   STEP 0.5 CM / 5 DEG",
+            ArmIkLeftHandIsActive() ? "ACTIVE" : "WAITING");
+        AddToolMenuRow(
+            overlay, 8U, rowText, false,
+            ArmIkLeftHandIsActive()
+                ? 0xFF50FF80U : 0xFFFFB060U);
+        break;
     case ToolMenuTab::Display:
         std::snprintf(rowText, sizeof(rowText),
             "FOV SCALE                     %.0F %%",
@@ -1966,35 +2530,41 @@ void DrawVrToolMenuOverlay(
         break;
     case ToolMenuTab::Debug:
         std::snprintf(rowText, sizeof(rowText),
-            "WEAPON INDEX                  %ld",
-            static_cast<long>(telemetry.weaponIndex));
+            "WEAPON NAME                   %s",
+            telemetry.weaponName[0] != '\0'
+                ? telemetry.weaponName : "UNKNOWN");
         AddToolMenuRow(overlay, 0U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "SWING TRACKING                %s",
-            telemetry.trackingFresh ? "FRESH" : "STALE");
+            "RETAIL INDEX                  %ld",
+            static_cast<long>(telemetry.weaponIndex));
         AddToolMenuRow(overlay, 1U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "LIVE SWING SPEED              %.2F M/S",
-            telemetry.swingSpeedMetersPerSecond);
+            "ANIMATION PROPERTY            %s",
+            telemetry.weaponAnimationProperty[0] != '\0'
+                ? telemetry.weaponAnimationProperty : "UNKNOWN");
         AddToolMenuRow(overlay, 2U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "RETAIL POSE FAMILY            %s",
+            RetailWeaponPoseFamilyLabel(
+                telemetry.weaponPoseFamily));
+        AddToolMenuRow(overlay, 3U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "SWING %s  SPEED %.2F M/S",
+            telemetry.trackingFresh ? "FRESH" : "STALE",
+            telemetry.swingSpeedMetersPerSecond);
+        AddToolMenuRow(overlay, 4U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "SWING ATTACK COUNT            %u",
             telemetry.triggerCount);
-        AddToolMenuRow(overlay, 3U, rowText, false);
-        std::snprintf(rowText, sizeof(rowText),
-            "WALL PROXY                    %s",
-            telemetry.wallProxyEnabled ? "ON" : "OFF");
-        AddToolMenuRow(overlay, 4U, rowText, false);
-        std::snprintf(rowText, sizeof(rowText),
-            "VISIBLE WEAPON PROXY          %s",
-            telemetry.visualProxyEnabled ? "ON" : "OFF");
         AddToolMenuRow(overlay, 5U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "TWO HAND SYSTEM               %s",
-            telemetry.twoHandedEnabled ? "ON" : "OFF");
+            "PROXIES WALL %s  VISIBLE %s",
+            telemetry.wallProxyEnabled ? "ON" : "OFF",
+            telemetry.visualProxyEnabled ? "ON" : "OFF");
         AddToolMenuRow(overlay, 6U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "SUPPORT GRIP                  %s",
+            "VR TWO HAND %s  SUPPORT %s",
+            telemetry.twoHandedEnabled ? "ON" : "OFF",
             telemetry.secondaryGripAttached ? "ATTACHED" : "FREE");
         AddToolMenuRow(overlay, 7U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
@@ -3460,6 +4030,7 @@ bool TryDoubleRenderDiagnostic(
                             ResetPhysicalMeleeWeaponWeight(
                                 fearvr::WeaponWeightResetReason::
                                     teleportedOrRecentered);
+                            ResetArmIkBendMemory();
                         }
                         if (g_trackingRecenterValid &&
                             g_passThroughLog != nullptr) {
@@ -3660,6 +4231,86 @@ bool TryDoubleRenderDiagnostic(
                 secondaryGripSettings.offsetUnits));
         secondaryGripDebugReady = fearvr::IsFinite(
             physicalSecondaryTargetWorldPosition);
+    }
+
+    if (controllerWeaponReady) {
+        std::int32_t armIkWeaponIndex = -1;
+        AcquireSRWLockShared(&g_physicalMeleeVisualLock);
+        armIkWeaponIndex = g_physicalMeleeVisualWeaponIndex;
+        ReleaseSRWLockShared(&g_physicalMeleeVisualLock);
+        const ToolMenuRightHandIkSettings armIkSettings =
+            CopyToolMenuRightHandIkSettings(armIkWeaponIndex);
+        const PhysicalMeleeRigidTransform armIkTarget =
+            ResolveToolMenuRightHandIkTarget(
+                {physicalWeaponWorldPosition,
+                 physicalWeaponWorldRotation},
+                armIkSettings);
+        if (!PhysicalMeleeRigidTransformIsValid(armIkTarget)) {
+            InvalidateArmIkRightHandProofTarget();
+        } else {
+            const float armIkPosition[3]{
+                armIkTarget.positionUnits.x,
+                armIkTarget.positionUnits.y,
+                armIkTarget.positionUnits.z};
+            const float armIkRotation[4]{
+                armIkTarget.rotation.x,
+                armIkTarget.rotation.y,
+                armIkTarget.rotation.z,
+                armIkTarget.rotation.w};
+            PublishArmIkRightHandProofTarget(
+                armIkPosition, armIkRotation,
+                controllerAimSampleId,
+                controllerAimTimestampNs != 0
+                    ? controllerAimTimestampNs
+                    : request.predictedDisplayTimeNs);
+        }
+    } else {
+        InvalidateArmIkRightHandProofTarget();
+    }
+
+    if (secondaryGripReady) {
+        const bool useSupportAnchor = twoHandPose.attached &&
+            secondaryGripDebugReady;
+        const fearvr::TrackingVector leftBasePosition =
+            useSupportAnchor
+                ? physicalSecondaryTargetWorldPosition
+                : secondaryGripWorldPosition;
+        fearvr::TrackingQuaternion leftBaseRotation{};
+        const bool leftRotationReady =
+            ResolvePhysicalMeleeSupportHandRotation(
+                g_physicalMeleeSupportHandOrientation,
+                physicalWeaponWorldRotation,
+                secondaryGripWorldRotation,
+                twoHandPose.attached,
+                twoHandPose.justAttached,
+                leftBaseRotation);
+        const PhysicalMeleeRigidTransform leftTarget =
+            ResolveToolMenuLeftHandIkTarget(
+                {leftBasePosition, leftBaseRotation},
+                ReadArmIkTuning());
+        if (leftRotationReady &&
+            PhysicalMeleeRigidTransformIsValid(leftTarget)) {
+            const float leftPositionValues[3]{
+                leftTarget.positionUnits.x,
+                leftTarget.positionUnits.y,
+                leftTarget.positionUnits.z};
+            const float leftRotationValues[4]{
+                leftTarget.rotation.x,
+                leftTarget.rotation.y,
+                leftTarget.rotation.z,
+                leftTarget.rotation.w};
+            PublishArmIkLeftHandTarget(
+                leftPositionValues, leftRotationValues,
+                controllerInput.sampleId,
+                controllerInput.predictedDisplayTimeNs != 0U
+                    ? controllerInput.predictedDisplayTimeNs
+                    : request.predictedDisplayTimeNs);
+        } else {
+            InvalidateArmIkLeftHandTarget();
+        }
+    } else {
+        g_physicalMeleeSupportHandOrientation = {};
+        InvalidateArmIkLeftHandTarget();
     }
 
     PhysicalMeleeVisualOverride meleeVisualOverride{};
@@ -3940,6 +4591,10 @@ unsigned long __fastcall HookRenderCamera(
     HandleStereoTuningControls();
     HandleWeaponGripCalibrationControls();
     SampleControllerInputReadOnly();
+    InvalidateArmIkRightHandProofTarget();
+    InvalidateArmIkLeftHandTarget();
+    SampleArmIkDiscovery();
+    SampleArmIkRightHandProof();
     if (g_cameraReadProbe && (count == 1 || count % 600 == 0)) {
         SampleCameraReadOnly(camera, count);
     }
@@ -4056,6 +4711,7 @@ void ProbeRegisteredInterfaces(
                 static_cast<InterfaceNameManagerAbi*>(array->items[index]);
             if (manager == nullptr || manager->name == nullptr ||
                 (std::strstr(manager->name, "ILTClient") == nullptr &&
+                 std::strstr(manager->name, "ILTModel") == nullptr &&
                  std::strstr(manager->name, "ILTRenderer") == nullptr &&
                  std::strstr(manager->name, "IClientShell") == nullptr)) {
                 continue;
@@ -4216,7 +4872,10 @@ void ProbeRendererInterfaces(
         masterDatabase, "ILTRenderer.Default", 0);
     void* const clientShell = FindCurrentInterface(
         masterDatabase, "IClientShell.Default", 4);
+    void* const model = FindCurrentInterface(
+        masterDatabase, "ILTModelClient.Default", 0);
     LogInterface(log, "ILTClient.Default", 104, client);
+    LogInterface(log, "ILTModelClient.Default", 0, model);
     LogInterface(log, "ILTRenderer.Default", 0, renderer);
     LogInterface(log, "IClientShell.Default", 4, clientShell);
     ProbeRendererSlots(renderer, log);
@@ -4587,7 +5246,7 @@ bool InstallRendererPassThroughProbe(
         log(
             "m5_vr_tool_menu_armed",
             "toggle=both_grips_plus_y keyboard=F12 "
-            "tabs=melee,weapon,grip,2-hand,display,controls,debug "
+            "tabs=melee,weapon,grip,2-hand,hand-ik,left-ik,elbow,display,controls,debug "
             "navigation=triggers,left_stick,right_stick,a,b "
             "render=depth_aware_stereo_ndc_triangle_overlay "
             "menu_scale_percent=62 menu_distance_m=1.50 "

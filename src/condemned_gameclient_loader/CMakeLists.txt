@@ -18,6 +18,20 @@ add_library(condemnedvr-module-identity STATIC
   module_identity.cpp
   module_identity.h
 )
+
+add_library(condemnedvr-weapon-settings-store STATIC
+  weapon_settings_store.cpp
+  weapon_settings_store.h
+)
+target_compile_definitions(condemnedvr-weapon-settings-store PRIVATE
+  WIN32_LEAN_AND_MEAN
+  NOMINMAX
+)
+target_link_libraries(condemnedvr-weapon-settings-store
+  PUBLIC fearvr-common
+  PRIVATE
+  fearvr-warnings
+)
 target_compile_definitions(condemnedvr-module-identity PRIVATE
   WIN32_LEAN_AND_MEAN
   NOMINMAX
@@ -32,11 +46,17 @@ target_link_libraries(condemnedvr-module-identity PRIVATE
 
 add_library(condemnedvr-gameclient-loader SHARED
   GameClient.def
+  arm_ik_discovery.cpp
+  arm_ik_discovery.h
+  arm_ik_integration.cpp
+  arm_ik_integration.h
   binding_input.cpp
   binding_input.h
   dllmain.cpp
   renderer_probe.cpp
   renderer_probe.h
+  weapon_identity_reader.cpp
+  weapon_identity_reader.h
 )
 target_compile_definitions(condemnedvr-gameclient-loader PRIVATE
   WIN32_LEAN_AND_MEAN
@@ -44,6 +64,7 @@ target_compile_definitions(condemnedvr-gameclient-loader PRIVATE
 )
 target_link_libraries(condemnedvr-gameclient-loader PRIVATE
   condemnedvr-module-identity
+  condemnedvr-weapon-settings-store
   fearvr-common
   fearvr-warnings
   minhook
@@ -78,6 +99,24 @@ target_link_libraries(verify-condemned-executable PRIVATE
 )
 
 if(CONDEMNEDVR_BUILD_TESTS)
+  add_executable(test-condemned-weapon-settings-store
+    test_weapon_settings_store.cpp
+  )
+  target_compile_definitions(
+    test-condemned-weapon-settings-store PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+  )
+  target_link_libraries(
+    test-condemned-weapon-settings-store PRIVATE
+    condemnedvr-weapon-settings-store
+    fearvr-warnings
+  )
+  add_test(
+    NAME condemned_weapon_settings_store
+    COMMAND test-condemned-weapon-settings-store
+  )
+
   add_executable(test-condemned-module-identity
     test_module_identity.cpp
   )

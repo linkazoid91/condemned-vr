@@ -91,6 +91,34 @@
     pose and aim direction while the Grip tab is open. F11 retains the legacy
     keyboard/controller calibration mode. Requires -PhysicalMeleeVisualProxy.
 
+.PARAMETER WeaponCatalogProbe
+    Logs the stable Retail index, database name, and animation property for
+    every player weapon. This is an opt-in developer discovery pass and is
+    not used by gameplay frames.
+
+.PARAMETER ArmIkDiscovery
+    Runs the observation-only player-body pass needed before arm IK. It logs
+    the live node hierarchy and arm transforms plus known hand sockets. It
+    never installs node controls or changes animation.
+    Requires -StereoTuning so sampling occurs on the verified render path.
+
+.PARAMETER ArmIkRightHandProof
+    Enables the first guarded arm-IK mutation gate. It installs one callback
+    on Right_hand and solves the authored RightHand socket onto the same
+    weighted VR weapon pose used for rendering and collision. Upper arm and
+    forearm animation remain untouched. Requires -StereoTuning and
+    -HeadAimProbe.
+
+.PARAMETER ArmIkRightArm
+    Enables the second guarded arm-IK mutation gate. It retains exact
+    RightHand socket placement and additionally rotates Right_armu and
+    Right_arml with the measured two-bone chain, then mirrors the complete
+    measured solve onto Left_armu, Left_arml, Left_hand, and LeftHand. The
+    legacy switch name is retained for launch compatibility. Requires
+    -StereoTuning and -HeadAimProbe. It is mutually exclusive with
+    -ArmIkRightHandProof so the hand-only build remains an explicit A/B
+    fallback.
+
 .PARAMETER TwoHandedMelee
     Enables profile-driven two-hand melee. The right hand remains the dominant
     weapon anchor; squeezing the left grip near the configured support point
@@ -142,6 +170,10 @@ param(
     [switch]$PhysicalMeleeWallProxy,
     [switch]$PhysicalMeleeVisualProxy,
     [switch]$WeaponGripCalibration,
+    [switch]$WeaponCatalogProbe,
+    [switch]$ArmIkDiscovery,
+    [switch]$ArmIkRightHandProof,
+    [switch]$ArmIkRightArm,
     [switch]$TwoHandedMelee,
     [switch]$NoHidFpsFix,
     [switch]$NoXrFramePacing,
@@ -179,6 +211,20 @@ if ($PSBoundParameters.ContainsKey('StartupImage')) {
 
 if ($RecenterProbe -and -not $StereoTuning) {
     throw '-RecenterProbe requires -StereoTuning.'
+}
+if ($ArmIkDiscovery -and -not $StereoTuning) {
+    throw '-ArmIkDiscovery requires -StereoTuning.'
+}
+if ($ArmIkRightHandProof -and
+    -not ($StereoTuning -and $HeadAimProbe)) {
+    throw '-ArmIkRightHandProof requires -StereoTuning and -HeadAimProbe.'
+}
+if ($ArmIkRightArm -and
+    -not ($StereoTuning -and $HeadAimProbe)) {
+    throw '-ArmIkRightArm requires -StereoTuning and -HeadAimProbe.'
+}
+if ($ArmIkRightArm -and $ArmIkRightHandProof) {
+    throw '-ArmIkRightArm and -ArmIkRightHandProof are mutually exclusive.'
 }
 if ($MenuControlsProbe -and -not $MenuProbe) {
     throw '-MenuControlsProbe requires -MenuProbe.'
@@ -510,6 +556,18 @@ if ($PhysicalMeleeVisualProxy) {
 if ($WeaponGripCalibration) {
     $gameArguments += '-condemnedvr-m5-weapon-grip-calibration'
 }
+if ($WeaponCatalogProbe) {
+    $gameArguments += '-condemnedvr-m5-weapon-catalog-probe'
+}
+if ($ArmIkDiscovery) {
+    $gameArguments += '-condemnedvr-arm-ik-discovery'
+}
+if ($ArmIkRightHandProof) {
+    $gameArguments += '-condemnedvr-arm-ik-right-hand-proof'
+}
+if ($ArmIkRightArm) {
+    $gameArguments += '-condemnedvr-arm-ik-right-arm'
+}
 if ($TwoHandedMelee) {
     $gameArguments += '-condemnedvr-m5-two-handed-melee'
 }
@@ -695,6 +753,21 @@ try {
                 '"event":"m5_two_handed_melee_rejected"')) {
             throw 'The guarded M5 two-handed melee mode was rejected.'
         }
+        if ($ArmIkDiscovery -and
+            $loaderText.Contains(
+                '"event":"arm_ik_discovery_rejected"')) {
+            throw 'The guarded arm-IK discovery pass was rejected.'
+        }
+        if ($ArmIkRightHandProof -and
+            $loaderText.Contains(
+                '"event":"arm_ik_right_hand_proof_rejected"')) {
+            throw 'The guarded right-hand arm-IK proof was rejected.'
+        }
+        if ($ArmIkRightArm -and
+            $loaderText.Contains(
+                '"event":"arm_ik_right_arm_rejected"')) {
+            throw 'The guarded full two-arm IK gate was rejected.'
+        }
         if ($RecenterProbe -and
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_rejected"')) {
@@ -769,6 +842,15 @@ try {
         $twoHandedMeleeReady = -not $TwoHandedMelee -or
             $loaderText.Contains(
                 '"event":"m5_two_handed_melee_armed"')
+        $armIkDiscoveryReady = -not $ArmIkDiscovery -or
+            $loaderText.Contains(
+                '"event":"arm_ik_discovery_armed"')
+        $armIkRightHandProofReady = -not $ArmIkRightHandProof -or
+            $loaderText.Contains(
+                '"event":"arm_ik_right_hand_proof_armed"')
+        $armIkRightArmReady = -not $ArmIkRightArm -or
+            $loaderText.Contains(
+                '"event":"arm_ik_right_arm_armed"')
         $recenterReady = -not $RecenterProbe -or
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_armed"')
@@ -791,6 +873,9 @@ try {
             $physicalMeleeVisualProxyReady -and
             $weaponGripCalibrationReady -and
             $twoHandedMeleeReady -and
+            $armIkDiscoveryReady -and
+            $armIkRightHandProofReady -and
+            $armIkRightArmReady -and
             $recenterReady
     } until (($bridgeReady -and $hostReady -and $hidFpsFixReady -and
               $backgroundRenderReady -and $inputHooksReady) -or
@@ -850,6 +935,9 @@ try {
             PhysicalMeleeVisualProxy = [bool]$PhysicalMeleeVisualProxy
             WeaponGripCalibration = [bool]$WeaponGripCalibration
             TwoHandedMelee = [bool]$TwoHandedMelee
+            ArmIkDiscovery = [bool]$ArmIkDiscovery
+            ArmIkRightHandProof = [bool]$ArmIkRightHandProof
+            ArmIkRightArm = [bool]$ArmIkRightArm
             Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true
@@ -895,6 +983,18 @@ try {
             -ForegroundColor Cyan
         Write-Host '  VR Tools > 2-HAND can capture the current left-hand pose and tune the grab radius.'
         Write-Host '  Magenta = right controller; cyan = left; green/amber/red = support target state.'
+    }
+    if ($ArmIkDiscovery) {
+        Write-Host 'Arm-IK discovery is read-only; enter gameplay once so the player-body geometry can be logged.' `
+            -ForegroundColor Cyan
+    }
+    if ($ArmIkRightHandProof) {
+        Write-Host 'Right-hand IK proof is active: RightHand follows the weighted VR weapon pose; arm and forearm remain Retail.' `
+            -ForegroundColor Cyan
+    }
+    if ($ArmIkRightArm) {
+        Write-Host 'Full two-arm IK is armed: the right chain follows the weighted weapon and the mirrored left chain follows the free/support grip target.' `
+            -ForegroundColor Cyan
     }
     if ($PerformanceProbe) {
         $watcherScript = Join-Path $PSScriptRoot (

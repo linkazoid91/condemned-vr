@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cmath>
 #include <cstdint>
@@ -57,10 +58,10 @@ inline const char* PhysicalMeleeProfileName(
     }
 }
 
-// Geometry is expressed in LithTech world units. The initial generic profile
-// represents a one-handed pipe extending 0.75 m along controller +Z. Exact
-// grip offsets, mass and collision volumes become per-weapon data once the
-// Retail weapon identity path is verified.
+// Geometry is expressed in LithTech world units. The generic fallback is a
+// non-attacking one-handed shape extending 0.75 m along controller +Z. A
+// verified Retail identity opts into explicit attack/handling behavior while
+// its model-local alignment remains isolated in that weapon's own record.
 struct PhysicalMeleeProfile {
     PhysicalMeleeProfileId id{
         PhysicalMeleeProfileId::GenericOneHanded};
@@ -113,15 +114,55 @@ struct PhysicalMeleeProfile {
     std::uint64_t maximumSampleGapNs{100'000'000ULL};
 };
 
-// The live M5 calibration run identified Retail weapon index 17 as the fire
-// axe. Keep this mapping in the data layer so the renderer, collision probe,
-// and future standalone weapon body all consume the same persistent record.
+// Live database telemetry identified player-weapon index 32 as pipe_lever,
+// indices 0/1/64/65 as the complete 2x4 family, and index 17 as fireaxe.
+// Keep these mappings in the data layer so rendering, collision, and the
+// future standalone weapon body consume the same records.
+constexpr std::int32_t kCondemnedPipeLeverWeaponIndex = 32;
 constexpr std::int32_t kCondemnedFireAxeWeaponIndex = 17;
+constexpr std::array<std::int32_t, 4U>
+    kCondemned2x4WeaponIndices{{0, 1, 64, 65}};
+
+inline bool IsCondemned2x4WeaponIndex(
+    std::int32_t weaponIndex) noexcept {
+    return std::find(
+               kCondemned2x4WeaponIndices.begin(),
+               kCondemned2x4WeaponIndices.end(),
+               weaponIndex) != kCondemned2x4WeaponIndices.end();
+}
 
 inline PhysicalMeleeProfile
 ResolvePhysicalMeleeProfileForRetailWeaponIndex(
     std::int32_t weaponIndex) noexcept {
     PhysicalMeleeProfile profile{};
+    if (weaponIndex == kCondemnedPipeLeverWeaponIndex ||
+        IsCondemned2x4WeaponIndex(weaponIndex)) {
+        profile.id = weaponIndex == kCondemnedPipeLeverWeaponIndex
+            ? PhysicalMeleeProfileId::Pipe
+            : PhysicalMeleeProfileId::Plank;
+        profile.localTipOffsetUnits = {0.0F, 0.0F, 75.0F};
+        // Promoted from the accepted 2026-08-04 pipe_lever snapshot. The
+        // complete 2x4 family deliberately shares this grip preset at the
+        // tester's request; an asset-specific correction can still split a
+        // catalog record later without changing the shared solver.
+        profile.modelLocalGripPositionUnits = {0.0F, 3.0F, -5.5F};
+        profile.modelLocalGripRotation = {
+            -0.319308F, 0.423837F, 0.162696F, 0.831826F};
+        profile.radiusUnits = 4.0F;
+        profile.massKilograms = 1.75F;
+        // Use the same virtual-coupling stiffness family as the axe, then
+        // make the pipe lighter through handlingWeight and slightly higher
+        // damping.  The earlier 18/18 follow and 1.5 catch-up values pulled
+        // the pipe back to the controller so aggressively that changing its
+        // handling weight was almost imperceptible.
+        profile.handlingWeight = 1.75F;
+        profile.positionalFollow = 10.0F;
+        profile.rotationalFollow = 8.0F;
+        profile.catchUpStrength = 0.80F;
+        profile.dampingRatio = 0.65F;
+        profile.swingAttackEnabled = true;
+        return profile;
+    }
     if (weaponIndex != kCondemnedFireAxeWeaponIndex) {
         return profile;
     }
@@ -304,6 +345,67 @@ struct PhysicalMeleeTwoHandPoseResult {
     bool justAttached{false};
     bool justReleased{false};
 };
+
+// The attached rendered support hand becomes a rigid child of the final
+// weighted weapon pose. Its position is the authored support anchor and this
+// state captures its relative rotation on attachment, avoiding an orientation
+// snap while preventing later controller twist from swivelling the hand around
+// that fixed grip point. Release returns both channels to the controller.
+struct PhysicalMeleeSupportHandOrientationState {
+    fearvr::TrackingQuaternion handFromWeaponRotation{
+        0.0F, 0.0F, 0.0F, 1.0F};
+    bool attachedRotationValid{false};
+};
+
+inline bool ResolvePhysicalMeleeSupportHandRotation(
+    PhysicalMeleeSupportHandOrientationState& state,
+    const fearvr::TrackingQuaternion& weaponWorldRotation,
+    const fearvr::TrackingQuaternion& controllerGripWorldRotation,
+    bool attached,
+    bool justAttached,
+    fearvr::TrackingQuaternion& handWorldRotation) noexcept {
+    const auto RotationValid = [](
+        const fearvr::TrackingQuaternion& rotation) noexcept {
+        const float lengthSquared =
+            rotation.x * rotation.x + rotation.y * rotation.y +
+            rotation.z * rotation.z + rotation.w * rotation.w;
+        return fearvr::IsFinite(rotation) &&
+            std::isfinite(lengthSquared) &&
+            lengthSquared >= 0.25F && lengthSquared <= 4.0F;
+    };
+    if (!RotationValid(controllerGripWorldRotation)) {
+        state = {};
+        handWorldRotation = {0.0F, 0.0F, 0.0F, 0.0F};
+        return false;
+    }
+    if (!attached) {
+        state = {};
+        handWorldRotation =
+            fearvr::Normalize(controllerGripWorldRotation);
+        return true;
+    }
+    if (!RotationValid(weaponWorldRotation)) {
+        state = {};
+        handWorldRotation = {0.0F, 0.0F, 0.0F, 0.0F};
+        return false;
+    }
+    if (justAttached || !state.attachedRotationValid) {
+        state.handFromWeaponRotation = fearvr::Multiply(
+            fearvr::Conjugate(
+                fearvr::Normalize(weaponWorldRotation)),
+            fearvr::Normalize(controllerGripWorldRotation));
+        state.attachedRotationValid =
+            RotationValid(state.handFromWeaponRotation);
+    }
+    if (!state.attachedRotationValid) {
+        handWorldRotation = {0.0F, 0.0F, 0.0F, 0.0F};
+        return false;
+    }
+    handWorldRotation = fearvr::Multiply(
+        fearvr::Normalize(weaponWorldRotation),
+        state.handFromWeaponRotation);
+    return RotationValid(handWorldRotation);
+}
 
 enum class PhysicalMeleeContactReason : std::uint8_t {
     None,

@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "arm_ik.h"
 #include "condemned_physical_melee.h"
+#include "condemned_weapon_identity.h"
 #include "input_state.h"
 #include "protocol.h"
 
@@ -17,6 +19,9 @@ enum class ToolMenuTab : std::uint8_t {
     Weapon,
     Grip,
     TwoHand,
+    HandIk,
+    LeftHandIk,
+    ElbowIk,
     Display,
     Controls,
     Debug,
@@ -33,6 +38,12 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
         return "GRIP";
     case ToolMenuTab::TwoHand:
         return "2-HAND";
+    case ToolMenuTab::HandIk:
+        return "HAND IK";
+    case ToolMenuTab::LeftHandIk:
+        return "LEFT IK";
+    case ToolMenuTab::ElbowIk:
+        return "ELBOW";
     case ToolMenuTab::Display:
         return "DISPLAY";
     case ToolMenuTab::Controls:
@@ -54,6 +65,12 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
         return 9U;
     case ToolMenuTab::TwoHand:
         return 8U;
+    case ToolMenuTab::HandIk:
+        return 9U;
+    case ToolMenuTab::LeftHandIk:
+        return 8U;
+    case ToolMenuTab::ElbowIk:
+        return 6U;
     case ToolMenuTab::Display:
         return 9U;
     case ToolMenuTab::Controls:
@@ -152,6 +169,86 @@ struct ToolMenuMeleeSettings {
     float catchUpStrength{1.50F};
     float dampingRatio{1.0F};
 };
+
+// Per-weapon correction applied to the dominant-hand socket target after the
+// weighted VR weapon pose has been resolved. Position is expressed in the
+// weapon/controller target's local LithTech units; rotation is an X/Y/Z local
+// correction in degrees. Zero is deliberately the safe proof-build behavior.
+struct ToolMenuRightHandIkSettings {
+    fearvr::TrackingVector positionOffsetUnits{};
+    fearvr::TrackingVector rotationOffsetDegrees{};
+};
+
+constexpr float kToolMenuRightHandIkMaximumPositionOffsetUnits = 100.0F;
+
+inline bool ToolMenuRightHandIkSettingsAreValid(
+    const ToolMenuRightHandIkSettings& settings) noexcept {
+    return fearvr::IsFinite(settings.positionOffsetUnits) &&
+        fearvr::IsFinite(settings.rotationOffsetDegrees) &&
+        std::fabs(settings.positionOffsetUnits.x) <=
+            kToolMenuRightHandIkMaximumPositionOffsetUnits &&
+        std::fabs(settings.positionOffsetUnits.y) <=
+            kToolMenuRightHandIkMaximumPositionOffsetUnits &&
+        std::fabs(settings.positionOffsetUnits.z) <=
+            kToolMenuRightHandIkMaximumPositionOffsetUnits &&
+        settings.rotationOffsetDegrees.x >= -180.0F &&
+        settings.rotationOffsetDegrees.x <= 180.0F &&
+        settings.rotationOffsetDegrees.y >= -180.0F &&
+        settings.rotationOffsetDegrees.y <= 180.0F &&
+        settings.rotationOffsetDegrees.z >= -180.0F &&
+        settings.rotationOffsetDegrees.z <= 180.0F;
+}
+
+inline PhysicalMeleeRigidTransform ResolveToolMenuRightHandIkTarget(
+    const PhysicalMeleeRigidTransform& baseTarget,
+    const ToolMenuRightHandIkSettings& settings) noexcept {
+    if (!PhysicalMeleeRigidTransformIsValid(baseTarget) ||
+        !ToolMenuRightHandIkSettingsAreValid(settings)) {
+        return {{}, {0.0F, 0.0F, 0.0F, 0.0F}};
+    }
+    const fearvr::TrackingQuaternion baseRotation =
+        fearvr::Normalize(baseTarget.rotation);
+    return {
+        PhysicalMeleeAdd(
+            baseTarget.positionUnits,
+            fearvr::Rotate(
+                baseRotation, settings.positionOffsetUnits)),
+        fearvr::Normalize(fearvr::Multiply(
+            baseRotation,
+            PhysicalMeleeLocalRotationFromDegrees(
+                settings.rotationOffsetDegrees)))};
+}
+
+inline PhysicalMeleeRigidTransform ResolveToolMenuLeftHandIkTarget(
+    const PhysicalMeleeRigidTransform& baseTarget,
+    const fearvr::ArmIkTuning& tuning,
+    float unitsPerMeter = 100.0F) noexcept {
+    if (!PhysicalMeleeRigidTransformIsValid(baseTarget) ||
+        !std::isfinite(unitsPerMeter) || unitsPerMeter <= 0.0F ||
+        unitsPerMeter > 1000.0F) {
+        return {{}, {0.0F, 0.0F, 0.0F, 0.0F}};
+    }
+    const fearvr::ArmIkTuning sanitized =
+        fearvr::SanitizeArmIkTuning(tuning);
+    const fearvr::TrackingQuaternion baseRotation =
+        fearvr::Normalize(baseTarget.rotation);
+    const fearvr::TrackingVector localOffsetUnits{
+        sanitized.leftHandRightMeters * unitsPerMeter,
+        sanitized.leftHandUpMeters * unitsPerMeter,
+        sanitized.leftHandForwardMeters * unitsPerMeter};
+    const fearvr::TrackingVector localRotationDegrees{
+        sanitized.leftHandPitchDegrees,
+        sanitized.leftHandYawDegrees,
+        sanitized.leftHandRollDegrees};
+    return {
+        PhysicalMeleeAdd(
+            baseTarget.positionUnits,
+            fearvr::Rotate(baseRotation, localOffsetUnits)),
+        fearvr::Normalize(fearvr::Multiply(
+            baseRotation,
+            PhysicalMeleeLocalRotationFromDegrees(
+                localRotationDegrees)))};
+}
 
 inline bool ToolMenuMeleeSettingsAreValid(
     const ToolMenuMeleeSettings& settings) noexcept {
@@ -272,8 +369,11 @@ struct ToolMenuWeaponSettingsSlot {
     PhysicalMeleeProfileId profileId{
         PhysicalMeleeProfileId::GenericOneHanded};
     ToolMenuMeleeSettings settings{};
+    ToolMenuRightHandIkSettings rightHandIkSettings{};
     std::uint64_t lastUsed{0U};
     bool occupied{false};
+    bool persistentLoadAttempted{false};
+    bool rightHandIkPersistentLoadAttempted{false};
 };
 
 constexpr std::size_t kToolMenuWeaponSettingsSlotCount = 64U;
@@ -311,6 +411,9 @@ inline ToolMenuWeaponSettingsSlot* ResolveToolMenuWeaponSettingsSlot(
         if (slot->profileId != baseProfile.id) {
             slot->profileId = baseProfile.id;
             slot->settings = ToolMenuMeleeSettingsFromProfile(baseProfile);
+            slot->rightHandIkSettings = {};
+            slot->persistentLoadAttempted = false;
+            slot->rightHandIkPersistentLoadAttempted = false;
         }
         slot->lastUsed = ++registry.useSequence;
         return slot;
@@ -343,6 +446,13 @@ struct ToolMenuMeleeTelemetry {
     float swingSpeedMetersPerSecond{0.0F};
     std::uint32_t triggerCount{0U};
     std::int32_t weaponIndex{-1};
+    char weaponName[kRetailWeaponNameCapacity]{};
+    char weaponAnimationProperty[
+        kRetailWeaponAnimationPropertyCapacity]{};
+    RetailWeaponPoseFamily weaponPoseFamily{
+        RetailWeaponPoseFamily::Unknown};
+    bool weaponNameResolved{false};
+    bool weaponAnimationPropertyResolved{false};
     bool trackingFresh{false};
     bool wallProxyEnabled{false};
     bool visualProxyEnabled{false};

@@ -188,6 +188,50 @@ int main() {
         return Fail("support release must return a valid one-hand target");
     }
 
+    // The visible support hand keeps the tracked controller position, while
+    // attachment captures its orientation relative to the weapon. Subsequent
+    // controller twist cannot swivel the hand around the grip point.
+    PhysicalMeleeSupportHandOrientationState supportOrientation{};
+    const fearvr::TrackingQuaternion quarterTurnZ{
+        0.0F, 0.0F, kHalfSqrt, kHalfSqrt};
+    fearvr::TrackingQuaternion visibleSupportRotation{};
+    if (!ResolvePhysicalMeleeSupportHandRotation(
+            supportOrientation,
+            {0.0F, 0.0F, 0.0F, 1.0F}, quarterTurnZ,
+            true, true, visibleSupportRotation) ||
+        std::fabs(fearvr::Dot(
+            visibleSupportRotation, quarterTurnZ)) < 0.999F) {
+        return Fail(
+            "support attachment must preserve its initial controller orientation");
+    }
+    if (!ResolvePhysicalMeleeSupportHandRotation(
+            supportOrientation,
+            {0.0F, 0.0F, 0.0F, 1.0F},
+            {0.0F, 0.0F, 0.0F, 1.0F},
+            true, false, visibleSupportRotation) ||
+        std::fabs(fearvr::Dot(
+            visibleSupportRotation, quarterTurnZ)) < 0.999F) {
+        return Fail(
+            "attached support orientation must ignore later controller twist");
+    }
+    if (!ResolvePhysicalMeleeSupportHandRotation(
+            supportOrientation, quarterTurnZ,
+            {0.0F, 0.0F, 0.0F, 1.0F},
+            true, false, visibleSupportRotation) ||
+        std::fabs(visibleSupportRotation.z) < 0.999F) {
+        return Fail(
+            "attached support orientation must remain rigid to weapon rotation");
+    }
+    if (!ResolvePhysicalMeleeSupportHandRotation(
+            supportOrientation, quarterTurnZ,
+            {0.0F, 0.0F, 0.0F, 1.0F},
+            false, false, visibleSupportRotation) ||
+        supportOrientation.attachedRotationValid ||
+        std::fabs(visibleSupportRotation.w) < 0.999F) {
+        return Fail(
+            "support release must restore raw controller orientation");
+    }
+
     // Pressing away from the handle consumes that press. Moving closer while
     // still squeezed must not create a remote snap-grab.
     twoHand = UpdatePhysicalMeleeSecondaryGrip(
@@ -544,6 +588,35 @@ int main() {
         !Near(fallbackProfile.handlingWeight, 1.0F)) {
         return Fail("unknown weapon indices must retain the safe profile");
     }
+    const PhysicalMeleeProfile pipeProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            kCondemnedPipeLeverWeaponIndex);
+    if (!PhysicalMeleeProfileIsValid(pipeProfile) ||
+        pipeProfile.id != PhysicalMeleeProfileId::Pipe ||
+        std::strcmp(
+            PhysicalMeleeProfileName(pipeProfile.id), "pipe") != 0 ||
+        !Near(pipeProfile.localTipOffsetUnits.z, 75.0F) ||
+        !Near(pipeProfile.modelLocalGripPositionUnits.x, 0.0F) ||
+        !Near(pipeProfile.modelLocalGripPositionUnits.y, 3.0F) ||
+        !Near(pipeProfile.modelLocalGripPositionUnits.z, -5.5F) ||
+        !Near(pipeProfile.modelLocalGripRotation.x, -0.319308F) ||
+        !Near(pipeProfile.modelLocalGripRotation.y, 0.423837F) ||
+        !Near(pipeProfile.modelLocalGripRotation.z, 0.162696F) ||
+        !Near(pipeProfile.modelLocalGripRotation.w, 0.831826F) ||
+        pipeProfile.secondaryGripEnabled ||
+        !Near(pipeProfile.massKilograms, 1.75F) ||
+        !Near(pipeProfile.handlingWeight, 1.75F) ||
+        !Near(pipeProfile.positionalFollow, 10.0F) ||
+        !Near(pipeProfile.rotationalFollow, 8.0F) ||
+        !Near(pipeProfile.catchUpStrength, 0.80F) ||
+        !Near(pipeProfile.dampingRatio, 0.65F) ||
+        !pipeProfile.swingAttackEnabled ||
+        !Near(
+            pipeProfile.swingAttackTriggerSpeedMetersPerSecond,
+            3.00F)) {
+        return Fail(
+            "weapon index 32 must resolve the provisional one-hand pipe profile");
+    }
     const PhysicalMeleeProfile axeProfile =
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(
             kCondemnedFireAxeWeaponIndex);
@@ -579,6 +652,48 @@ int main() {
         axeProfile.rotationalFollow >= profile.rotationalFollow) {
         return Fail(
             "weapon index 17 must resolve the persistent heavy axe profile");
+    }
+    for (const std::int32_t plankIndex :
+         kCondemned2x4WeaponIndices) {
+        const PhysicalMeleeProfile plankProfile =
+            ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+                plankIndex);
+        if (!PhysicalMeleeProfileIsValid(plankProfile) ||
+            plankProfile.id != PhysicalMeleeProfileId::Plank ||
+            !plankProfile.swingAttackEnabled ||
+            plankProfile.secondaryGripEnabled ||
+            !Near(
+                plankProfile.modelLocalGripPositionUnits.y,
+                pipeProfile.modelLocalGripPositionUnits.y) ||
+            !Near(
+                plankProfile.modelLocalGripPositionUnits.z,
+                pipeProfile.modelLocalGripPositionUnits.z) ||
+            !Near(
+                plankProfile.modelLocalGripRotation.x,
+                pipeProfile.modelLocalGripRotation.x) ||
+            !Near(
+                plankProfile.modelLocalGripRotation.w,
+                pipeProfile.modelLocalGripRotation.w) ||
+            !Near(
+                plankProfile.handlingWeight,
+                pipeProfile.handlingWeight) ||
+            !Near(
+                plankProfile.positionalFollow,
+                pipeProfile.positionalFollow) ||
+            !Near(
+                plankProfile.rotationalFollow,
+                pipeProfile.rotationalFollow) ||
+            !Near(
+                plankProfile.dampingRatio,
+                pipeProfile.dampingRatio)) {
+            return Fail(
+                "every verified 2x4 variant must share the pipe one-hand preset");
+        }
+    }
+    if (IsCondemned2x4WeaponIndex(2) ||
+        IsCondemned2x4WeaponIndex(63) ||
+        IsCondemned2x4WeaponIndex(66)) {
+        return Fail("the 2x4 catalog mapping must not absorb adjacent weapons");
     }
 
     // A deliberate weighted sweep emits one short Retail attack pulse. It
@@ -690,6 +805,25 @@ int main() {
           lightOutput.position.x < weightTarget.position.x)) {
         return Fail(
             "the axe handling profile must visibly follow more slowly");
+    }
+    fearvr::WeaponWeightFilterState pipeFilter{};
+    fearvr::WeaponWeightPose pipeOutput{};
+    const fearvr::WeaponWeightProfile pipeHandling{
+        pipeProfile.handlingWeight,
+        pipeProfile.positionalFollow,
+        pipeProfile.rotationalFollow,
+        pipeProfile.catchUpStrength,
+        pipeProfile.dampingRatio};
+    fearvr::UpdateWeaponWeightFilter(
+        pipeFilter, weightStart, true, 5'000'000'000ULL,
+        true, pipeHandling, pipeOutput);
+    fearvr::UpdateWeaponWeightFilter(
+        pipeFilter, weightTarget, true, 5'011'111'111ULL,
+        true, pipeHandling, pipeOutput);
+    if (!(heavyOutput.position.x < pipeOutput.position.x &&
+          pipeOutput.position.x < lightOutput.position.x)) {
+        return Fail(
+            "the pipe must have perceptible inertia between direct follow and the axe");
     }
     PhysicalMeleeProfile invalidHandling = profile;
     invalidHandling.handlingWeight = 4.1F;
