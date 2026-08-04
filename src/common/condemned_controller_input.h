@@ -368,6 +368,7 @@ inline ControllerAimWorldPose ResolveControllerWorldPose(
     const FearVrPose& trackingRecenter,
     const fearvr::TrackingVector& retailCameraPosition,
     const fearvr::TrackingQuaternion& retailBaseRotation,
+    std::uint32_t handMask,
     std::uint32_t poseValidHands,
     const FearVrPose& trackedPose,
     float unitsPerMeter = 100.0F) noexcept {
@@ -377,8 +378,10 @@ inline ControllerAimWorldPose ResolveControllerWorldPose(
         retailBaseRotation.z * retailBaseRotation.z +
         retailBaseRotation.w * retailBaseRotation.w;
     if (!fearvr::IsInputStateUsable(state, sampleFresh) ||
-        (state.activeHands & FEARVR_HAND_MASK_RIGHT) == 0 ||
-        (poseValidHands & FEARVR_HAND_MASK_RIGHT) == 0 ||
+        (handMask != FEARVR_HAND_MASK_LEFT &&
+         handMask != FEARVR_HAND_MASK_RIGHT) ||
+        (state.activeHands & handMask) == 0 ||
+        (poseValidHands & handMask) == 0 ||
         !fearvr::IsFinite(retailCameraPosition) ||
         !fearvr::IsFinite(retailBaseRotation) ||
         !std::isfinite(baseMagnitudeSquared) ||
@@ -422,6 +425,7 @@ inline ControllerAimWorldPose ResolveControllerAimWorldPose(
     return ResolveControllerWorldPose(
         state, sampleFresh, trackingRecenter,
         retailCameraPosition, retailBaseRotation,
+        FEARVR_HAND_MASK_RIGHT,
         state.aimPoseValidHands,
         state.handAimPose[FEARVR_HAND_RIGHT], unitsPerMeter);
 }
@@ -439,8 +443,47 @@ inline ControllerAimWorldPose ResolveControllerGripWorldPose(
     return ResolveControllerWorldPose(
         state, sampleFresh, trackingRecenter,
         retailCameraPosition, retailBaseRotation,
+        FEARVR_HAND_MASK_RIGHT,
         state.gripPoseValidHands,
         state.handGripPose[FEARVR_HAND_RIGHT], unitsPerMeter);
+}
+
+inline ControllerAimWorldPose ResolveControllerGripWorldPoseForHand(
+    const FearVrInputState& state,
+    bool sampleFresh,
+    const FearVrPose& trackingRecenter,
+    const fearvr::TrackingVector& retailCameraPosition,
+    const fearvr::TrackingQuaternion& retailBaseRotation,
+    std::uint32_t hand,
+    float unitsPerMeter = 100.0F) noexcept {
+    if (hand >= FEARVR_HAND_COUNT) {
+        return {};
+    }
+    const std::uint32_t handMask = 1U << hand;
+    return ResolveControllerWorldPose(
+        state, sampleFresh, trackingRecenter,
+        retailCameraPosition, retailBaseRotation,
+        handMask, state.gripPoseValidHands,
+        state.handGripPose[hand], unitsPerMeter);
+}
+
+inline ControllerAimWorldPose ResolveControllerAimWorldPoseForHand(
+    const FearVrInputState& state,
+    bool sampleFresh,
+    const FearVrPose& trackingRecenter,
+    const fearvr::TrackingVector& retailCameraPosition,
+    const fearvr::TrackingQuaternion& retailBaseRotation,
+    std::uint32_t hand,
+    float unitsPerMeter = 100.0F) noexcept {
+    if (hand >= FEARVR_HAND_COUNT) {
+        return {};
+    }
+    const std::uint32_t handMask = 1U << hand;
+    return ResolveControllerWorldPose(
+        state, sampleFresh, trackingRecenter,
+        retailCameraPosition, retailBaseRotation,
+        handMask, state.aimPoseValidHands,
+        state.handAimPose[hand], unitsPerMeter);
 }
 
 inline ControllerAimRotation ResolveControllerAimRotation(

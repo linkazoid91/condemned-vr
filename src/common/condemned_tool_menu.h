@@ -16,6 +16,7 @@ enum class ToolMenuTab : std::uint8_t {
     Melee,
     Weapon,
     Grip,
+    TwoHand,
     Display,
     Controls,
     Debug,
@@ -30,6 +31,8 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
         return "WEAPON";
     case ToolMenuTab::Grip:
         return "GRIP";
+    case ToolMenuTab::TwoHand:
+        return "2-HAND";
     case ToolMenuTab::Display:
         return "DISPLAY";
     case ToolMenuTab::Controls:
@@ -49,6 +52,8 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
         return 7U;
     case ToolMenuTab::Grip:
         return 9U;
+    case ToolMenuTab::TwoHand:
+        return 8U;
     case ToolMenuTab::Display:
         return 9U;
     case ToolMenuTab::Controls:
@@ -341,6 +346,10 @@ struct ToolMenuMeleeTelemetry {
     bool trackingFresh{false};
     bool wallProxyEnabled{false};
     bool visualProxyEnabled{false};
+    bool twoHandedEnabled{false};
+    bool secondaryGripAttached{false};
+    float secondaryGripDistanceMeters{0.0F};
+    float secondaryGripAnchorErrorMeters{0.0F};
 };
 
 inline bool ToolMenuToggleChordDown(

@@ -25,6 +25,16 @@ struct WeaponWeightPose {
     WeaponWeightQuaternion orientation;
 };
 
+// A held-object filter must operate relative to the player's locomotion
+// frame. Filtering absolute world coordinates makes smooth locomotion look
+// like an enormous hand acceleration and allows a heavy object to lag behind
+// its owner. Keeping the spring state in this local frame preserves hand-
+// relative inertia while translations and turns of the player remain rigid.
+struct WeaponWeightReferenceFrame {
+    WeaponWeightVector position;
+    WeaponWeightQuaternion orientation;
+};
+
 struct WeaponWeightProfile {
     float weight{1.0F};
     float positionalFollow{18.0F};
@@ -100,6 +110,11 @@ inline bool IsFinite(const WeaponWeightPose& value) noexcept {
     return IsFinite(value.position) && IsFinite(value.orientation);
 }
 
+inline bool IsFinite(
+    const WeaponWeightReferenceFrame& value) noexcept {
+    return IsFinite(value.position) && IsFinite(value.orientation);
+}
+
 inline WeaponWeightVector operator+(
     const WeaponWeightVector& left,
     const WeaponWeightVector& right) noexcept {
@@ -154,6 +169,39 @@ inline WeaponWeightQuaternion Multiply(
             left.y * right.x + left.z * right.w,
         left.w * right.w - left.x * right.x -
             left.y * right.y - left.z * right.z};
+}
+
+inline WeaponWeightVector Rotate(
+    const WeaponWeightQuaternion& rotation,
+    const WeaponWeightVector& value) noexcept {
+    const WeaponWeightQuaternion normalized = Normalize(rotation);
+    const WeaponWeightQuaternion rotated = Multiply(
+        Multiply(
+            normalized,
+            {value.x, value.y, value.z, 0.0F}),
+        Conjugate(normalized));
+    return {rotated.x, rotated.y, rotated.z};
+}
+
+inline WeaponWeightPose WeaponWeightPoseToReferenceFrame(
+    const WeaponWeightReferenceFrame& frame,
+    const WeaponWeightPose& worldPose) noexcept {
+    const WeaponWeightQuaternion inverse = Conjugate(
+        Normalize(frame.orientation));
+    return {
+        Rotate(inverse, worldPose.position - frame.position),
+        Normalize(Multiply(inverse, worldPose.orientation))};
+}
+
+inline WeaponWeightPose WeaponWeightPoseFromReferenceFrame(
+    const WeaponWeightReferenceFrame& frame,
+    const WeaponWeightPose& localPose) noexcept {
+    const WeaponWeightQuaternion frameOrientation = Normalize(
+        frame.orientation);
+    return {
+        frame.position + Rotate(frameOrientation, localPose.position),
+        Normalize(Multiply(
+            frameOrientation, localPose.orientation))};
 }
 
 inline WeaponWeightVector QuaternionToRotationVector(

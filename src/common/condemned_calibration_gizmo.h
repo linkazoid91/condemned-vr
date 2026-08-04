@@ -25,6 +25,16 @@ struct WeaponGripCalibrationGizmo {
     bool valid{false};
 };
 
+struct WeaponGripCalibrationGizmoPalette {
+    std::uint32_t outline{0xE0D8ECFFU};
+    std::uint32_t face{0xE080C8FFU};
+    std::uint32_t grip{0xFFFF40FFU};
+    std::uint32_t aim{0xFFFFFF20U};
+    std::uint32_t axisX{0xFFFF4040U};
+    std::uint32_t axisY{0xFF40FF60U};
+    std::uint32_t axisZ{0xFF4080FFU};
+};
+
 inline fearvr::TrackingVector CalibrationGizmoAdd(
     const fearvr::TrackingVector& left,
     const fearvr::TrackingVector& right) noexcept {
@@ -67,7 +77,8 @@ inline void AddWeaponGripCalibrationGizmoLine(
 inline WeaponGripCalibrationGizmo BuildWeaponGripCalibrationGizmo(
     const fearvr::TrackingVector& gripWorldPosition,
     const fearvr::TrackingQuaternion& gripWorldRotation,
-    const fearvr::TrackingQuaternion& aimWorldRotation) noexcept {
+    const fearvr::TrackingQuaternion& aimWorldRotation,
+    const WeaponGripCalibrationGizmoPalette& palette = {}) noexcept {
     WeaponGripCalibrationGizmo gizmo{};
     if (!fearvr::IsFinite(gripWorldPosition) ||
         !CalibrationGizmoQuaternionIsValid(gripWorldRotation) ||
@@ -83,14 +94,6 @@ inline WeaponGripCalibrationGizmo BuildWeaponGripCalibrationGizmo(
             gripWorldPosition, gripRotation, local);
     };
 
-    constexpr std::uint32_t kOutline = 0xE0D8ECFFU;
-    constexpr std::uint32_t kFace = 0xE080C8FFU;
-    constexpr std::uint32_t kGrip = 0xFFFF40FFU;
-    constexpr std::uint32_t kAim = 0xFFFFFF20U;
-    constexpr std::uint32_t kAxisX = 0xFFFF4040U;
-    constexpr std::uint32_t kAxisY = 0xFF40FF60U;
-    constexpr std::uint32_t kAxisZ = 0xFF4080FFU;
-
     const fearvr::TrackingVector handleLocal[] = {
         {-1.8F, -8.0F, -1.5F}, {1.8F, -8.0F, -1.5F},
         {1.8F, 2.0F, -1.5F}, {-1.8F, 2.0F, -1.5F},
@@ -103,7 +106,7 @@ inline WeaponGripCalibrationGizmo BuildWeaponGripCalibrationGizmo(
     for (const auto& edge : handleEdges) {
         AddWeaponGripCalibrationGizmoLine(
             gizmo, GripPoint(handleLocal[edge[0]]),
-            GripPoint(handleLocal[edge[1]]), kOutline);
+            GripPoint(handleLocal[edge[1]]), palette.outline);
     }
 
     const fearvr::TrackingVector faceLocal[] = {
@@ -114,16 +117,20 @@ inline WeaponGripCalibrationGizmo BuildWeaponGripCalibrationGizmo(
     for (const auto& edge : faceEdges) {
         AddWeaponGripCalibrationGizmoLine(
             gizmo, GripPoint(faceLocal[edge[0]]),
-            GripPoint(faceLocal[edge[1]]), kFace);
+            GripPoint(faceLocal[edge[1]]), palette.face);
     }
     AddWeaponGripCalibrationGizmoLine(
-        gizmo, GripPoint(handleLocal[3]), GripPoint(faceLocal[0]), kFace);
+        gizmo, GripPoint(handleLocal[3]), GripPoint(faceLocal[0]),
+        palette.face);
     AddWeaponGripCalibrationGizmoLine(
-        gizmo, GripPoint(handleLocal[2]), GripPoint(faceLocal[1]), kFace);
+        gizmo, GripPoint(handleLocal[2]), GripPoint(faceLocal[1]),
+        palette.face);
     AddWeaponGripCalibrationGizmoLine(
-        gizmo, GripPoint(handleLocal[6]), GripPoint(faceLocal[2]), kFace);
+        gizmo, GripPoint(handleLocal[6]), GripPoint(faceLocal[2]),
+        palette.face);
     AddWeaponGripCalibrationGizmoLine(
-        gizmo, GripPoint(handleLocal[7]), GripPoint(faceLocal[3]), kFace);
+        gizmo, GripPoint(handleLocal[7]), GripPoint(faceLocal[3]),
+        palette.face);
 
     constexpr std::size_t kRingSegments = 12;
     constexpr float kTwoPi = 6.28318530717958647692F;
@@ -139,33 +146,112 @@ inline WeaponGripCalibrationGizmo BuildWeaponGripCalibrationGizmo(
             std::cos(angle1) * 4.4F, 3.0F,
             1.0F + std::sin(angle1) * 4.4F};
         AddWeaponGripCalibrationGizmoLine(
-            gizmo, GripPoint(local0), GripPoint(local1), kOutline);
+            gizmo, GripPoint(local0), GripPoint(local1),
+            palette.outline);
     }
 
     AddWeaponGripCalibrationGizmoLine(
         gizmo, GripPoint({-2.5F, 0.0F, 0.0F}),
-        GripPoint({2.5F, 0.0F, 0.0F}), kGrip);
+        GripPoint({2.5F, 0.0F, 0.0F}), palette.grip);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, GripPoint({0.0F, -2.5F, 0.0F}),
-        GripPoint({0.0F, 2.5F, 0.0F}), kGrip);
+        GripPoint({0.0F, 2.5F, 0.0F}), palette.grip);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, GripPoint({0.0F, 0.0F, -2.5F}),
-        GripPoint({0.0F, 0.0F, 2.5F}), kGrip);
+        GripPoint({0.0F, 0.0F, 2.5F}), palette.grip);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, gripWorldPosition, GripPoint({5.0F, 0.0F, 0.0F}),
-        kAxisX);
+        palette.axisX);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, gripWorldPosition, GripPoint({0.0F, 5.0F, 0.0F}),
-        kAxisY);
+        palette.axisY);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, gripWorldPosition, GripPoint({0.0F, 0.0F, 5.0F}),
-        kAxisZ);
+        palette.axisZ);
     AddWeaponGripCalibrationGizmoLine(
         gizmo, gripWorldPosition,
         CalibrationGizmoTransformPoint(
             gripWorldPosition, aimRotation, {0.0F, 0.0F, 25.0F}),
-        kAim);
+        palette.aim);
     gizmo.valid = gizmo.count != 0;
+    return gizmo;
+}
+
+// Draws the invariant authored support point and its error to the tracked
+// off hand. Green means the secondary grip is attached; amber is a valid
+// candidate; red exposes a hand that is outside the configured grab volume.
+inline WeaponGripCalibrationGizmo BuildWeaponSecondaryGripGizmo(
+    const fearvr::TrackingVector& primaryGripWorldPosition,
+    const fearvr::TrackingVector& targetSecondaryWorldPosition,
+    const fearvr::TrackingVector& trackedSecondaryWorldPosition,
+    float grabRadiusUnits,
+    bool attached) noexcept {
+    WeaponGripCalibrationGizmo gizmo{};
+    if (!fearvr::IsFinite(primaryGripWorldPosition) ||
+        !fearvr::IsFinite(targetSecondaryWorldPosition) ||
+        !fearvr::IsFinite(trackedSecondaryWorldPosition) ||
+        !std::isfinite(grabRadiusUnits) || grabRadiusUnits <= 0.0F ||
+        grabRadiusUnits > 100.0F) {
+        return gizmo;
+    }
+    const fearvr::TrackingVector error{
+        trackedSecondaryWorldPosition.x -
+            targetSecondaryWorldPosition.x,
+        trackedSecondaryWorldPosition.y -
+            targetSecondaryWorldPosition.y,
+        trackedSecondaryWorldPosition.z -
+            targetSecondaryWorldPosition.z};
+    const float errorLength = std::sqrt(
+        error.x * error.x + error.y * error.y + error.z * error.z);
+    const std::uint32_t stateColor = attached
+        ? 0xFF50FF80U
+        : errorLength <= grabRadiusUnits
+            ? 0xFFFFC040U
+            : 0xFFFF5050U;
+    AddWeaponGripCalibrationGizmoLine(
+        gizmo, primaryGripWorldPosition,
+        targetSecondaryWorldPosition, 0xFF60D8FFU);
+    AddWeaponGripCalibrationGizmoLine(
+        gizmo, targetSecondaryWorldPosition,
+        trackedSecondaryWorldPosition, stateColor);
+    constexpr float kCrossHalfUnits = 3.5F;
+    const fearvr::TrackingVector axes[] = {
+        {kCrossHalfUnits, 0.0F, 0.0F},
+        {0.0F, kCrossHalfUnits, 0.0F},
+        {0.0F, 0.0F, kCrossHalfUnits}};
+    for (const fearvr::TrackingVector& axis : axes) {
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo,
+            {targetSecondaryWorldPosition.x - axis.x,
+             targetSecondaryWorldPosition.y - axis.y,
+             targetSecondaryWorldPosition.z - axis.z},
+            {targetSecondaryWorldPosition.x + axis.x,
+             targetSecondaryWorldPosition.y + axis.y,
+             targetSecondaryWorldPosition.z + axis.z},
+            stateColor);
+    }
+    constexpr std::size_t kRingSegments = 16U;
+    constexpr float kTwoPi = 6.28318530717958647692F;
+    for (std::size_t segment = 0; segment < kRingSegments; ++segment) {
+        const float angle0 = kTwoPi * static_cast<float>(segment) /
+            static_cast<float>(kRingSegments);
+        const float angle1 = kTwoPi * static_cast<float>(segment + 1U) /
+            static_cast<float>(kRingSegments);
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo,
+            {targetSecondaryWorldPosition.x +
+                 std::cos(angle0) * grabRadiusUnits,
+             targetSecondaryWorldPosition.y +
+                 std::sin(angle0) * grabRadiusUnits,
+             targetSecondaryWorldPosition.z},
+            {targetSecondaryWorldPosition.x +
+                 std::cos(angle1) * grabRadiusUnits,
+             targetSecondaryWorldPosition.y +
+                 std::sin(angle1) * grabRadiusUnits,
+             targetSecondaryWorldPosition.z},
+            stateColor);
+    }
+    gizmo.valid = gizmo.count != 0U;
     return gizmo;
 }
 

@@ -39,6 +39,27 @@ condemnedvr::PhysicalMeleeRigidTransform Compose(
 int main() {
     using namespace condemnedvr;
 
+    struct CalibrationCacheSlot {
+        std::int32_t weaponIndex{-1};
+        std::uint64_t lastUsed{0};
+        bool occupied{false};
+    };
+    CalibrationCacheSlot cacheSlots[4]{
+        {17, 10, true},
+        {},
+        {32, 2, true},
+        {61, 7, true}};
+    if (SelectPhysicalMeleeCalibrationSlot(cacheSlots, 17) != 0U ||
+        SelectPhysicalMeleeCalibrationSlot(cacheSlots, 99) != 1U) {
+        return Fail(
+            "calibration cache must retain a weapon and fill empty slots before eviction");
+    }
+    cacheSlots[1] = {99, 5, true};
+    if (SelectPhysicalMeleeCalibrationSlot(cacheSlots, 100) != 2U) {
+        return Fail(
+            "full calibration cache must evict the least-recently-used slot");
+    }
+
     PhysicalMeleeProfile profile{};
     profile.localTipOffsetUnits = {0.0F, 0.0F, 100.0F};
     profile.massKilograms = 2.0F;
@@ -120,6 +141,103 @@ int main() {
             desiredGrip, localModelGrip.positionUnits,
             localModelGrip.rotation, false).active) {
         return Fail("stale held-model poses must fail closed");
+    }
+
+    // Two-hand support is a select-style handle constraint. The dominant
+    // grip remains fixed, the authored spacing never scales, and the support
+    // hand rotates the shaft through the shortest stable arc.
+    const PhysicalMeleeSecondaryGripSettings twoHandSettings{
+        {0.0F, 0.0F, 40.0F}, 100.0F, 0.15F, 0.25F,
+        0.65F, 0.35F, true};
+    PhysicalMeleeSecondaryGripState twoHandState{};
+    const PhysicalMeleePose primaryGrip =
+        Pose(10.0F, 20.0F, 30.0F);
+    auto twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {10.0F, 20.0F, 70.0F},
+        0.70F, true, true, twoHandSettings);
+    if (!twoHand.attached || !twoHand.justAttached ||
+        !twoHand.poseValid ||
+        !Near(twoHand.pose.gripPositionUnits.x, 10.0F) ||
+        !Near(twoHand.targetSecondaryPositionUnits.z, 70.0F) ||
+        !Near(twoHand.handSeparationMeters, 0.40F) ||
+        !Near(twoHand.anchorErrorMeters, 0.0F)) {
+        return Fail("near support-hand squeeze must attach at fixed spacing");
+    }
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {50.0F, 20.0F, 30.0F},
+        0.80F, true, true, twoHandSettings);
+    const fearvr::TrackingVector solvedShaft = fearvr::Rotate(
+        twoHand.pose.rotation, twoHandSettings.offsetUnits);
+    if (!twoHand.attached || !twoHand.poseValid ||
+        !Near(solvedShaft.x, 40.0F, 0.01F) ||
+        !Near(solvedShaft.y, 0.0F, 0.01F) ||
+        !Near(solvedShaft.z, 0.0F, 0.01F) ||
+        !Near(PhysicalMeleeLength(solvedShaft), 40.0F, 0.01F) ||
+        !Near(twoHand.targetSecondaryPositionUnits.x, 50.0F, 0.01F)) {
+        return Fail("support hand must aim the shaft without weapon scaling");
+    }
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {50.0F, 20.0F, 30.0F},
+        0.20F, true, true, twoHandSettings);
+    if (twoHand.attached || !twoHand.justReleased ||
+        twoHand.releaseReason !=
+            PhysicalMeleeSecondaryGripReleaseReason::Released ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(twoHand.pose.rotation),
+            fearvr::Normalize(primaryGrip.rotation))) < 0.999F) {
+        return Fail("support release must return a valid one-hand target");
+    }
+
+    // Pressing away from the handle consumes that press. Moving closer while
+    // still squeezed must not create a remote snap-grab.
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {110.0F, 20.0F, 30.0F},
+        0.80F, true, true, twoHandSettings);
+    if (twoHand.attached) {
+        return Fail("support hand outside the radius must not attach");
+    }
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {10.0F, 20.0F, 70.0F},
+        0.80F, true, true, twoHandSettings);
+    if (twoHand.attached) {
+        return Fail("held squeeze must not become a remote snap-grab");
+    }
+    UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {10.0F, 20.0F, 70.0F},
+        0.20F, true, true, twoHandSettings);
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {10.0F, 20.0F, 70.0F},
+        0.80F, true, true, twoHandSettings);
+    if (!twoHand.attached) {
+        return Fail("release and near re-press must re-arm support grab");
+    }
+    twoHand = UpdatePhysicalMeleeSecondaryGrip(
+        twoHandState, primaryGrip, {90.0F, 20.0F, 30.0F},
+        0.80F, true, true, twoHandSettings);
+    if (twoHand.attached || !twoHand.justReleased ||
+        twoHand.releaseReason !=
+            PhysicalMeleeSecondaryGripReleaseReason::ExcessiveStretch) {
+        return Fail("excessive controller spacing must release safely");
+    }
+
+    fearvr::TrackingVector capturedOffset{};
+    if (!ResolvePhysicalMeleeSecondaryGripOffset(
+            primaryGrip, {10.0F, 20.0F, 70.0F},
+            capturedOffset) ||
+        !Near(capturedOffset.x, 0.0F) ||
+        !Near(capturedOffset.y, 0.0F) ||
+        !Near(capturedOffset.z, 40.0F)) {
+        return Fail("two-controller capture must produce a local grip offset");
+    }
+    const PhysicalMeleeTwoHandPoseResult opposite =
+        ResolvePhysicalMeleeTwoHandPose(
+            primaryGrip, {10.0F, 20.0F, -10.0F},
+            twoHandSettings);
+    const fearvr::TrackingVector oppositeShaft = fearvr::Rotate(
+        opposite.pose.rotation, twoHandSettings.offsetUnits);
+    if (!opposite.poseValid ||
+        !Near(oppositeShaft.z, -40.0F, 0.01F)) {
+        return Fail("opposite handle directions must remain deterministic");
     }
 
     // Live setup stores readable local Euler corrections but feeds the shared
@@ -440,6 +558,11 @@ int main() {
         !Near(axeProfile.modelLocalGripRotation.y, 0.840891F) ||
         !Near(axeProfile.modelLocalGripRotation.z, 0.248921F) ||
         !Near(axeProfile.modelLocalGripRotation.w, 0.477635F) ||
+        !axeProfile.secondaryGripEnabled ||
+        !Near(axeProfile.secondaryGripOffsetUnits.x, 3.114F) ||
+        !Near(axeProfile.secondaryGripOffsetUnits.y, -30.258F) ||
+        !Near(axeProfile.secondaryGripOffsetUnits.z, -14.828F) ||
+        !Near(axeProfile.secondaryGripGrabRadiusMeters, 0.15F) ||
         !Near(axeProfile.massKilograms, 4.5F) ||
         !Near(axeProfile.handlingWeight, 4.0F) ||
         !Near(axeProfile.dampingRatio, 0.55F) ||

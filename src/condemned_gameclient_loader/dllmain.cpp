@@ -235,7 +235,9 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             CommandLineContains(
                 L"-condemnedvr-m5-physical-melee-visual-proxy"),
             CommandLineContains(
-                L"-condemnedvr-m5-weapon-grip-calibration"));
+                L"-condemnedvr-m5-weapon-grip-calibration"),
+            CommandLineContains(
+                L"-condemnedvr-m5-two-handed-melee"));
     }
     const bool menuControls = CommandLineContains(
         L"-condemnedvr-m6-menu-controls");

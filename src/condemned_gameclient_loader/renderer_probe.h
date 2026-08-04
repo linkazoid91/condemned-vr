@@ -63,6 +63,32 @@ bool ReadTrackedMeleeAimBasis(
 // exact transform is restored before returning to the game.
 void SetPhysicalMeleeVisualProxyEnabled(bool enabled) noexcept;
 
+// Enables the profile-driven dominant/right plus support/left handle solver.
+// The secondary select state is reset on every enable transition and never
+// scales the authored weapon to match controller separation.
+void SetTwoHandedMeleeEnabled(bool enabled) noexcept;
+
+// True only while the left support grip is attached. The binding overlay uses
+// this to consume the otherwise conflicting left-squeeze Run action while
+// preserving keyboard input and all non-conflicting controller actions.
+bool PhysicalMeleeSecondaryGripConsumesLeftSqueeze() noexcept;
+bool PhysicalMeleeSecondaryGripCapturesInput(
+    const FearVrInputState& input,
+    bool sampleFresh) noexcept;
+
+// Applies the currently attached support constraint in OpenXR tracking space
+// for swing-speed kinematics. This excludes Retail locomotion and turning in
+// the same way as the original one-hand tracking-space path.
+bool ResolvePhysicalMeleeTrackedTwoHandPose(
+    const FearVrInputState& input,
+    fearvr::TrackingVector& gripPositionMeters,
+    fearvr::TrackingQuaternion& weaponRotation) noexcept;
+
+// Adds renderer-owned two-hand state to the shared in-headset telemetry
+// snapshot without exposing renderer globals to the binding hooks.
+void ReadPhysicalMeleeTwoHandTelemetry(
+    ToolMenuMeleeTelemetry& telemetry) noexcept;
+
 // Arms the opt-in live grip setup controls. Calibration is session-local and
 // keyed by stable Retail weapon index; process-local weapon/model pointers are
 // refreshed when the same weapon is reacquired. Final profile-ready values are

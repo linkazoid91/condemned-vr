@@ -91,6 +91,13 @@
     pose and aim direction while the Grip tab is open. F11 retains the legacy
     keyboard/controller calibration mode. Requires -PhysicalMeleeVisualProxy.
 
+.PARAMETER TwoHandedMelee
+    Enables profile-driven two-hand melee. The right hand remains the dominant
+    weapon anchor; squeezing the left grip near the configured support point
+    constrains the shaft direction without scaling the weapon. Release or
+    tracking loss returns smoothly to weighted one-hand control. Requires
+    -PhysicalMeleeVisualProxy.
+
 .PARAMETER NoHidFpsFix
     Diagnostic rollback that leaves Condemned's redundant Jupiter EX
     HID/joystick initialization unmodified.
@@ -135,6 +142,7 @@ param(
     [switch]$PhysicalMeleeWallProxy,
     [switch]$PhysicalMeleeVisualProxy,
     [switch]$WeaponGripCalibration,
+    [switch]$TwoHandedMelee,
     [switch]$NoHidFpsFix,
     [switch]$NoXrFramePacing,
     [switch]$PerformanceProbe,
@@ -204,6 +212,9 @@ if ($PhysicalMeleeVisualProxy -and -not $PhysicalMeleeWallProxy) {
 }
 if ($WeaponGripCalibration -and -not $PhysicalMeleeVisualProxy) {
     throw '-WeaponGripCalibration requires -PhysicalMeleeVisualProxy.'
+}
+if ($TwoHandedMelee -and -not $PhysicalMeleeVisualProxy) {
+    throw '-TwoHandedMelee requires -PhysicalMeleeVisualProxy.'
 }
 if ($NoBackgroundRender -and -not $DesktopWindow) {
     throw '-NoBackgroundRender requires -DesktopWindow.'
@@ -499,6 +510,9 @@ if ($PhysicalMeleeVisualProxy) {
 if ($WeaponGripCalibration) {
     $gameArguments += '-condemnedvr-m5-weapon-grip-calibration'
 }
+if ($TwoHandedMelee) {
+    $gameArguments += '-condemnedvr-m5-two-handed-melee'
+}
 if ($NoHidFpsFix) {
     $gameArguments += '-condemnedvr-no-hid-fps-fix'
 }
@@ -676,6 +690,11 @@ try {
                 '"event":"m5_weapon_grip_calibration_rejected"')) {
             throw 'The guarded M5 weapon-grip calibration mode was rejected.'
         }
+        if ($TwoHandedMelee -and
+            $loaderText.Contains(
+                '"event":"m5_two_handed_melee_rejected"')) {
+            throw 'The guarded M5 two-handed melee mode was rejected.'
+        }
         if ($RecenterProbe -and
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_rejected"')) {
@@ -747,6 +766,9 @@ try {
         $weaponGripCalibrationReady = -not $WeaponGripCalibration -or
             $loaderText.Contains(
                 '"event":"m5_weapon_grip_calibration_armed"')
+        $twoHandedMeleeReady = -not $TwoHandedMelee -or
+            $loaderText.Contains(
+                '"event":"m5_two_handed_melee_armed"')
         $recenterReady = -not $RecenterProbe -or
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_armed"')
@@ -768,6 +790,7 @@ try {
             $physicalMeleeReady -and $physicalMeleeWallProxyReady -and
             $physicalMeleeVisualProxyReady -and
             $weaponGripCalibrationReady -and
+            $twoHandedMeleeReady -and
             $recenterReady
     } until (($bridgeReady -and $hostReady -and $hidFpsFixReady -and
               $backgroundRenderReady -and $inputHooksReady) -or
@@ -826,6 +849,7 @@ try {
             PhysicalMeleeWallProxy = [bool]$PhysicalMeleeWallProxy
             PhysicalMeleeVisualProxy = [bool]$PhysicalMeleeVisualProxy
             WeaponGripCalibration = [bool]$WeaponGripCalibration
+            TwoHandedMelee = [bool]$TwoHandedMelee
             Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true
@@ -865,6 +889,12 @@ try {
         Write-Host '  Keyboard fallback: J/L X, K/I Y, U/O Z, T mode, ,/. step, R reset, P save'
         Write-Host '  Wireframe = grip pose; magenta = grip centre; RGB = local axes; yellow = aim'
         Write-Host '  F11 pauses/resumes the setup tool.'
+    }
+    if ($TwoHandedMelee) {
+        Write-Host 'Two-hand axe: place the left controller on the handle, release, then squeeze left grip.' `
+            -ForegroundColor Cyan
+        Write-Host '  VR Tools > 2-HAND can capture the current left-hand pose and tune the grab radius.'
+        Write-Host '  Magenta = right controller; cyan = left; green/amber/red = support target state.'
     }
     if ($PerformanceProbe) {
         $watcherScript = Join-Path $PSScriptRoot (

@@ -440,6 +440,8 @@ bool ReadControllerSwingPose(
     aimRotation = fearvr::OpenXrToLithTech(
         fearvr::PoseRotation(
             input.handAimPose[FEARVR_HAND_RIGHT]));
+    ResolvePhysicalMeleeTrackedTwoHandPose(
+        input, gripPositionMeters, aimRotation);
     if (!fearvr::IsFinite(gripPositionMeters) ||
         !fearvr::IsFinite(aimRotation)) {
         gripPositionMeters = {};
@@ -846,7 +848,7 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
     }
     InterlockedExchange(&g_physicalMeleeDamageQualified, 0);
     if (g_log != nullptr) {
-        char detail[640]{};
+        char detail[896]{};
         std::snprintf(
             detail, sizeof(detail),
             "weapon_index=%ld profile=%s mass_kg=%.2f "
@@ -857,6 +859,9 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
             "swing_cooldown_ms=%u "
             "grip_position=(%.3f,%.3f,%.3f) "
             "grip_rotation=(%.6f,%.6f,%.6f,%.6f) "
+            "secondary_grip=%u "
+            "secondary_offset=(%.3f,%.3f,%.3f) "
+            "secondary_grab_radius_m=%.3f "
             "kinematics_reset=1",
             static_cast<long>(weaponIndex),
             PhysicalMeleeProfileName(selected.id),
@@ -874,7 +879,12 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
             selected.modelLocalGripRotation.x,
             selected.modelLocalGripRotation.y,
             selected.modelLocalGripRotation.z,
-            selected.modelLocalGripRotation.w);
+            selected.modelLocalGripRotation.w,
+            selected.secondaryGripEnabled ? 1U : 0U,
+            selected.secondaryGripOffsetUnits.x,
+            selected.secondaryGripOffsetUnits.y,
+            selected.secondaryGripOffsetUnits.z,
+            selected.secondaryGripGrabRadiusMeters);
         g_log("m5_physical_melee_profile_selected", detail);
     }
 }
@@ -1345,8 +1355,13 @@ float __fastcall HookGetBindingValue(
             retailGameState == kCondemnedGameStatePlaying;
         const bool calibrationCaptured =
             WeaponGripCalibrationCapturesInput(input, usable);
+        const bool secondaryGripCaptured =
+            binding->command == kCondemnedRunCommand &&
+            PhysicalMeleeSecondaryGripCapturesInput(input, usable);
         CoreActionValue action = ResolveCoreActionValue(
-            input, usable && !calibrationCaptured,
+            input,
+            usable && !calibrationCaptured &&
+                !secondaryGripCaptured,
             binding->command);
         if (binding->command == kCondemnedFireCommand &&
             ReadPhysicalMeleeSwingAttackActive(
@@ -2764,7 +2779,8 @@ bool InstallHeadAimHooks(
     bool physicalMeleeProbe,
     bool physicalMeleeWallProxy,
     bool physicalMeleeVisualProxy,
-    bool weaponGripCalibration) noexcept {
+    bool weaponGripCalibration,
+    bool twoHandedMelee) noexcept {
     if (gameClientModule == nullptr || log == nullptr) {
         return false;
     }
@@ -2808,6 +2824,12 @@ bool InstallHeadAimHooks(
     if (weaponGripCalibration && !physicalMeleeVisualProxy) {
         log(
             "m5_weapon_grip_calibration_rejected",
+            "physical_melee_visual_proxy_required");
+        return false;
+    }
+    if (twoHandedMelee && !physicalMeleeVisualProxy) {
+        log(
+            "m5_two_handed_melee_rejected",
             "physical_melee_visual_proxy_required");
         return false;
     }
@@ -3030,6 +3052,7 @@ bool InstallHeadAimHooks(
         physicalMeleeVisualProxy);
     SetWeaponGripCalibrationEnabled(
         weaponGripCalibration);
+    SetTwoHandedMeleeEnabled(twoHandedMelee);
     InterlockedExchange(
         &g_physicalMeleeProbeEnabled,
         physicalMeleeProbe ? 1 : 0);
@@ -3124,6 +3147,19 @@ bool InstallHeadAimHooks(
             "r_reset,p_snapshot,f11_pause "
             "position_units=lithtech rotation_axes=model_local_xyz "
             "foreground_only=1 retail_transform_restore=exact");
+    }
+    if (twoHandedMelee) {
+        log(
+            "m5_two_handed_melee_armed",
+            "dominant_hand=right support_hand=left "
+            "attach=left_squeeze_near_profile_handle "
+            "attach_threshold=0.65 release_threshold=0.35 "
+            "remote_snap_grab=0 authored_weapon_scaling=0 "
+            "solver=dominant_anchor_shortest_arc_twist_preserving "
+            "weight_filter=existing_bounded_damped_spring "
+            "release_momentum_reset=0 tracking_loss_fail_closed=1 "
+            "conflicting_left_squeeze_run_action=captured "
+            "supported_profile=fire_axe retail_index=17");
     }
     return true;
 }
@@ -3280,6 +3316,7 @@ void ReadPhysicalMeleeToolTelemetry(
         &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
     telemetry.visualProxyEnabled = InterlockedCompareExchange(
         &g_physicalMeleeVisualProxyEnabled, 0, 0) != 0;
+    ReadPhysicalMeleeTwoHandTelemetry(telemetry);
 }
 
 } // namespace condemnedvr

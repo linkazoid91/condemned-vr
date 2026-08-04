@@ -61,7 +61,8 @@ bool InstallHeadAimHooks(
     bool physicalMeleeProbe = false,
     bool physicalMeleeWallProxy = false,
     bool physicalMeleeVisualProxy = false,
-    bool weaponGripCalibration = false) noexcept;
+    bool weaponGripCalibration = false,
+    bool twoHandedMelee = false) noexcept;
 
 // Polls a release-gated left-secondary edge from the Retail client-shell
 // update and routes it through the game's own Escape key callbacks. The

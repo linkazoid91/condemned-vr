@@ -22,6 +22,10 @@ float QuaternionLength(const fearvr::WeaponWeightQuaternion& value) {
         value.z * value.z + value.w * value.w);
 }
 
+bool Near(float left, float right, float epsilon = 1.0e-5F) {
+    return std::fabs(left - right) <= epsilon;
+}
+
 } // namespace
 
 int main() {
@@ -173,6 +177,47 @@ int main() {
     assert(criticalMaximum <= 1.0001F);
     assert(momentumMaximum > 1.02F);
     assert(momentumMaximum < 1.30F);
+
+    // Weight is simulated in player-local space. Moving the locomotion
+    // parent must carry the already-filtered weapon rigidly instead of
+    // feeding that world delta back through the heavy spring.
+    const WeaponWeightReferenceFrame playerA{
+        {10.0F, 2.0F, -3.0F}, {0.0F, 0.0F, 0.0F, 1.0F}};
+    const WeaponWeightReferenceFrame playerB{
+        {15.0F, 1.0F, 4.0F}, {0.0F, 0.0F, 0.0F, 1.0F}};
+    const WeaponWeightPose heldLocal = Pose(0.42F, 0.35F);
+    const WeaponWeightPose heldWorldA =
+        WeaponWeightPoseFromReferenceFrame(playerA, heldLocal);
+    const WeaponWeightPose heldWorldB =
+        WeaponWeightPoseFromReferenceFrame(playerB, heldLocal);
+    assert(Near(
+        heldWorldB.position.x - heldWorldA.position.x, 5.0F));
+    assert(Near(
+        heldWorldB.position.y - heldWorldA.position.y, -1.0F));
+    assert(Near(
+        heldWorldB.position.z - heldWorldA.position.z, 7.0F));
+    assert(Near(
+        heldWorldA.orientation.y, heldWorldB.orientation.y));
+
+    const float halfTurn = kPi * 0.25F;
+    const WeaponWeightReferenceFrame turnedPlayer{
+        {-4.0F, 0.5F, 8.0F},
+        {0.0F, std::sin(halfTurn), 0.0F, std::cos(halfTurn)}};
+    const WeaponWeightPose turnedWorld =
+        WeaponWeightPoseFromReferenceFrame(
+            turnedPlayer, heldLocal);
+    const WeaponWeightPose roundTrip =
+        WeaponWeightPoseToReferenceFrame(
+            turnedPlayer, turnedWorld);
+    assert(Near(roundTrip.position.x, heldLocal.position.x));
+    assert(Near(roundTrip.position.y, heldLocal.position.y));
+    assert(Near(roundTrip.position.z, heldLocal.position.z));
+    assert(std::fabs(
+        std::fabs(roundTrip.orientation.y) -
+        std::fabs(heldLocal.orientation.y)) < 1.0e-5F);
+    assert(std::fabs(
+        std::fabs(roundTrip.orientation.w) -
+        std::fabs(heldLocal.orientation.w)) < 1.0e-5F);
 
     const WeaponWeightQuaternion q = Pose(0.0F, 0.75F).orientation;
     const WeaponWeightVector positive = QuaternionToRotationVector(q);

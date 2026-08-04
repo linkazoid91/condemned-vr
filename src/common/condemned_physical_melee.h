@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -73,6 +74,16 @@ struct PhysicalMeleeProfile {
     fearvr::TrackingVector modelLocalGripPositionUnits{};
     fearvr::TrackingQuaternion modelLocalGripRotation{
         0.0F, 0.0F, 0.0F, 1.0F};
+    // Optional support-hand anchor expressed in the primary controller/grip
+    // frame. The weapon is never scaled to span the controllers: the
+    // secondary hand controls the handle direction while the authored
+    // distance from the dominant grip remains fixed.
+    bool secondaryGripEnabled{false};
+    fearvr::TrackingVector secondaryGripOffsetUnits{};
+    float secondaryGripGrabRadiusMeters{0.15F};
+    float secondaryGripMaximumStretchMeters{0.25F};
+    float secondaryGripAttachSqueeze{0.65F};
+    float secondaryGripReleaseSqueeze{0.35F};
     float radiusUnits{4.0F};
     float unitsPerMeter{100.0F};
     float massKilograms{1.5F};
@@ -121,6 +132,11 @@ ResolvePhysicalMeleeProfileForRetailWeaponIndex(
         -0.117F, -3.053F, -6.982F};
     profile.modelLocalGripRotation = {
         -0.052973F, 0.840891F, 0.248921F, 0.477635F};
+    profile.secondaryGripEnabled = true;
+    // Promoted from the accepted 2026-08-04 in-headset alignment run. The
+    // support hand sits down the fire-axe haft rather than on the controller
+    // aim axis used by the earlier provisional value.
+    profile.secondaryGripOffsetUnits = {3.114F, -30.258F, -14.828F};
     profile.radiusUnits = 7.0F;
     profile.massKilograms = 4.5F;
     profile.handlingWeight = 4.0F;
@@ -212,6 +228,81 @@ struct PhysicalMeleeGripCalibration {
         0.0F, 0.0F, 0.0F, 1.0F};
     fearvr::TrackingVector positionUnits{};
     fearvr::TrackingVector localRotationDegrees{};
+    fearvr::TrackingVector baseSecondaryGripOffsetUnits{};
+    fearvr::TrackingVector secondaryGripOffsetUnits{};
+    float baseSecondaryGripGrabRadiusMeters{0.15F};
+    float secondaryGripGrabRadiusMeters{0.15F};
+    bool baseSecondaryGripEnabled{false};
+    bool secondaryGripEnabled{false};
+};
+
+// Select an existing stable weapon record first, otherwise consume an empty
+// record, and only then evict the least-recently-used entry. Keeping this
+// policy alongside the calibration data makes the session cache behavior
+// directly testable and prevents weapon swaps from discarding a tuned grip
+// while unused capacity remains.
+template <typename Slot, std::size_t SlotCount>
+inline std::size_t SelectPhysicalMeleeCalibrationSlot(
+    const Slot (&slots)[SlotCount],
+    std::int32_t weaponIndex) noexcept {
+    if (weaponIndex < 0 || SlotCount == 0U) {
+        return SlotCount;
+    }
+    std::size_t emptySlot = SlotCount;
+    std::size_t oldestSlot = SlotCount;
+    std::uint64_t oldestUse = UINT64_MAX;
+    for (std::size_t index = 0; index < SlotCount; ++index) {
+        const Slot& slot = slots[index];
+        if (slot.occupied && slot.weaponIndex == weaponIndex) {
+            return index;
+        }
+        if (!slot.occupied && emptySlot == SlotCount) {
+            emptySlot = index;
+        } else if (slot.occupied && slot.lastUsed < oldestUse) {
+            oldestSlot = index;
+            oldestUse = slot.lastUsed;
+        }
+    }
+    return emptySlot != SlotCount ? emptySlot : oldestSlot;
+}
+
+struct PhysicalMeleeSecondaryGripSettings {
+    fearvr::TrackingVector offsetUnits{};
+    float unitsPerMeter{100.0F};
+    float grabRadiusMeters{0.15F};
+    float maximumStretchMeters{0.25F};
+    float attachSqueeze{0.65F};
+    float releaseSqueeze{0.35F};
+    bool enabled{false};
+};
+
+enum class PhysicalMeleeSecondaryGripReleaseReason : std::uint8_t {
+    None,
+    Released,
+    TrackingLost,
+    ContextDisabled,
+    Unsupported,
+    ExcessiveStretch,
+    InvalidPose
+};
+
+struct PhysicalMeleeSecondaryGripState {
+    bool attached{false};
+    bool attachmentArmed{true};
+};
+
+struct PhysicalMeleeTwoHandPoseResult {
+    PhysicalMeleePose pose{};
+    fearvr::TrackingVector targetSecondaryPositionUnits{};
+    float grabDistanceMeters{0.0F};
+    float handSeparationMeters{0.0F};
+    float anchorErrorMeters{0.0F};
+    PhysicalMeleeSecondaryGripReleaseReason releaseReason{
+        PhysicalMeleeSecondaryGripReleaseReason::None};
+    bool poseValid{false};
+    bool attached{false};
+    bool justAttached{false};
+    bool justReleased{false};
 };
 
 enum class PhysicalMeleeContactReason : std::uint8_t {
@@ -273,6 +364,282 @@ inline float PhysicalMeleeDot(
 }
 
 inline bool PhysicalMeleePoseIsValid(
+    const PhysicalMeleePose& pose) noexcept;
+
+inline fearvr::TrackingVector PhysicalMeleeCross(
+    const fearvr::TrackingVector& left,
+    const fearvr::TrackingVector& right) noexcept {
+    return {
+        left.y * right.z - left.z * right.y,
+        left.z * right.x - left.x * right.z,
+        left.x * right.y - left.y * right.x};
+}
+
+inline bool PhysicalMeleeNormalizeVector(
+    const fearvr::TrackingVector& value,
+    fearvr::TrackingVector& normalized) noexcept {
+    normalized = {};
+    const float length = PhysicalMeleeLength(value);
+    if (!fearvr::IsFinite(value) || !std::isfinite(length) ||
+        length < 1.0e-4F) {
+        return false;
+    }
+    normalized = PhysicalMeleeScale(value, 1.0F / length);
+    return fearvr::IsFinite(normalized);
+}
+
+// Returns the shortest stable rotation from one direction to another. The
+// opposite-vector case chooses a deterministic perpendicular axis so a
+// controller crossing the handle cannot produce a zero quaternion.
+inline bool PhysicalMeleeShortestArcRotation(
+    const fearvr::TrackingVector& from,
+    const fearvr::TrackingVector& to,
+    fearvr::TrackingQuaternion& rotation) noexcept {
+    rotation = {};
+    fearvr::TrackingVector fromUnit{};
+    fearvr::TrackingVector toUnit{};
+    if (!PhysicalMeleeNormalizeVector(from, fromUnit) ||
+        !PhysicalMeleeNormalizeVector(to, toUnit)) {
+        return false;
+    }
+    const float dot = std::clamp(
+        PhysicalMeleeDot(fromUnit, toUnit), -1.0F, 1.0F);
+    if (dot >= 0.9999F) {
+        rotation = {};
+        return true;
+    }
+    if (dot <= -0.9999F) {
+        const fearvr::TrackingVector reference =
+            std::fabs(fromUnit.x) < 0.75F
+            ? fearvr::TrackingVector{1.0F, 0.0F, 0.0F}
+            : fearvr::TrackingVector{0.0F, 1.0F, 0.0F};
+        fearvr::TrackingVector axis{};
+        if (!PhysicalMeleeNormalizeVector(
+                PhysicalMeleeCross(fromUnit, reference), axis)) {
+            return false;
+        }
+        rotation = {axis.x, axis.y, axis.z, 0.0F};
+        return true;
+    }
+    const fearvr::TrackingVector cross =
+        PhysicalMeleeCross(fromUnit, toUnit);
+    rotation = fearvr::Normalize(
+        {cross.x, cross.y, cross.z, 1.0F + dot});
+    return fearvr::IsFinite(rotation);
+}
+
+inline bool PhysicalMeleeSecondaryGripSettingsAreValid(
+    const PhysicalMeleeSecondaryGripSettings& settings) noexcept {
+    const float offsetLength = PhysicalMeleeLength(settings.offsetUnits);
+    return fearvr::IsFinite(settings.offsetUnits) &&
+        std::isfinite(offsetLength) &&
+        (!settings.enabled || offsetLength >= 5.0F) &&
+        offsetLength <= 300.0F &&
+        std::isfinite(settings.unitsPerMeter) &&
+        settings.unitsPerMeter > 0.0F &&
+        settings.unitsPerMeter <= 1000.0F &&
+        std::isfinite(settings.grabRadiusMeters) &&
+        settings.grabRadiusMeters >= 0.05F &&
+        settings.grabRadiusMeters <= 0.50F &&
+        std::isfinite(settings.maximumStretchMeters) &&
+        settings.maximumStretchMeters >= 0.05F &&
+        settings.maximumStretchMeters <= 1.0F &&
+        std::isfinite(settings.attachSqueeze) &&
+        std::isfinite(settings.releaseSqueeze) &&
+        settings.releaseSqueeze >= 0.0F &&
+        settings.releaseSqueeze < settings.attachSqueeze &&
+        settings.attachSqueeze <= 1.0F;
+}
+
+inline PhysicalMeleeSecondaryGripSettings
+PhysicalMeleeSecondaryGripSettingsFromProfile(
+    const PhysicalMeleeProfile& profile) noexcept {
+    return {
+        profile.secondaryGripOffsetUnits,
+        profile.unitsPerMeter,
+        profile.secondaryGripGrabRadiusMeters,
+        profile.secondaryGripMaximumStretchMeters,
+        profile.secondaryGripAttachSqueeze,
+        profile.secondaryGripReleaseSqueeze,
+        profile.secondaryGripEnabled};
+}
+
+inline bool ResolvePhysicalMeleeSecondaryGripOffset(
+    const PhysicalMeleePose& primaryGrip,
+    const fearvr::TrackingVector& secondaryGripPositionUnits,
+    fearvr::TrackingVector& offsetUnits) noexcept {
+    offsetUnits = {};
+    if (!PhysicalMeleePoseIsValid(primaryGrip) ||
+        !fearvr::IsFinite(secondaryGripPositionUnits)) {
+        return false;
+    }
+    offsetUnits = fearvr::Rotate(
+        fearvr::Conjugate(fearvr::Normalize(primaryGrip.rotation)),
+        PhysicalMeleeSubtract(
+            secondaryGripPositionUnits,
+            primaryGrip.gripPositionUnits));
+    const float length = PhysicalMeleeLength(offsetUnits);
+    return fearvr::IsFinite(offsetUnits) && std::isfinite(length) &&
+        length >= 5.0F && length <= 300.0F;
+}
+
+// Dominant-hand position stays authoritative. The support hand supplies only
+// the handle direction; the shortest-arc correction retains as much of the
+// dominant controller's twist as possible. Authored weapon scale and grip
+// spacing are therefore invariant under arbitrary controller separation.
+inline PhysicalMeleeTwoHandPoseResult ResolvePhysicalMeleeTwoHandPose(
+    const PhysicalMeleePose& primaryGrip,
+    const fearvr::TrackingVector& secondaryGripPositionUnits,
+    const PhysicalMeleeSecondaryGripSettings& settings) noexcept {
+    PhysicalMeleeTwoHandPoseResult result{};
+    result.pose = primaryGrip;
+    if (!PhysicalMeleePoseIsValid(primaryGrip) ||
+        !fearvr::IsFinite(secondaryGripPositionUnits) ||
+        !PhysicalMeleeSecondaryGripSettingsAreValid(settings) ||
+        !settings.enabled) {
+        return result;
+    }
+    result.pose.rotation = fearvr::Normalize(primaryGrip.rotation);
+    const fearvr::TrackingVector baselineDirection = fearvr::Rotate(
+        result.pose.rotation, settings.offsetUnits);
+    const fearvr::TrackingVector desiredDirection =
+        PhysicalMeleeSubtract(
+            secondaryGripPositionUnits,
+            primaryGrip.gripPositionUnits);
+    fearvr::TrackingQuaternion correction{};
+    if (!PhysicalMeleeShortestArcRotation(
+            baselineDirection, desiredDirection, correction)) {
+        return result;
+    }
+    result.pose.rotation = fearvr::Multiply(
+        correction, result.pose.rotation);
+    result.targetSecondaryPositionUnits = PhysicalMeleeAdd(
+        result.pose.gripPositionUnits,
+        fearvr::Rotate(result.pose.rotation, settings.offsetUnits));
+    result.handSeparationMeters =
+        PhysicalMeleeLength(desiredDirection) / settings.unitsPerMeter;
+    result.anchorErrorMeters = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(
+            secondaryGripPositionUnits,
+            result.targetSecondaryPositionUnits)) /
+        settings.unitsPerMeter;
+    result.poseValid = PhysicalMeleePoseIsValid(result.pose) &&
+        fearvr::IsFinite(result.targetSecondaryPositionUnits) &&
+        std::isfinite(result.handSeparationMeters) &&
+        std::isfinite(result.anchorErrorMeters);
+    return result;
+}
+
+// Select-style lifecycle with press/release hysteresis. A squeeze that began
+// away from the handle cannot turn into a remote grab merely by moving the
+// hand closer; it must first be released and pressed again near the anchor.
+inline PhysicalMeleeTwoHandPoseResult UpdatePhysicalMeleeSecondaryGrip(
+    PhysicalMeleeSecondaryGripState& state,
+    const PhysicalMeleePose& primaryGrip,
+    const fearvr::TrackingVector& secondaryGripPositionUnits,
+    float secondarySqueeze,
+    bool trackingFresh,
+    bool contextEnabled,
+    const PhysicalMeleeSecondaryGripSettings& settings) noexcept {
+    PhysicalMeleeTwoHandPoseResult result{};
+    result.pose = primaryGrip;
+    result.poseValid = PhysicalMeleePoseIsValid(primaryGrip);
+    const bool wasAttached = state.attached;
+    const auto Release = [&](
+        PhysicalMeleeSecondaryGripReleaseReason reason) {
+        state.attached = false;
+        result.attached = false;
+        result.justReleased = wasAttached;
+        result.releaseReason = reason;
+    };
+
+    if (!PhysicalMeleeSecondaryGripSettingsAreValid(settings) ||
+        !settings.enabled) {
+        state.attachmentArmed = false;
+        Release(PhysicalMeleeSecondaryGripReleaseReason::Unsupported);
+        return result;
+    }
+    if (!trackingFresh || !result.poseValid ||
+        !fearvr::IsFinite(secondaryGripPositionUnits) ||
+        !std::isfinite(secondarySqueeze)) {
+        state.attachmentArmed = false;
+        Release(PhysicalMeleeSecondaryGripReleaseReason::TrackingLost);
+        return result;
+    }
+
+    const fearvr::TrackingVector baselineSecondary = PhysicalMeleeAdd(
+        primaryGrip.gripPositionUnits,
+        fearvr::Rotate(
+            fearvr::Normalize(primaryGrip.rotation),
+            settings.offsetUnits));
+    result.grabDistanceMeters = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(
+            secondaryGripPositionUnits, baselineSecondary)) /
+        settings.unitsPerMeter;
+    result.handSeparationMeters = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(
+            secondaryGripPositionUnits,
+            primaryGrip.gripPositionUnits)) /
+        settings.unitsPerMeter;
+    result.targetSecondaryPositionUnits = baselineSecondary;
+
+    if (!contextEnabled) {
+        state.attachmentArmed = false;
+        Release(
+            PhysicalMeleeSecondaryGripReleaseReason::ContextDisabled);
+        return result;
+    }
+
+    if (secondarySqueeze <= settings.releaseSqueeze) {
+        state.attachmentArmed = true;
+        Release(PhysicalMeleeSecondaryGripReleaseReason::Released);
+        return result;
+    }
+
+    if (!state.attached && secondarySqueeze >= settings.attachSqueeze) {
+        if (state.attachmentArmed &&
+            result.grabDistanceMeters <= settings.grabRadiusMeters) {
+            state.attached = true;
+            result.justAttached = true;
+        }
+        // Consume this press even when it missed the handle. This is what
+        // prevents remote snap-grabs after moving an already squeezed hand.
+        state.attachmentArmed = false;
+    }
+    if (!state.attached) {
+        return result;
+    }
+
+    PhysicalMeleeTwoHandPoseResult solved =
+        ResolvePhysicalMeleeTwoHandPose(
+            primaryGrip, secondaryGripPositionUnits, settings);
+    solved.grabDistanceMeters = result.grabDistanceMeters;
+    solved.justAttached = result.justAttached;
+    if (!solved.poseValid) {
+        state.attached = false;
+        solved.justReleased = true;
+        solved.releaseReason =
+            PhysicalMeleeSecondaryGripReleaseReason::InvalidPose;
+        solved.pose = primaryGrip;
+        solved.poseValid = result.poseValid;
+        return solved;
+    }
+    if (solved.anchorErrorMeters > settings.maximumStretchMeters) {
+        state.attached = false;
+        solved.attached = false;
+        solved.justReleased = true;
+        solved.releaseReason =
+            PhysicalMeleeSecondaryGripReleaseReason::ExcessiveStretch;
+        solved.pose = primaryGrip;
+        solved.poseValid = result.poseValid;
+        solved.targetSecondaryPositionUnits = baselineSecondary;
+        return solved;
+    }
+    solved.attached = true;
+    return solved;
+}
+
+inline bool PhysicalMeleePoseIsValid(
     const PhysicalMeleePose& pose) noexcept {
     const float rotationLengthSquared =
         pose.rotation.x * pose.rotation.x +
@@ -303,6 +670,8 @@ inline bool PhysicalMeleeProfileIsValid(
             profile.modelLocalGripRotation.z +
         profile.modelLocalGripRotation.w *
             profile.modelLocalGripRotation.w;
+    const PhysicalMeleeSecondaryGripSettings secondaryGrip =
+        PhysicalMeleeSecondaryGripSettingsFromProfile(profile);
     return knownId &&
         fearvr::IsFinite(profile.localBaseOffsetUnits) &&
         fearvr::IsFinite(profile.localTipOffsetUnits) &&
@@ -314,6 +683,7 @@ inline bool PhysicalMeleeProfileIsValid(
         std::isfinite(modelGripRotationLengthSquared) &&
         modelGripRotationLengthSquared >= 0.25F &&
         modelGripRotationLengthSquared <= 4.0F &&
+        PhysicalMeleeSecondaryGripSettingsAreValid(secondaryGrip) &&
         std::isfinite(profile.radiusUnits) &&
         profile.radiusUnits > 0.0F && profile.radiusUnits <= 100.0F &&
         std::isfinite(profile.unitsPerMeter) &&

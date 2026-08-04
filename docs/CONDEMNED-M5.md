@@ -102,9 +102,9 @@ is read back, and must be restored exactly; any restore failure disables the
 gate. Native impact dispatch remains blocked throughout this diagnostic.
 
 Weapon-specific behavior is data, not another hook. `PhysicalMeleeProfile`
-owns the local base/tip geometry, model-local grip position/rotation, radius,
-world scale, mass, impact thresholds, maximum sweep, contact separation, and
-sample bounds. The current generic
+owns the local base/tip geometry, model-local primary grip, optional support
+grip offset and grab volume, radius, world scale, mass, impact thresholds,
+maximum sweep, contact separation, and sample bounds. The current generic
 one-handed pipe profile is the fallback until a stable Retail model/weapon
 identity lookup is verified. Pipe, crowbar, fire axe, plank, and later
 two-handed profiles will select different records while sharing the same pose,
@@ -126,14 +126,16 @@ grip/squeeze buttons to capture the setup controls:
   `m5_weapon_grip_calibration_snapshot` in the loader log.
 - Left/right stick click selects a finer/coarser adjustment step.
 
-While the tool is active, both eyes also show an always-visible generic
-controller wireframe at the OpenXR right-hand grip pose. It is a stable setup
-reference rather than a model of a particular controller: the pale outline is
-the controller body, the magenta cross is the grip origin, red/green/blue are
-the grip-local X/Y/Z axes, and the long yellow line is the separate OpenXR aim
-direction used by the held-weapon solver. This makes it possible to distinguish
-a model-local grip offset from a controller-pose problem without removing the
-headset. F11 hides the wireframe when it pauses the setup tool.
+While the Grip or 2-Hand tab is active, both eyes show always-visible generic
+controller wireframes. They are stable setup references rather than models of
+a particular controller. Magenta identifies the dominant right controller;
+cyan identifies the left support controller. Red/green/blue show grip-local
+axes and each aim ray remains separate from its physical grip pose. A support
+target on the weapon is green while attached, amber while a free hand is
+inside the grab volume, and red while it is too far away. This makes it
+possible to distinguish model alignment, controller pose, and support-grip
+configuration without removing the headset. F11 hides the wireframes when it
+pauses the setup tool.
 
 While both grips are held, the matching locomotion, turning, action, menu, and
 recenter injections are suppressed. Releasing either grip returns them to
@@ -151,6 +153,82 @@ retained. These values are deliberately session-local: the snapshot is
 reviewed and assigned to a stable Retail weapon identity before it becomes
 permanent profile data.
 
+## Two-hand axe interaction slice
+
+Add `-TwoHandedMelee` to a launch that already enables
+`-PhysicalMeleeVisualProxy`. For setup, also add
+`-WeaponGripCalibration`. This is the first reusable support-grip layer; the
+fire axe is the first profile to opt in, while unmapped and one-handed weapons
+continue through the unchanged one-hand path.
+
+```powershell
+.\tools\launch-condemned-m2-vr.ps1 `
+  -StereoTuning -RenderScale 100 `
+  -LocomotionProbe -TurningProbe -MenuProbe -MenuControlsProbe `
+  -InteractionProbe -CoreActionsProbe -HapticsProbe -HeadAimProbe `
+  -AimPathProbe -PhysicalMeleeProbe -PhysicalMeleeWallProxy `
+  -PhysicalMeleeVisualProxy -WeaponGripCalibration -TwoHandedMelee `
+  -DesktopWindow
+```
+
+The interaction takes *The Walking Dead: Saints & Sinners* as its experience
+reference: the weapon remains a heavy object led by the hands rather than a
+rigid controller decoration. The current diagnostic implements the parts that
+are valid before Condemned has a standalone weapon rigid body:
+
+- The right hand is the dominant owner and primary position anchor.
+- The left grip attaches only on an intentional squeeze begun inside the
+  configured handle volume. A squeeze begun away from the handle is consumed
+  as a missed grab and cannot snap on merely by moving closer.
+- The off hand supplies the shaft direction. A shortest-arc solver retains as
+  much right-hand twist as possible and never scales the authored weapon to
+  span an arbitrary controller distance.
+- Separate 0.65 attach and 0.35 release thresholds prevent noisy grip values
+  from repeatedly attaching and releasing. Excessive hand separation,
+  tracking loss, menus, focus loss, weapon changes, and invalid poses release
+  safely.
+- Attachment and release do not reset the existing bounded damped-spring
+  filter. The axe therefore retains its configured weight and follow-through
+  rather than snapping between one- and two-hand poses.
+- Opening VR Tools releases the live support-hand selection so its controls
+  cannot fight the weapon, but it does not reset the calibrated anchor. The
+  per-weapon session cache survives menu reopen, weapon swaps, drops, and
+  reacquisition; it fills unused records before applying LRU eviction.
+- Left squeeze is withheld from the otherwise conflicting Run binding only
+  while it is attached or is making a valid near-handle grab. Keyboard Run,
+  locomotion sticks, and unrelated controller actions remain available.
+- The same solved shaft direction feeds the OpenXR tracking-space swing meter,
+  so a support-hand-led rotation can move the axe head and qualify a swing
+  without Retail locomotion or turning being mistaken for weapon motion.
+
+The VR tool menu's **2-Hand** tab edits the per-weapon support offset and grab
+radius. Place the cyan left-controller grip where the hand should sit on the
+visible handle and activate **Capture Current Left Hand Pose**; the offset is
+computed in the dominant right-hand aim frame and updates immediately. Reset
+restores the profile values, and **Log Two Hand Snapshot** emits the primary
+and secondary profile-ready values together. After closing the menu, release
+the left grip once, place it on the handle, and squeeze to attach.
+
+The accepted fire-axe support offset from the 2026-08-04 headset run is
+`{3.114, -30.258, -14.828}` LithTech units with a 0.15-metre grab radius.
+It is now the stable profile starting point. Further live changes remain
+session-local until another tested snapshot is deliberately promoted.
+
+This follows the common XR interaction pattern of allowing multiple selecting
+interactors on one held object while retaining an explicit movement/velocity
+policy. Unity's XR Interaction Toolkit documents both the multi-select model
+and velocity-tracked held-object controls in its
+[XR Grab Interactable manual](https://docs.unity3d.com/Packages/com.unity.xr.interaction.toolkit%402.0/manual/xr-grab-interactable.html).
+It does not imply that Condemned is using Unity; the source is a public
+reference for the interaction policy.
+
+This remains a render-only Retail-model override plus a collision proxy. Full
+*Saints & Sinners*-style wall resistance, hand sliding, collision-constrained
+two-hand leverage, throwing, and weapon-on-weapon contact require gate 6's
+standalone physical item. The current solver is structured as profile data and
+a shared select/pose layer so that work carries forward rather than becoming
+an axe-only visual exception.
+
 ## VR tool menu
 
 Continuous stereo now includes a simple in-headset tool menu rendered after
@@ -163,7 +241,7 @@ gameplay controls while open and keeps capturing until the close buttons,
 grips, triggers, and sticks have returned to neutral, preventing a menu action
 from leaking into Retail gameplay.
 
-The menu has six tabs:
+The menu has seven tabs:
 
 - **Melee:** for a verified melee profile, enable the temporary
   swing-to-attack adapter and tune trigger speed, re-arm speed, pulse duration,
@@ -175,12 +253,16 @@ The menu has six tabs:
 - **Grip:** adjust the equipped model's local XYZ position and rotation,
   adjustment step, reset, and log a profile snapshot. This tab requires the
   `-WeaponGripCalibration` launch option and shows the controller wireframe.
+- **2-Hand:** enable the profile's support grip, edit its local offset and grab
+  radius, capture the current left-hand pose, reset, and log a combined
+  profile snapshot. Live attachment distance/error remains visible on the
+  tab.
 - **Display:** tune FOV scale, world scale, menu size, and menu convergence
   distance; toggle HMD translation, eye polarity, and stereo; recenter; or
   restore display defaults.
 - **Controls:** shows the complete controller and keyboard menu mapping.
 - **Debug:** shows current weapon/tracking state, live swing telemetry, and
-  proxy state.
+  proxy/two-hand state.
 
 Use the left/right triggers to change tabs, left-stick up/down to choose a row,
 right-stick left/right to change a value, A to activate a row, and B to close.
@@ -207,6 +289,8 @@ launch. Its final controller snapshot is:
 modelLocalGripPositionUnits = {-0.117, -3.053, -6.982}
 modelLocalGripRotation      = {-0.052973, 0.840891, 0.248921, 0.477635}
 localRotationDegrees        = {-41.240, 123.937, -15.447}
+secondaryGripOffsetUnits    = {3.114, -30.258, -14.828}
+secondaryGripGrabRadiusM    = 0.150
 ```
 
 The position and quaternion are used directly as the model-local grip. The
@@ -218,19 +302,24 @@ The axe profile uses an 82-unit reach, 7-unit collision radius, and a
 deliberately heavy 4.5 kg mass. Its handling weight is the maximum supported
 value of 4.0, with positional/rotational follow values of 10/8, bounded
 catch-up strength 0.80, and damping ratio 0.55. The bounded damped-spring
-filter makes the visible weapon and collision pose lag the raw controller and
-retain mild follow-through after the hand stops, while preventing an undamped
-or permanently oscillating response. It snaps on weapon changes, tracking
-loss, long frame gaps, and recenter events. This is an initial weight response;
-later collision-constrained virtual coupling will replace it when the weapon
-becomes a standalone physical object.
+filter makes the visible weapon and collision pose lag hand-relative movement
+and retain mild follow-through after the hand stops, while preventing an
+undamped or permanently oscillating response. The filter runs in the player's
+local locomotion frame: smooth movement and turning carry the held weapon
+rigidly with the player and are not interpreted as gravity or hand
+acceleration. It snaps on weapon changes, tracking loss, long frame gaps, and
+recenter events. This is an initial weight response; later
+collision-constrained virtual coupling will replace it when the weapon becomes
+a standalone physical object.
 
 ## Fire-axe swing attack bridge
 
 Until native physical-contact damage is enabled, the fire axe uses its
 tracking-space hand/endpoint sweep speed to request Retail's ordinary
 Fire/attack command 17. Keeping this meter in OpenXR tracking space excludes
-Retail locomotion and turning from the gesture. A valid focused-gameplay sweep
+Retail locomotion and turning from the gesture. While the support grip is
+attached, its solved shaft direction drives the endpoint used by that meter.
+A valid focused-gameplay sweep
 at or above 3.00 m/s starts a bounded 100 ms command pulse. The gesture must
 then slow to 0.75 m/s or below to re-arm, and a 450 ms cooldown prevents
 repeated attacks from one continuous fast motion.

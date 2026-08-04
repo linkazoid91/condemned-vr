@@ -478,6 +478,28 @@ int main() {
         return Fail(
             "held models must originate at the distinct OpenXR grip pose");
     }
+    controllerGripInput.activeHands |= FEARVR_HAND_MASK_LEFT;
+    controllerGripInput.gripPoseValidHands |= FEARVR_HAND_MASK_LEFT;
+    controllerGripInput.handGripPose[FEARVR_HAND_LEFT].px = 0.3F;
+    controllerGripInput.handGripPose[FEARVR_HAND_LEFT].py = 0.1F;
+    controllerGripInput.handGripPose[FEARVR_HAND_LEFT].pz = -0.4F;
+    controllerGripInput.handGripPose[FEARVR_HAND_LEFT].qw = 1.0F;
+    const auto leftGripWorldPose =
+        condemnedvr::ResolveControllerGripWorldPoseForHand(
+            controllerGripInput, true, trackingRecenter,
+            retailCameraPosition, retailBase,
+            FEARVR_HAND_LEFT, 100.0F);
+    if (!leftGripWorldPose.active ||
+        !Near(leftGripWorldPose.worldPosition.x, 1030.0F) ||
+        !Near(leftGripWorldPose.worldPosition.y, 2010.0F) ||
+        !Near(leftGripWorldPose.worldPosition.z, 3040.0F) ||
+        condemnedvr::ResolveControllerGripWorldPoseForHand(
+            controllerGripInput, true, trackingRecenter,
+            retailCameraPosition, retailBase,
+            FEARVR_HAND_COUNT, 100.0F).active) {
+        return Fail(
+            "support-hand grip must resolve independently and fail closed");
+    }
     controllerGripInput.gripPoseValidHands = 0;
     if (condemnedvr::ResolveControllerGripWorldPose(
             controllerGripInput, true, trackingRecenter,

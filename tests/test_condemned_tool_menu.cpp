@@ -71,6 +71,13 @@ bool FitsCompleteMenuOverlay(
 int main() {
     using namespace condemnedvr;
 
+    if (ToolMenuRowCount(ToolMenuTab::TwoHand) != 8U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::TwoHand),
+            "2-HAND") != 0) {
+        return Fail("two-hand setup must have a dedicated bounded menu tab");
+    }
+
     ToolMenuState state{};
     ToolMenuInputEvent input{};
     input.toggle = true;
