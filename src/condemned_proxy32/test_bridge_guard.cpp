@@ -42,6 +42,18 @@ int wmain(int argumentCount, wchar_t** arguments) {
         FreeLibrary(bridge);
         return 1;
     }
+    if (GetProcAddress(
+            bridge, "CondemnedVr_DrawOverlayLines") == nullptr) {
+        std::fputs("Bridge calibration-overlay export is missing.\n", stderr);
+        FreeLibrary(bridge);
+        return 1;
+    }
+    if (GetProcAddress(
+            bridge, "CondemnedVr_DrawOverlayTriangles") == nullptr) {
+        std::fputs("Bridge tool-menu overlay export is missing.\n", stderr);
+        FreeLibrary(bridge);
+        return 1;
+    }
     const BOOL installed = install();
     FreeLibrary(bridge);
     if (installed) {

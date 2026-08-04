@@ -14,9 +14,16 @@
 #include <cstdio>
 #include <cstring>
 
+#include <MinHook.h>
+
+#include "binding_input.h"
+#include "condemned_calibration_gizmo.h"
 #include "condemned_controller_input.h"
+#include "condemned_physical_melee.h"
 #include "head_tracking_math.h"
 #include "protocol.h"
+#include "stereo_math.h"
+#include "weapon_weight.h"
 
 namespace condemnedvr {
 namespace {
@@ -37,9 +44,18 @@ using EndStereoDiagnosticFrameFunction = BOOL(__cdecl*)(std::uint64_t);
 using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
 using SetFovScalePercentFunction = void(__cdecl*)(std::uint32_t);
 using GetInputStateFunction = BOOL(__cdecl*)(FearVrInputState*);
+using DrawOverlayLinesFunction = BOOL(__cdecl*)(
+    const FearVrOverlayLineVertex*, std::uint32_t);
+using DrawOverlayTrianglesFunction = BOOL(__cdecl*)(
+    const FearVrOverlayLineVertex*, std::uint32_t);
 struct RigidTransformAbi {
     float position[3];
     float rotation[4];
+};
+struct PhysicalMeleeVisualOverride {
+    void* object{nullptr};
+    RigidTransformAbi original{};
+    bool active{false};
 };
 using GetRigidTransformFunction =
     unsigned long(__thiscall*)(void*, void*, RigidTransformAbi*);
@@ -103,8 +119,12 @@ EndStereoDiagnosticFrameFunction g_endStereoDiagnosticFrame = nullptr;
 EndStereoFrameFunction g_endStereoFrame = nullptr;
 SetFovScalePercentFunction g_setFovScalePercent = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
+DrawOverlayLinesFunction g_drawOverlayLines = nullptr;
+DrawOverlayTrianglesFunction g_drawOverlayTriangles = nullptr;
 void* g_client = nullptr;
 GetRigidTransformFunction g_getRigidTransform = nullptr;
+GetRigidTransformFunction g_originalHeadAimGetRigidTransform = nullptr;
+void* g_headAimGetRigidTransformTarget = nullptr;
 SetRigidTransformFunction g_setRigidTransform = nullptr;
 GetCameraFovFunction g_getCameraFov = nullptr;
 SetCameraFovFunction g_setCameraFov = nullptr;
@@ -120,6 +140,7 @@ float g_tuningFovScale = kCondemnedDefaultFovScale;
 bool g_hmdTranslationEnabled = true;
 bool g_controllerRecenterEnabled = false;
 bool g_controllerRecenterRequested = false;
+bool g_headAimEnabled = false;
 bool g_trackingRecenterPending = true;
 bool g_trackingRecenterValid = false;
 FearVrPose g_trackingRecenter{};
@@ -129,11 +150,395 @@ std::uint64_t g_lastStereoRenderRequestId = 0;
 volatile LONG g_continuousStereoLogged = 0;
 volatile LONG g_cameraReadFailures = 0;
 std::uint64_t g_lastInputSampleId = 0;
+ULONGLONG g_lastInputSampleTick = 0;
 std::uint64_t g_inputSamplesObserved = 0;
 std::uint32_t g_lastInputButtons = 0;
 std::uint32_t g_lastInputHands = 0;
 std::uint32_t g_lastInputFlags = 0;
 std::uint32_t g_lastInputPoseMasks = 0;
+SRWLOCK g_headAimLock = SRWLOCK_INIT;
+void* g_headAimCamera = nullptr;
+float g_headAimRotation[4]{};
+float g_headAimPosition[3]{};
+float g_headAimBaseRotation[4]{};
+ULONGLONG g_headAimTick = 0;
+float g_controllerAimPosition[3]{};
+float g_controllerAimRotation[4]{};
+std::uint64_t g_controllerAimSampleId = 0;
+std::uint64_t g_controllerAimTimestampNs = 0;
+ULONGLONG g_controllerAimTick = 0;
+float g_controllerWeaponPosition[3]{};
+float g_controllerWeaponRotation[4]{};
+std::uint64_t g_controllerWeaponSampleId = 0;
+std::uint64_t g_controllerWeaponTimestampNs = 0;
+ULONGLONG g_controllerWeaponTick = 0;
+volatile LONG g_headAimCameraReadLogged = 0;
+volatile LONG g_controllerAimPublishedLogged = 0;
+volatile LONG g_controllerWeaponPublishedLogged = 0;
+SRWLOCK g_physicalMeleeVisualLock = SRWLOCK_INIT;
+volatile LONG g_physicalMeleeVisualEnabled = 0;
+void* const* g_physicalMeleeVisualWeaponReference = nullptr;
+void* g_physicalMeleeVisualWeapon = nullptr;
+std::int32_t g_physicalMeleeVisualWeaponIndex = -1;
+void* const* g_physicalMeleeVisualModelReference = nullptr;
+void* g_physicalMeleeVisualModel = nullptr;
+fearvr::TrackingVector g_physicalMeleeVisualModelLocalGripPosition{};
+fearvr::TrackingQuaternion g_physicalMeleeVisualModelLocalGripRotation{
+    0.0F, 0.0F, 0.0F, 1.0F};
+std::uint64_t g_physicalMeleeVisualSourceGeneration = 0;
+volatile LONG g_physicalMeleeVisualActiveLogged = 0;
+volatile LONG g_physicalMeleeVisualRestoreFailed = 0;
+volatile LONG g_weaponGripControllerGizmoActiveLogged = 0;
+volatile LONG g_weaponGripControllerGizmoFailureLogged = 0;
+
+enum class WeaponGripCalibrationMode : std::uint8_t {
+    Position,
+    Rotation
+};
+
+struct WeaponGripCalibrationSlot {
+    void* weapon{nullptr};
+    void* modelObject{nullptr};
+    std::int32_t weaponIndex{-1};
+    PhysicalMeleeGripCalibration calibration{};
+    std::uint64_t lastUsed{0};
+    bool occupied{false};
+};
+
+constexpr std::size_t kWeaponGripCalibrationSlotCount = 16;
+WeaponGripCalibrationSlot
+    g_weaponGripCalibrationSlots[kWeaponGripCalibrationSlotCount]{};
+std::int32_t g_activeWeaponGripCalibrationSlot = -1;
+std::uint64_t g_weaponGripCalibrationUseSequence = 0;
+volatile LONG g_weaponGripCalibrationEnabled = 0;
+volatile LONG g_weaponGripCalibrationActive = 0;
+WeaponGripCalibrationMode g_weaponGripCalibrationMode =
+    WeaponGripCalibrationMode::Position;
+std::size_t g_weaponGripCalibrationStepIndex = 2;
+fearvr::WeaponWeightFilterState g_physicalMeleeWeaponWeightFilter{};
+std::int32_t g_physicalMeleeWeightedWeaponIndex = -1;
+std::uint64_t g_physicalMeleeWeightedSourceGeneration = 0;
+std::uint64_t g_physicalMeleeWeightedSampleId = 0;
+fearvr::TrackingVector g_physicalMeleeWeightedPosition{};
+fearvr::TrackingQuaternion g_physicalMeleeWeightedRotation{
+    0.0F, 0.0F, 0.0F, 1.0F};
+bool g_physicalMeleeWeightedPoseValid = false;
+volatile LONG g_physicalMeleeWeightActiveLogged = 0;
+SRWLOCK g_toolMenuSettingsLock = SRWLOCK_INIT;
+ToolMenuWeaponSettingsRegistry g_toolMenuWeaponSettingsRegistry{};
+ToolMenuState g_toolMenuState{};
+ToolMenuOverlay g_toolMenuOverlay{};
+ToolMenuPanelPlacement g_toolMenuPanelPlacement{};
+volatile LONG g_toolMenuEnabled = 0;
+volatile LONG g_toolMenuOpen = 0;
+volatile LONG g_toolMenuReleaseCapture = 0;
+volatile LONG g_toolMenuOverlayFailureLogged = 0;
+
+constexpr ULONGLONG kHeadAimFreshnessMilliseconds = 250;
+
+void ResetPhysicalMeleeWeaponWeight(
+    fearvr::WeaponWeightResetReason reason) noexcept {
+    fearvr::ClearWeaponWeightFilter(
+        g_physicalMeleeWeaponWeightFilter, reason);
+    g_physicalMeleeWeightedWeaponIndex = -1;
+    g_physicalMeleeWeightedSourceGeneration = 0;
+    g_physicalMeleeWeightedSampleId = 0;
+    g_physicalMeleeWeightedPosition = {};
+    g_physicalMeleeWeightedRotation = {
+        0.0F, 0.0F, 0.0F, 1.0F};
+    g_physicalMeleeWeightedPoseValid = false;
+}
+
+void InvalidateTrackedHeadAim() noexcept {
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_headAimCamera = nullptr;
+    g_headAimRotation[0] = 0.0F;
+    g_headAimRotation[1] = 0.0F;
+    g_headAimRotation[2] = 0.0F;
+    g_headAimRotation[3] = 0.0F;
+    g_headAimPosition[0] = 0.0F;
+    g_headAimPosition[1] = 0.0F;
+    g_headAimPosition[2] = 0.0F;
+    g_headAimBaseRotation[0] = 0.0F;
+    g_headAimBaseRotation[1] = 0.0F;
+    g_headAimBaseRotation[2] = 0.0F;
+    g_headAimBaseRotation[3] = 0.0F;
+    g_headAimTick = 0;
+    g_controllerAimPosition[0] = 0.0F;
+    g_controllerAimPosition[1] = 0.0F;
+    g_controllerAimPosition[2] = 0.0F;
+    g_controllerAimRotation[0] = 0.0F;
+    g_controllerAimRotation[1] = 0.0F;
+    g_controllerAimRotation[2] = 0.0F;
+    g_controllerAimRotation[3] = 0.0F;
+    g_controllerAimSampleId = 0;
+    g_controllerAimTimestampNs = 0;
+    g_controllerAimTick = 0;
+    g_controllerWeaponPosition[0] = 0.0F;
+    g_controllerWeaponPosition[1] = 0.0F;
+    g_controllerWeaponPosition[2] = 0.0F;
+    g_controllerWeaponRotation[0] = 0.0F;
+    g_controllerWeaponRotation[1] = 0.0F;
+    g_controllerWeaponRotation[2] = 0.0F;
+    g_controllerWeaponRotation[3] = 0.0F;
+    g_controllerWeaponSampleId = 0;
+    g_controllerWeaponTimestampNs = 0;
+    g_controllerWeaponTick = 0;
+    ReleaseSRWLockExclusive(&g_headAimLock);
+    ResetPhysicalMeleeWeaponWeight(
+        fearvr::WeaponWeightResetReason::trackingLost);
+}
+
+void InvalidateTrackedControllerAim() noexcept {
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_controllerAimPosition[0] = 0.0F;
+    g_controllerAimPosition[1] = 0.0F;
+    g_controllerAimPosition[2] = 0.0F;
+    g_controllerAimRotation[0] = 0.0F;
+    g_controllerAimRotation[1] = 0.0F;
+    g_controllerAimRotation[2] = 0.0F;
+    g_controllerAimRotation[3] = 0.0F;
+    g_controllerAimSampleId = 0;
+    g_controllerAimTimestampNs = 0;
+    g_controllerAimTick = 0;
+    g_controllerWeaponPosition[0] = 0.0F;
+    g_controllerWeaponPosition[1] = 0.0F;
+    g_controllerWeaponPosition[2] = 0.0F;
+    g_controllerWeaponRotation[0] = 0.0F;
+    g_controllerWeaponRotation[1] = 0.0F;
+    g_controllerWeaponRotation[2] = 0.0F;
+    g_controllerWeaponRotation[3] = 0.0F;
+    g_controllerWeaponSampleId = 0;
+    g_controllerWeaponTimestampNs = 0;
+    g_controllerWeaponTick = 0;
+    ReleaseSRWLockExclusive(&g_headAimLock);
+    ResetPhysicalMeleeWeaponWeight(
+        fearvr::WeaponWeightResetReason::trackingLost);
+}
+
+void InvalidateTrackedControllerWeaponPose() noexcept {
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_controllerWeaponPosition[0] = 0.0F;
+    g_controllerWeaponPosition[1] = 0.0F;
+    g_controllerWeaponPosition[2] = 0.0F;
+    g_controllerWeaponRotation[0] = 0.0F;
+    g_controllerWeaponRotation[1] = 0.0F;
+    g_controllerWeaponRotation[2] = 0.0F;
+    g_controllerWeaponRotation[3] = 0.0F;
+    g_controllerWeaponSampleId = 0;
+    g_controllerWeaponTimestampNs = 0;
+    g_controllerWeaponTick = 0;
+    ReleaseSRWLockExclusive(&g_headAimLock);
+    ResetPhysicalMeleeWeaponWeight(
+        fearvr::WeaponWeightResetReason::trackingLost);
+}
+
+void PublishTrackedHeadAim(
+    void* camera,
+    const fearvr::TrackingVector& position,
+    const fearvr::TrackingQuaternion& baseRotation,
+    const fearvr::TrackingQuaternion& rotation) noexcept {
+    if (!g_headAimEnabled || camera == nullptr ||
+        !fearvr::IsFinite(position) ||
+        !fearvr::IsFinite(baseRotation) ||
+        !fearvr::IsFinite(rotation)) {
+        InvalidateTrackedHeadAim();
+        return;
+    }
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_headAimCamera = camera;
+    g_headAimRotation[0] = rotation.x;
+    g_headAimRotation[1] = rotation.y;
+    g_headAimRotation[2] = rotation.z;
+    g_headAimRotation[3] = rotation.w;
+    g_headAimPosition[0] = position.x;
+    g_headAimPosition[1] = position.y;
+    g_headAimPosition[2] = position.z;
+    g_headAimBaseRotation[0] = baseRotation.x;
+    g_headAimBaseRotation[1] = baseRotation.y;
+    g_headAimBaseRotation[2] = baseRotation.z;
+    g_headAimBaseRotation[3] = baseRotation.w;
+    g_headAimTick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_headAimLock);
+}
+
+void PublishTrackedControllerAim(
+    const fearvr::TrackingVector& position,
+    const fearvr::TrackingQuaternion& rotation,
+    std::uint64_t sampleId,
+    std::uint64_t timestampNs) noexcept {
+    if (!g_headAimEnabled || !fearvr::IsFinite(position) ||
+        !fearvr::IsFinite(rotation) || sampleId == 0 ||
+        timestampNs == 0) {
+        InvalidateTrackedControllerAim();
+        return;
+    }
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_controllerAimPosition[0] = position.x;
+    g_controllerAimPosition[1] = position.y;
+    g_controllerAimPosition[2] = position.z;
+    g_controllerAimRotation[0] = rotation.x;
+    g_controllerAimRotation[1] = rotation.y;
+    g_controllerAimRotation[2] = rotation.z;
+    g_controllerAimRotation[3] = rotation.w;
+    g_controllerAimSampleId = sampleId;
+    g_controllerAimTimestampNs = timestampNs;
+    g_controllerAimTick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_headAimLock);
+    if (InterlockedCompareExchange(
+            &g_controllerAimPublishedLogged, 1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_controller_aim_active",
+            "source=right_aim_pose pose=position_and_rotation "
+            "basis=lithtech_world "
+            "openxr_minus_z_to_engine_plus_z=1 freshness_ms=250");
+    }
+}
+
+void PublishTrackedControllerWeaponPose(
+    const fearvr::TrackingVector& gripPosition,
+    const fearvr::TrackingQuaternion& aimRotation,
+    std::uint64_t sampleId,
+    std::uint64_t timestampNs) noexcept {
+    if (!g_headAimEnabled || !fearvr::IsFinite(gripPosition) ||
+        !fearvr::IsFinite(aimRotation) || sampleId == 0 ||
+        timestampNs == 0) {
+        InvalidateTrackedControllerWeaponPose();
+        return;
+    }
+    AcquireSRWLockExclusive(&g_headAimLock);
+    g_controllerWeaponPosition[0] = gripPosition.x;
+    g_controllerWeaponPosition[1] = gripPosition.y;
+    g_controllerWeaponPosition[2] = gripPosition.z;
+    g_controllerWeaponRotation[0] = aimRotation.x;
+    g_controllerWeaponRotation[1] = aimRotation.y;
+    g_controllerWeaponRotation[2] = aimRotation.z;
+    g_controllerWeaponRotation[3] = aimRotation.w;
+    g_controllerWeaponSampleId = sampleId;
+    g_controllerWeaponTimestampNs = timestampNs;
+    g_controllerWeaponTick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_headAimLock);
+    if (InterlockedCompareExchange(
+            &g_controllerWeaponPublishedLogged, 1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_controller_weapon_pose_active",
+            "position=right_grip_pose rotation=right_aim_pose "
+            "basis=lithtech_world shared_by=model_and_collision "
+            "freshness_ms=250");
+    }
+}
+
+bool CopyFreshTrackedHeadAim(
+    void** camera,
+    float (&rotation)[4]) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_headAimLock);
+    const bool fresh = g_headAimEnabled && g_headAimCamera != nullptr &&
+        g_headAimTick != 0 &&
+        now - g_headAimTick <= kHeadAimFreshnessMilliseconds;
+    if (fresh) {
+        if (camera != nullptr) {
+            *camera = g_headAimCamera;
+        }
+        std::memcpy(rotation, g_headAimRotation, sizeof(g_headAimRotation));
+    }
+    ReleaseSRWLockShared(&g_headAimLock);
+    return fresh;
+}
+
+bool CopyFreshTrackedControllerAim(
+    float (&rotation)[4]) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_headAimLock);
+    const bool fresh = g_headAimEnabled && g_controllerAimTick != 0 &&
+        now - g_controllerAimTick <= kHeadAimFreshnessMilliseconds;
+    if (fresh) {
+        std::memcpy(
+            rotation, g_controllerAimRotation,
+            sizeof(g_controllerAimRotation));
+    }
+    ReleaseSRWLockShared(&g_headAimLock);
+    return fresh;
+}
+
+bool CopyFreshTrackedControllerWorldPose(
+    float (&position)[3],
+    float (&rotation)[4],
+    std::uint64_t& sampleId,
+    std::uint64_t& timestampNs) noexcept {
+    sampleId = 0;
+    timestampNs = 0;
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_headAimLock);
+    const bool fresh = g_headAimEnabled &&
+        g_controllerWeaponTick != 0 &&
+        now - g_controllerWeaponTick <=
+            kHeadAimFreshnessMilliseconds;
+    if (fresh) {
+        std::memcpy(
+            position, g_controllerWeaponPosition,
+            sizeof(g_controllerWeaponPosition));
+        std::memcpy(
+            rotation, g_controllerWeaponRotation,
+            sizeof(g_controllerWeaponRotation));
+        sampleId = g_controllerWeaponSampleId;
+        timestampNs = g_controllerWeaponTimestampNs;
+    }
+    ReleaseSRWLockShared(&g_headAimLock);
+    return fresh;
+}
+
+bool CopyFreshTrackedMeleeAimBasis(
+    float (&position)[3],
+    float (&baseRotation)[4],
+    float (&controllerRotation)[4]) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_headAimLock);
+    const bool fresh = g_headAimEnabled && g_headAimTick != 0 &&
+        g_controllerAimTick != 0 &&
+        now - g_headAimTick <= kHeadAimFreshnessMilliseconds &&
+        now - g_controllerAimTick <= kHeadAimFreshnessMilliseconds;
+    if (fresh) {
+        std::memcpy(position, g_headAimPosition, sizeof(g_headAimPosition));
+        std::memcpy(
+            baseRotation, g_headAimBaseRotation,
+            sizeof(g_headAimBaseRotation));
+        std::memcpy(
+            controllerRotation, g_controllerAimRotation,
+            sizeof(g_controllerAimRotation));
+    }
+    ReleaseSRWLockShared(&g_headAimLock);
+    return fresh;
+}
+
+unsigned long __fastcall HookGetRigidTransformForHeadAim(
+    void* client,
+    void* ignoredEdx,
+    void* object,
+    RigidTransformAbi* transform) {
+    (void)ignoredEdx;
+    const unsigned long result = g_originalHeadAimGetRigidTransform(
+        client, object, transform);
+    if (result != 0UL || transform == nullptr) {
+        return result;
+    }
+    void* camera = nullptr;
+    float rotation[4]{};
+    if (CopyFreshTrackedHeadAim(&camera, rotation) && object == camera) {
+        std::memcpy(transform->rotation, rotation, sizeof(rotation));
+        if (InterlockedCompareExchange(
+                &g_headAimCameraReadLogged, 1, 0) == 0 &&
+            g_passThroughLog != nullptr) {
+            g_passThroughLog(
+                "m5_head_camera_transform_active",
+                "consumers=flashlight,focus_detectors "
+                "source=fresh_hmd_world_rotation retail_base_unchanged=1");
+        }
+    }
+    return result;
+}
 
 bool PressedOnce(int virtualKey, bool& wasDown) noexcept {
     const bool down = (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
@@ -142,20 +547,1536 @@ bool PressedOnce(int virtualKey, bool& wasDown) noexcept {
     return pressed;
 }
 
+struct RepeatingCalibrationKey {
+    bool down{false};
+    ULONGLONG nextRepeatTick{0};
+};
+
+bool PressedOrRepeated(
+    int virtualKey,
+    RepeatingCalibrationKey& state,
+    ULONGLONG now) noexcept {
+    const bool down = (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+    if (!down) {
+        state.down = false;
+        state.nextRepeatTick = 0;
+        return false;
+    }
+    if (!state.down) {
+        state.down = true;
+        state.nextRepeatTick = now + 325;
+        return true;
+    }
+    if (now >= state.nextRepeatTick) {
+        state.nextRepeatTick = now + 60;
+        return true;
+    }
+    return false;
+}
+
+bool GameOwnsForegroundWindow() noexcept {
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr) {
+        return false;
+    }
+    DWORD processId = 0;
+    GetWindowThreadProcessId(foreground, &processId);
+    return processId == GetCurrentProcessId();
+}
+
+const char* WeaponGripCalibrationModeName(
+    WeaponGripCalibrationMode mode) noexcept {
+    return mode == WeaponGripCalibrationMode::Rotation
+        ? "rotation" : "position";
+}
+
+constexpr float kWeaponGripTranslationSteps[] = {
+    0.1F, 0.25F, 0.5F, 1.0F, 2.5F, 5.0F};
+constexpr float kWeaponGripRotationSteps[] = {
+    0.25F, 0.5F, 1.0F, 2.0F, 5.0F, 10.0F};
+constexpr std::size_t kWeaponGripStepCount =
+    sizeof(kWeaponGripTranslationSteps) /
+    sizeof(kWeaponGripTranslationSteps[0]);
+
+std::int32_t FindOrCreateWeaponGripCalibrationSlot(
+    void* weapon,
+    std::int32_t weaponIndex,
+    void* modelObject,
+    const fearvr::TrackingVector& basePosition,
+    const fearvr::TrackingQuaternion& baseRotation) noexcept {
+    if (weaponIndex < 0) {
+        return -1;
+    }
+    std::size_t replacement = kWeaponGripCalibrationSlotCount;
+    std::uint64_t oldestUse = UINT64_MAX;
+    for (std::size_t index = 0;
+         index < kWeaponGripCalibrationSlotCount; ++index) {
+        WeaponGripCalibrationSlot& slot =
+            g_weaponGripCalibrationSlots[index];
+        if (slot.occupied && slot.weaponIndex == weaponIndex) {
+            // Pointers are process-local instances. Refresh them when the
+            // same stable Retail weapon is dropped, reacquired, or recreated
+            // after a level transition while retaining its session tuning.
+            slot.weapon = weapon;
+            slot.modelObject = modelObject;
+            slot.lastUsed = ++g_weaponGripCalibrationUseSequence;
+            return static_cast<std::int32_t>(index);
+        }
+        if (!slot.occupied &&
+            replacement == kWeaponGripCalibrationSlotCount) {
+            replacement = index;
+        } else if (slot.occupied &&
+                   replacement == kWeaponGripCalibrationSlotCount &&
+                   slot.lastUsed < oldestUse) {
+            replacement = index;
+            oldestUse = slot.lastUsed;
+        }
+    }
+    if (replacement == kWeaponGripCalibrationSlotCount) {
+        return -1;
+    }
+    WeaponGripCalibrationSlot& slot =
+        g_weaponGripCalibrationSlots[replacement];
+    slot = {};
+    slot.weapon = weapon;
+    slot.modelObject = modelObject;
+    slot.weaponIndex = weaponIndex;
+    slot.calibration.basePositionUnits = basePosition;
+    slot.calibration.baseRotation = fearvr::Normalize(baseRotation);
+    slot.calibration.positionUnits = basePosition;
+    slot.lastUsed = ++g_weaponGripCalibrationUseSequence;
+    slot.occupied = true;
+    return static_cast<std::int32_t>(replacement);
+}
+
+bool CopyActiveWeaponGripCalibration(
+    PhysicalMeleeGripCalibration& calibration,
+    void*& weapon,
+    std::int32_t& weaponIndex,
+    void*& modelObject,
+    std::uint64_t& sourceGeneration) noexcept {
+    bool copied = false;
+    AcquireSRWLockShared(&g_physicalMeleeVisualLock);
+    const std::int32_t slotIndex =
+        g_activeWeaponGripCalibrationSlot;
+    if (slotIndex >= 0 &&
+        static_cast<std::size_t>(slotIndex) <
+            kWeaponGripCalibrationSlotCount) {
+        const WeaponGripCalibrationSlot& slot =
+            g_weaponGripCalibrationSlots[slotIndex];
+        if (slot.occupied &&
+            slot.weapon == g_physicalMeleeVisualWeapon &&
+            slot.weaponIndex == g_physicalMeleeVisualWeaponIndex &&
+            slot.modelObject == g_physicalMeleeVisualModel) {
+            calibration = slot.calibration;
+            weapon = slot.weapon;
+            weaponIndex = slot.weaponIndex;
+            modelObject = slot.modelObject;
+            sourceGeneration =
+                g_physicalMeleeVisualSourceGeneration;
+            copied = true;
+        }
+    }
+    ReleaseSRWLockShared(&g_physicalMeleeVisualLock);
+    return copied;
+}
+
+void LogWeaponGripCalibrationState(
+    const char* event,
+    const char* action) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    PhysicalMeleeGripCalibration calibration{};
+    void* weapon = nullptr;
+    void* modelObject = nullptr;
+    std::int32_t weaponIndex = -1;
+    std::uint64_t sourceGeneration = 0;
+    const bool haveSource = CopyActiveWeaponGripCalibration(
+        calibration, weapon, weaponIndex, modelObject,
+        sourceGeneration);
+    const fearvr::TrackingQuaternion resolvedRotation =
+        ResolvePhysicalMeleeGripCalibrationRotation(calibration);
+    char detail[896]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s active=%u source=%s mode=%s "
+        "translation_step_units=%.2f rotation_step_degrees=%.2f "
+        "weapon_index=%ld weapon=%p model_object=%p "
+        "source_generation=%llu position_units=(%.3f,%.3f,%.3f) "
+        "local_rotation_degrees=(%.3f,%.3f,%.3f) "
+        "rotation_quaternion=(%.6f,%.6f,%.6f,%.6f) "
+        "profile_position_units={%.3f,%.3f,%.3f} "
+        "profile_rotation={%.6f,%.6f,%.6f,%.6f}",
+        action,
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationActive, 0, 0) != 0 ? 1U : 0U,
+        haveSource ? "equipped_weapon" : "none",
+        WeaponGripCalibrationModeName(g_weaponGripCalibrationMode),
+        kWeaponGripTranslationSteps[g_weaponGripCalibrationStepIndex],
+        kWeaponGripRotationSteps[g_weaponGripCalibrationStepIndex],
+        static_cast<long>(weaponIndex), weapon, modelObject,
+        static_cast<unsigned long long>(sourceGeneration),
+        calibration.positionUnits.x,
+        calibration.positionUnits.y,
+        calibration.positionUnits.z,
+        calibration.localRotationDegrees.x,
+        calibration.localRotationDegrees.y,
+        calibration.localRotationDegrees.z,
+        resolvedRotation.x, resolvedRotation.y,
+        resolvedRotation.z, resolvedRotation.w,
+        calibration.positionUnits.x,
+        calibration.positionUnits.y,
+        calibration.positionUnits.z,
+        resolvedRotation.x, resolvedRotation.y,
+        resolvedRotation.z, resolvedRotation.w);
+    g_passThroughLog(event, detail);
+}
+
+bool AdjustActiveWeaponGripCalibration(
+    float x, float y, float z) noexcept {
+    bool adjusted = false;
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    const std::int32_t slotIndex =
+        g_activeWeaponGripCalibrationSlot;
+    if (slotIndex >= 0 &&
+        static_cast<std::size_t>(slotIndex) <
+            kWeaponGripCalibrationSlotCount) {
+        WeaponGripCalibrationSlot& slot =
+            g_weaponGripCalibrationSlots[slotIndex];
+        if (slot.occupied &&
+            slot.weapon == g_physicalMeleeVisualWeapon &&
+            slot.weaponIndex == g_physicalMeleeVisualWeaponIndex &&
+            slot.modelObject == g_physicalMeleeVisualModel) {
+            if (g_weaponGripCalibrationMode ==
+                WeaponGripCalibrationMode::Position) {
+                slot.calibration.positionUnits.x = std::clamp(
+                    slot.calibration.positionUnits.x + x,
+                    -300.0F, 300.0F);
+                slot.calibration.positionUnits.y = std::clamp(
+                    slot.calibration.positionUnits.y + y,
+                    -300.0F, 300.0F);
+                slot.calibration.positionUnits.z = std::clamp(
+                    slot.calibration.positionUnits.z + z,
+                    -300.0F, 300.0F);
+            } else {
+                slot.calibration.localRotationDegrees.x =
+                    PhysicalMeleeWrapDegrees(
+                        slot.calibration.localRotationDegrees.x + x);
+                slot.calibration.localRotationDegrees.y =
+                    PhysicalMeleeWrapDegrees(
+                        slot.calibration.localRotationDegrees.y + y);
+                slot.calibration.localRotationDegrees.z =
+                    PhysicalMeleeWrapDegrees(
+                        slot.calibration.localRotationDegrees.z + z);
+            }
+            slot.lastUsed = ++g_weaponGripCalibrationUseSequence;
+            g_physicalMeleeVisualModelLocalGripPosition =
+                slot.calibration.positionUnits;
+            g_physicalMeleeVisualModelLocalGripRotation =
+                ResolvePhysicalMeleeGripCalibrationRotation(
+                    slot.calibration);
+            adjusted = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+    return adjusted;
+}
+
+bool ResetActiveWeaponGripCalibration() noexcept {
+    bool reset = false;
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    const std::int32_t slotIndex =
+        g_activeWeaponGripCalibrationSlot;
+    if (slotIndex >= 0 &&
+        static_cast<std::size_t>(slotIndex) <
+            kWeaponGripCalibrationSlotCount) {
+        WeaponGripCalibrationSlot& slot =
+            g_weaponGripCalibrationSlots[slotIndex];
+        if (slot.occupied &&
+            slot.weapon == g_physicalMeleeVisualWeapon &&
+            slot.weaponIndex == g_physicalMeleeVisualWeaponIndex &&
+            slot.modelObject == g_physicalMeleeVisualModel) {
+            slot.calibration.positionUnits =
+                slot.calibration.basePositionUnits;
+            slot.calibration.localRotationDegrees = {};
+            slot.lastUsed = ++g_weaponGripCalibrationUseSequence;
+            g_physicalMeleeVisualModelLocalGripPosition =
+                slot.calibration.positionUnits;
+            g_physicalMeleeVisualModelLocalGripRotation =
+                slot.calibration.baseRotation;
+            reset = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+    return reset;
+}
+
+void LogStereoTuningState(const char* action) noexcept;
+
+ToolMenuMeleeSettings CopyToolMenuMeleeSettings(
+    std::int32_t weaponIndex) noexcept {
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    ToolMenuMeleeSettings settings =
+        ToolMenuMeleeSettingsFromProfile(baseProfile);
+    if (weaponIndex < 0) {
+        return settings;
+    }
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        settings = slot->settings;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    return settings;
+}
+
+bool StoreToolMenuMeleeSettings(
+    std::int32_t weaponIndex,
+    const ToolMenuMeleeSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !ToolMenuMeleeSettingsAreValid(settings)) {
+        return false;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    bool stored = false;
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        slot->settings = settings;
+        stored = true;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    return stored;
+}
+
+void LogToolMenuState(const char* action) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    ToolMenuMeleeTelemetry telemetry{};
+    ReadPhysicalMeleeToolTelemetry(telemetry);
+    const PhysicalMeleeProfile profile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            telemetry.weaponIndex);
+    const ToolMenuMeleeSettings settings =
+        CopyToolMenuMeleeSettings(telemetry.weaponIndex);
+    char detail[512]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s open=%u tab=%s row=%u weapon_index=%ld profile=%s "
+        "swing_enabled=%u trigger_mps=%.2f rearm_mps=%.2f "
+        "pulse_ms=%u cooldown_ms=%u mass_kg=%.2f "
+        "handling_weight=%.2f positional_follow=%.2f "
+        "rotational_follow=%.2f catch_up=%.2f damping=%.2f "
+        "menu_scale_percent=%.0f menu_distance_m=%.2f",
+        action,
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0
+            ? 1U : 0U,
+        ToolMenuTabName(g_toolMenuState.tab),
+        g_toolMenuState.row,
+        static_cast<long>(telemetry.weaponIndex),
+        PhysicalMeleeProfileName(profile.id),
+        settings.swingAttackEnabled ? 1U : 0U,
+        settings.swingTriggerSpeedMetersPerSecond,
+        settings.swingRearmSpeedMetersPerSecond,
+        settings.swingPulseMilliseconds,
+        settings.swingCooldownMilliseconds,
+        settings.massKilograms, settings.handlingWeight,
+        settings.positionalFollow, settings.rotationalFollow,
+        settings.catchUpStrength, settings.dampingRatio,
+        g_toolMenuPanelPlacement.scale * 100.0F,
+        g_toolMenuPanelPlacement.distanceMeters);
+    g_passThroughLog("m5_vr_tool_menu_changed", detail);
+}
+
+void UpdateToolMenuCalibrationVisibility() noexcept {
+    const bool calibrationVisible =
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 &&
+        g_toolMenuState.tab == ToolMenuTab::Grip &&
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) != 0;
+    InterlockedExchange(
+        &g_weaponGripCalibrationActive,
+        calibrationVisible ? 1 : 0);
+}
+
+void SetToolMenuOpen(bool open) noexcept {
+    g_toolMenuState.open = open;
+    InterlockedExchange(&g_toolMenuOpen, open ? 1 : 0);
+    if (!open) {
+        InterlockedExchange(&g_toolMenuReleaseCapture, 1);
+    }
+    UpdateToolMenuCalibrationVisibility();
+}
+
+bool ApplyToolMenuMeleeAdjustment(
+    ToolMenuTab tab,
+    std::uint32_t row,
+    int delta,
+    bool activate,
+    std::int32_t weaponIndex) noexcept {
+    if (weaponIndex < 0) {
+        return false;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    const ToolMenuMeleeSettings defaults =
+        ToolMenuMeleeSettingsFromProfile(baseProfile);
+    ToolMenuMeleeSettings settings =
+        CopyToolMenuMeleeSettings(weaponIndex);
+    const ToolMenuMeleeSettings original = settings;
+    if (tab == ToolMenuTab::Melee) {
+        switch (row) {
+        case 0U:
+            if ((delta != 0 || activate) &&
+                ToolMenuProfileSupportsSwingAttack(baseProfile.id)) {
+                settings.swingAttackEnabled =
+                    !settings.swingAttackEnabled;
+            }
+            break;
+        case 1U:
+            settings.swingTriggerSpeedMetersPerSecond = std::clamp(
+                settings.swingTriggerSpeedMetersPerSecond +
+                    static_cast<float>(delta) * 0.25F,
+                0.50F, 10.0F);
+            settings.swingRearmSpeedMetersPerSecond = std::min(
+                settings.swingRearmSpeedMetersPerSecond,
+                settings.swingTriggerSpeedMetersPerSecond - 0.25F);
+            break;
+        case 2U:
+            settings.swingRearmSpeedMetersPerSecond = std::clamp(
+                settings.swingRearmSpeedMetersPerSecond +
+                    static_cast<float>(delta) * 0.25F,
+                0.0F,
+                settings.swingTriggerSpeedMetersPerSecond - 0.25F);
+            break;
+        case 3U: {
+            const int value = std::clamp(
+                static_cast<int>(settings.swingPulseMilliseconds) +
+                    delta * 10,
+                30, 500);
+            settings.swingPulseMilliseconds =
+                static_cast<std::uint32_t>(value);
+            settings.swingCooldownMilliseconds = std::max(
+                settings.swingCooldownMilliseconds,
+                settings.swingPulseMilliseconds);
+            break;
+        }
+        case 4U: {
+            const int value = std::clamp(
+                static_cast<int>(settings.swingCooldownMilliseconds) +
+                    delta * 50,
+                static_cast<int>(settings.swingPulseMilliseconds),
+                3000);
+            settings.swingCooldownMilliseconds =
+                static_cast<std::uint32_t>(value);
+            break;
+        }
+        case 5U:
+            if (activate) {
+                settings.swingAttackEnabled =
+                    defaults.swingAttackEnabled;
+                settings.swingTriggerSpeedMetersPerSecond =
+                    defaults.swingTriggerSpeedMetersPerSecond;
+                settings.swingRearmSpeedMetersPerSecond =
+                    defaults.swingRearmSpeedMetersPerSecond;
+                settings.swingPulseMilliseconds =
+                    defaults.swingPulseMilliseconds;
+                settings.swingCooldownMilliseconds =
+                    defaults.swingCooldownMilliseconds;
+            }
+            break;
+        default:
+            break;
+        }
+    } else if (tab == ToolMenuTab::Weapon) {
+        switch (row) {
+        case 0U:
+            settings.massKilograms = std::clamp(
+                settings.massKilograms +
+                    static_cast<float>(delta) * 0.25F,
+                0.50F, 20.0F);
+            break;
+        case 1U:
+            settings.handlingWeight = std::clamp(
+                settings.handlingWeight +
+                    static_cast<float>(delta) * 0.25F,
+                0.10F, 4.0F);
+            break;
+        case 2U:
+            settings.positionalFollow = std::clamp(
+                settings.positionalFollow + static_cast<float>(delta),
+                2.0F, 40.0F);
+            break;
+        case 3U:
+            settings.rotationalFollow = std::clamp(
+                settings.rotationalFollow + static_cast<float>(delta),
+                2.0F, 40.0F);
+            break;
+        case 4U:
+            settings.catchUpStrength = std::clamp(
+                settings.catchUpStrength +
+                    static_cast<float>(delta) * 0.10F,
+                0.0F, 4.0F);
+            break;
+        case 5U:
+            settings.dampingRatio = std::clamp(
+                settings.dampingRatio +
+                    static_cast<float>(delta) * 0.05F,
+                0.35F, 1.0F);
+            break;
+        case 6U:
+            if (activate) {
+                settings.massKilograms = defaults.massKilograms;
+                settings.handlingWeight = defaults.handlingWeight;
+                settings.positionalFollow = defaults.positionalFollow;
+                settings.rotationalFollow = defaults.rotationalFollow;
+                settings.catchUpStrength = defaults.catchUpStrength;
+                settings.dampingRatio = defaults.dampingRatio;
+            }
+            break;
+        default:
+            break;
+        }
+    } else {
+        return false;
+    }
+    if (std::memcmp(&settings, &original, sizeof(settings)) == 0) {
+        return false;
+    }
+    return StoreToolMenuMeleeSettings(weaponIndex, settings);
+}
+
+bool ApplyToolMenuGripAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    if (InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0) {
+        return false;
+    }
+    if (row <= 2U && delta != 0) {
+        g_weaponGripCalibrationMode =
+            WeaponGripCalibrationMode::Position;
+        const float amount =
+            kWeaponGripTranslationSteps[
+                g_weaponGripCalibrationStepIndex] *
+            static_cast<float>(delta);
+        return AdjustActiveWeaponGripCalibration(
+            row == 0U ? amount : 0.0F,
+            row == 1U ? amount : 0.0F,
+            row == 2U ? amount : 0.0F);
+    }
+    if (row >= 3U && row <= 5U && delta != 0) {
+        g_weaponGripCalibrationMode =
+            WeaponGripCalibrationMode::Rotation;
+        const float amount =
+            kWeaponGripRotationSteps[
+                g_weaponGripCalibrationStepIndex] *
+            static_cast<float>(delta);
+        return AdjustActiveWeaponGripCalibration(
+            row == 3U ? amount : 0.0F,
+            row == 4U ? amount : 0.0F,
+            row == 5U ? amount : 0.0F);
+    }
+    if (row == 6U && delta != 0) {
+        const int next = std::clamp(
+            static_cast<int>(g_weaponGripCalibrationStepIndex) + delta,
+            0, static_cast<int>(kWeaponGripStepCount - 1U));
+        const bool changed = next !=
+            static_cast<int>(g_weaponGripCalibrationStepIndex);
+        g_weaponGripCalibrationStepIndex =
+            static_cast<std::size_t>(next);
+        return changed;
+    }
+    if (row == 7U && activate) {
+        return ResetActiveWeaponGripCalibration();
+    }
+    if (row == 8U && activate) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_snapshot",
+            "vr_tool_menu_snapshot");
+        return true;
+    }
+    return false;
+}
+
+bool ApplyToolMenuDisplayAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    bool changed = false;
+    switch (row) {
+    case 0U:
+        if (delta != 0) {
+            g_tuningFovScale = std::clamp(
+                g_tuningFovScale + static_cast<float>(delta) * 0.05F,
+                kMinimumFovScale, kMaximumFovScale);
+            if (g_setFovScalePercent != nullptr) {
+                g_setFovScalePercent(static_cast<std::uint32_t>(
+                    g_tuningFovScale * 100.0F + 0.5F));
+            }
+            changed = true;
+        }
+        break;
+    case 1U:
+        if (delta != 0) {
+            g_tuningUnitsPerMeter = std::clamp(
+                g_tuningUnitsPerMeter +
+                    static_cast<float>(delta) * 10.0F,
+                10.0F, 300.0F);
+            changed = true;
+        }
+        break;
+    case 2U:
+        if (delta != 0 || activate) {
+            g_hmdTranslationEnabled = !g_hmdTranslationEnabled;
+            changed = true;
+        }
+        break;
+    case 3U:
+        if (delta != 0 || activate) {
+            g_tuningReversePolarity = !g_tuningReversePolarity;
+            changed = true;
+        }
+        break;
+    case 4U:
+        if (delta != 0 || activate) {
+            g_continuousStereoEnabled = !g_continuousStereoEnabled;
+            changed = true;
+        }
+        break;
+    case 5U:
+        if (delta != 0) {
+            g_toolMenuPanelPlacement.scale = std::clamp(
+                g_toolMenuPanelPlacement.scale +
+                    static_cast<float>(delta) * 0.05F,
+                0.40F, 0.90F);
+            changed = true;
+        }
+        break;
+    case 6U:
+        if (delta != 0) {
+            g_toolMenuPanelPlacement.distanceMeters = std::clamp(
+                g_toolMenuPanelPlacement.distanceMeters +
+                    static_cast<float>(delta) * 0.10F,
+                0.75F, 3.0F);
+            changed = true;
+        }
+        break;
+    case 7U:
+        if (activate) {
+            g_trackingRecenterPending = true;
+            changed = true;
+        }
+        break;
+    case 8U:
+        if (activate) {
+            g_tuningUnitsPerMeter = 100.0F;
+            g_tuningReversePolarity = false;
+            g_tuningFovScale = kCondemnedDefaultFovScale;
+            g_hmdTranslationEnabled = true;
+            g_continuousStereoEnabled = true;
+            g_toolMenuPanelPlacement = {};
+            if (g_setFovScalePercent != nullptr) {
+                g_setFovScalePercent(130U);
+            }
+            g_trackingRecenterPending = true;
+            changed = true;
+        }
+        break;
+    default:
+        break;
+    }
+    if (changed) {
+        LogStereoTuningState("vr_tool_menu");
+    }
+    return changed;
+}
+
+struct ToolMenuButtonLatch {
+    bool releaseRequired{true};
+    bool wasDown{false};
+};
+
+bool ConsumeToolMenuButton(
+    ToolMenuButtonLatch& latch,
+    bool usable,
+    bool down) noexcept {
+    if (!usable) {
+        latch.releaseRequired = true;
+        latch.wasDown = false;
+        return false;
+    }
+    if (!down) {
+        latch.releaseRequired = false;
+        latch.wasDown = false;
+        return false;
+    }
+    if (latch.releaseRequired || latch.wasDown) {
+        latch.wasDown = true;
+        return false;
+    }
+    latch.wasDown = true;
+    return true;
+}
+
+void HandleVrToolMenuControls() noexcept {
+    if (InterlockedCompareExchange(&g_toolMenuEnabled, 0, 0) == 0 ||
+        !GameOwnsForegroundWindow()) {
+        return;
+    }
+    static bool f12Down = false;
+    static bool keyPreviousTabDown = false;
+    static bool keyNextTabDown = false;
+    static bool keyPreviousRowDown = false;
+    static bool keyNextRowDown = false;
+    static bool keyDecreaseDown = false;
+    static bool keyIncreaseDown = false;
+    static bool keyActivateDown = false;
+    static ToolMenuButtonLatch toggleLatch{};
+    static ToolMenuButtonLatch closeLatch{};
+    static ToolMenuButtonLatch previousTabLatch{};
+    static ToolMenuButtonLatch nextTabLatch{};
+    static ToolMenuButtonLatch previousRowLatch{};
+    static ToolMenuButtonLatch nextRowLatch{};
+    static ToolMenuButtonLatch decreaseLatch{};
+    static ToolMenuButtonLatch increaseLatch{};
+    static ToolMenuButtonLatch activateLatch{};
+    static std::uint64_t observedSampleId = 0;
+    static ULONGLONG observedTick = 0;
+
+    const ULONGLONG now = GetTickCount64();
+    FearVrInputState input{};
+    bool fresh = false;
+    if (g_getInputState != nullptr &&
+        g_getInputState(&input) != FALSE && input.sampleId != 0U) {
+        if (input.sampleId != observedSampleId) {
+            observedSampleId = input.sampleId;
+            observedTick = now;
+        }
+        fresh = observedTick != 0 &&
+            now - observedTick <= kHeadAimFreshnessMilliseconds &&
+            fearvr::IsInputStateUsable(input, true);
+    }
+
+    ToolMenuInputEvent event{};
+    const bool toggleChord = ToolMenuToggleChordDown(input, fresh);
+    if (!g_toolMenuState.open && fresh && !toggleChord &&
+        (input.buttons &
+         (FEARVR_IB_RIGHT_PRIMARY |
+          FEARVR_IB_RIGHT_SECONDARY)) == 0U &&
+        input.squeeze[FEARVR_HAND_LEFT] < 0.35F &&
+        input.squeeze[FEARVR_HAND_RIGHT] < 0.35F &&
+        input.trigger[FEARVR_HAND_LEFT] < 0.35F &&
+        input.trigger[FEARVR_HAND_RIGHT] < 0.35F &&
+        std::fabs(input.moveY) < 0.35F &&
+        std::fabs(input.turnX) < 0.35F) {
+        InterlockedExchange(&g_toolMenuReleaseCapture, 0);
+    }
+    event.toggle = PressedOnce(VK_F12, f12Down) ||
+        ConsumeToolMenuButton(
+            toggleLatch, fresh, toggleChord);
+    const bool menuWasOpen = g_toolMenuState.open;
+    if (event.toggle) {
+        const ToolMenuTransition transition = UpdateToolMenuState(
+            g_toolMenuState, event);
+        SetToolMenuOpen(g_toolMenuState.open);
+        LogToolMenuState(
+            transition.opened ? "open" : "close_toggle");
+        return;
+    }
+    if (!menuWasOpen) {
+        closeLatch = {};
+        previousTabLatch = {};
+        nextTabLatch = {};
+        previousRowLatch = {};
+        nextRowLatch = {};
+        decreaseLatch = {};
+        increaseLatch = {};
+        activateLatch = {};
+        return;
+    }
+
+    event.close = ConsumeToolMenuButton(
+        closeLatch, fresh,
+        (input.buttons & FEARVR_IB_RIGHT_SECONDARY) != 0U);
+    event.previousTab =
+        PressedOnce(VK_OEM_4, keyPreviousTabDown) ||
+        ConsumeToolMenuButton(
+            previousTabLatch, fresh,
+            input.trigger[FEARVR_HAND_LEFT] >= 0.65F);
+    event.nextTab =
+        PressedOnce(VK_OEM_6, keyNextTabDown) ||
+        ConsumeToolMenuButton(
+            nextTabLatch, fresh,
+            input.trigger[FEARVR_HAND_RIGHT] >= 0.65F);
+    event.previousRow =
+        PressedOnce(VK_UP, keyPreviousRowDown) ||
+        ConsumeToolMenuButton(
+            previousRowLatch, fresh, input.moveY >= 0.65F);
+    event.nextRow =
+        PressedOnce(VK_DOWN, keyNextRowDown) ||
+        ConsumeToolMenuButton(
+            nextRowLatch, fresh, input.moveY <= -0.65F);
+    event.decrease =
+        PressedOnce(VK_LEFT, keyDecreaseDown) ||
+        ConsumeToolMenuButton(
+            decreaseLatch, fresh, input.turnX <= -0.65F);
+    event.increase =
+        PressedOnce(VK_RIGHT, keyIncreaseDown) ||
+        ConsumeToolMenuButton(
+            increaseLatch, fresh, input.turnX >= 0.65F);
+    event.activate =
+        PressedOnce(VK_RETURN, keyActivateDown) ||
+        ConsumeToolMenuButton(
+            activateLatch, fresh,
+            (input.buttons & FEARVR_IB_RIGHT_PRIMARY) != 0U);
+
+    const ToolMenuTab oldTab = g_toolMenuState.tab;
+    const ToolMenuTransition transition = UpdateToolMenuState(
+        g_toolMenuState, event);
+    SetToolMenuOpen(g_toolMenuState.open);
+    if (transition.closed) {
+        LogToolMenuState("close_back");
+        return;
+    }
+    if (oldTab != g_toolMenuState.tab) {
+        UpdateToolMenuCalibrationVisibility();
+    }
+    bool valueChanged = false;
+    if (g_toolMenuState.tab == ToolMenuTab::Melee ||
+        g_toolMenuState.tab == ToolMenuTab::Weapon) {
+        ToolMenuMeleeTelemetry telemetry{};
+        ReadPhysicalMeleeToolTelemetry(telemetry);
+        valueChanged = ApplyToolMenuMeleeAdjustment(
+            g_toolMenuState.tab, g_toolMenuState.row,
+            transition.valueDelta, transition.activate,
+            telemetry.weaponIndex);
+    } else if (g_toolMenuState.tab == ToolMenuTab::Grip) {
+        valueChanged = ApplyToolMenuGripAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
+    } else if (g_toolMenuState.tab == ToolMenuTab::Display) {
+        valueChanged = ApplyToolMenuDisplayAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
+    }
+    if (valueChanged && g_toolMenuState.tab == ToolMenuTab::Grip) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "vr_tool_menu_adjust");
+    }
+    if (transition.selectionChanged || valueChanged) {
+        LogToolMenuState(
+            valueChanged ? "adjust" : "navigate");
+    }
+}
+
+void AddToolMenuRow(
+    ToolMenuOverlay& overlay,
+    std::uint32_t row,
+    const char* text,
+    bool selected,
+    std::uint32_t textColor = 0xFFF2F6FAU) noexcept {
+    constexpr float left = -0.75F;
+    constexpr float rowTop = 0.31F;
+    constexpr float rowStep = 0.105F;
+    const float y = rowTop - static_cast<float>(row) * rowStep;
+    if (selected) {
+        AddToolMenuRectangle(
+            overlay, -0.79F, y + 0.035F,
+            0.79F, y - 0.070F, 0xB8327898U);
+    }
+    AddToolMenuText(
+        overlay, left, y, 0.0046F, 0.0072F,
+        text, selected ? 0xFFFFFFFFU : textColor);
+}
+
+void DrawVrToolMenuOverlay(
+    std::uint32_t eye,
+    float interpupillaryDistanceMeters,
+    float horizontalFovRadians) noexcept {
+    if (InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) == 0 ||
+        g_drawOverlayTriangles == nullptr) {
+        return;
+    }
+    ToolMenuOverlay& overlay = g_toolMenuOverlay;
+    overlay.count = 0U;
+    overlay.overflowed = false;
+    AddToolMenuRectangle(
+        overlay, -0.91F, 0.80F, 0.91F, -0.78F, 0xD0141B26U);
+    AddToolMenuRectangle(
+        overlay, -0.91F, 0.80F, 0.91F, 0.786F, 0xFF53C7E8U);
+    AddToolMenuRectangle(
+        overlay, -0.91F, -0.766F, 0.91F, -0.78F, 0xFF53C7E8U);
+    AddToolMenuText(
+        overlay, -0.79F, 0.70F, 0.0054F, 0.0090F,
+        "CONDEMNED VR TOOLS", 0xFF76DBF4U);
+
+    constexpr float tabStart = -0.80F;
+    constexpr float tabWidth = 0.265F;
+    for (std::uint32_t index = 0;
+         index < static_cast<std::uint32_t>(ToolMenuTab::Count);
+         ++index) {
+        const float x = tabStart + static_cast<float>(index) * tabWidth;
+        const bool selected = index ==
+            static_cast<std::uint32_t>(g_toolMenuState.tab);
+        if (selected) {
+            AddToolMenuRectangle(
+                overlay, x - 0.025F, 0.565F,
+                x + tabWidth - 0.035F, 0.465F, 0xCC24566FU);
+        }
+        AddToolMenuText(
+            overlay, x, 0.535F, 0.00375F, 0.0064F,
+            ToolMenuTabName(static_cast<ToolMenuTab>(index)),
+            selected ? 0xFFFFFFFFU : 0xFF95A5B2U);
+    }
+
+    ToolMenuMeleeTelemetry telemetry{};
+    ReadPhysicalMeleeToolTelemetry(telemetry);
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            telemetry.weaponIndex);
+    const ToolMenuMeleeSettings settings =
+        CopyToolMenuMeleeSettings(telemetry.weaponIndex);
+    PhysicalMeleeGripCalibration grip{};
+    void* gripWeapon = nullptr;
+    void* gripModel = nullptr;
+    std::int32_t gripWeaponIndex = -1;
+    std::uint64_t gripGeneration = 0;
+    const bool haveGrip = CopyActiveWeaponGripCalibration(
+        grip, gripWeapon, gripWeaponIndex,
+        gripModel, gripGeneration);
+    char rowText[128]{};
+    const auto Row = [&](std::uint32_t row, const char* text) {
+        AddToolMenuRow(
+            overlay, row, text,
+            row == g_toolMenuState.row);
+    };
+
+    if (telemetry.weaponIndex >= 0) {
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "EQUIPPED  %s   INDEX %ld",
+            ToolMenuWeaponProfileLabel(baseProfile.id),
+            static_cast<long>(telemetry.weaponIndex));
+    } else {
+        std::snprintf(
+            rowText, sizeof(rowText), "NO WEAPON EQUIPPED");
+    }
+    AddToolMenuText(
+        overlay, -0.75F, 0.405F, 0.0041F, 0.0068F,
+        rowText, telemetry.weaponIndex >= 0
+            ? 0xFF76DBF4U : 0xFFFFB060U);
+
+    switch (g_toolMenuState.tab) {
+    case ToolMenuTab::Melee:
+        if (ToolMenuProfileSupportsSwingAttack(baseProfile.id)) {
+            std::snprintf(rowText, sizeof(rowText),
+                "SWING ATTACK                 %s",
+                settings.swingAttackEnabled ? "ON" : "OFF");
+        } else {
+            std::snprintf(rowText, sizeof(rowText),
+                "SWING ATTACK                 UNAVAILABLE");
+        }
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "TRIGGER SPEED                %.2F M/S",
+            settings.swingTriggerSpeedMetersPerSecond);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "REARM SPEED                  %.2F M/S",
+            settings.swingRearmSpeedMetersPerSecond);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ATTACK PULSE                 %u MS",
+            settings.swingPulseMilliseconds);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ATTACK COOLDOWN              %u MS",
+            settings.swingCooldownMilliseconds);
+        Row(4U, rowText);
+        Row(5U, "RESET MELEE DEFAULTS");
+        std::snprintf(rowText, sizeof(rowText),
+            "LIVE SWING %.2F M/S   ATTACKS %u",
+            telemetry.swingSpeedMetersPerSecond,
+            telemetry.triggerCount);
+        AddToolMenuRow(overlay, 7U, rowText, false, 0xFF76DBF4U);
+        break;
+    case ToolMenuTab::Weapon:
+        std::snprintf(rowText, sizeof(rowText),
+            "MASS                          %.2F KG",
+            settings.massKilograms);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HANDLING WEIGHT               %.2F",
+            settings.handlingWeight);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION FOLLOW               %.1F",
+            settings.positionalFollow);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ROTATION FOLLOW               %.1F",
+            settings.rotationalFollow);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "CATCH UP                      %.2F",
+            settings.catchUpStrength);
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "DAMPING                       %.2F",
+            settings.dampingRatio);
+        Row(5U, rowText);
+        Row(6U, "RESET WEAPON DEFAULTS");
+        break;
+    case ToolMenuTab::Grip:
+        if (!haveGrip) {
+            AddToolMenuRow(
+                overlay, 0U,
+                "NO EQUIPPED WEAPON PROFILE AVAILABLE",
+                false, 0xFFFFB060U);
+            break;
+        }
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION X                    %.3F",
+            grip.positionUnits.x);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION Y                    %.3F",
+            grip.positionUnits.y);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION Z                    %.3F",
+            grip.positionUnits.z);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ROTATION X                    %.2F DEG",
+            grip.localRotationDegrees.x);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ROTATION Y                    %.2F DEG",
+            grip.localRotationDegrees.y);
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ROTATION Z                    %.2F DEG",
+            grip.localRotationDegrees.z);
+        Row(5U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ADJUSTMENT STEP               %.2F",
+            kWeaponGripTranslationSteps[
+                g_weaponGripCalibrationStepIndex]);
+        Row(6U, rowText);
+        Row(7U, "RESET CURRENT GRIP");
+        Row(8U, "LOG PROFILE SNAPSHOT");
+        break;
+    case ToolMenuTab::Display:
+        std::snprintf(rowText, sizeof(rowText),
+            "FOV SCALE                     %.0F %%",
+            g_tuningFovScale * 100.0F);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "WORLD SCALE                   %.0F U/M",
+            g_tuningUnitsPerMeter);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "HMD TRANSLATION               %s",
+            g_hmdTranslationEnabled ? "ON" : "OFF");
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "EYE POLARITY                  %s",
+            g_tuningReversePolarity ? "REVERSED" : "NORMAL");
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "STEREO                        %s",
+            g_continuousStereoEnabled ? "ON" : "OFF");
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "MENU SIZE                     %.0F %%",
+            g_toolMenuPanelPlacement.scale * 100.0F);
+        Row(5U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "MENU DISTANCE                 %.2F M",
+            g_toolMenuPanelPlacement.distanceMeters);
+        Row(6U, rowText);
+        Row(7U, "RECENTER NOW");
+        Row(8U, "RESET DISPLAY DEFAULTS");
+        break;
+    case ToolMenuTab::Controls:
+        AddToolMenuRow(overlay, 0U, "OPEN OR CLOSE     BOTH GRIPS + Y", false);
+        AddToolMenuRow(overlay, 1U, "CHANGE TAB        LEFT OR RIGHT TRIGGER", false);
+        AddToolMenuRow(overlay, 2U, "SELECT ROW        LEFT STICK UP OR DOWN", false);
+        AddToolMenuRow(overlay, 3U, "ADJUST VALUE      RIGHT STICK LEFT OR RIGHT", false);
+        AddToolMenuRow(overlay, 4U, "ACTIVATE          A", false);
+        AddToolMenuRow(overlay, 5U, "CLOSE             B", false);
+        AddToolMenuRow(overlay, 6U, "KEYBOARD          F12 ARROWS [ ] ENTER", false);
+        break;
+    case ToolMenuTab::Debug:
+        std::snprintf(rowText, sizeof(rowText),
+            "WEAPON INDEX                  %ld",
+            static_cast<long>(telemetry.weaponIndex));
+        AddToolMenuRow(overlay, 0U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "SWING TRACKING                %s",
+            telemetry.trackingFresh ? "FRESH" : "STALE");
+        AddToolMenuRow(overlay, 1U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "LIVE SWING SPEED              %.2F M/S",
+            telemetry.swingSpeedMetersPerSecond);
+        AddToolMenuRow(overlay, 2U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "SWING ATTACK COUNT            %u",
+            telemetry.triggerCount);
+        AddToolMenuRow(overlay, 3U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "WALL PROXY                    %s",
+            telemetry.wallProxyEnabled ? "ON" : "OFF");
+        AddToolMenuRow(overlay, 4U, rowText, false);
+        std::snprintf(rowText, sizeof(rowText),
+            "VISIBLE WEAPON PROXY          %s",
+            telemetry.visualProxyEnabled ? "ON" : "OFF");
+        AddToolMenuRow(overlay, 5U, rowText, false);
+        break;
+    default:
+        break;
+    }
+
+    AddToolMenuText(
+        overlay, -0.78F, -0.69F, 0.00355F, 0.0060F,
+        "TRIGGERS TABS   LEFT STICK ROW   RIGHT STICK VALUE   A SELECT   B CLOSE",
+        0xFF95A5B2U);
+    const ToolMenuPanelTransform panelTransform =
+        ResolveToolMenuPanelTransform(
+            eye, interpupillaryDistanceMeters,
+            horizontalFovRadians, g_toolMenuPanelPlacement);
+    const bool placed = ApplyToolMenuPanelTransform(
+        overlay, panelTransform);
+    if (overlay.count == 0U || overlay.overflowed || !placed ||
+        g_drawOverlayTriangles(
+            overlay.vertices.data(),
+            static_cast<std::uint32_t>(overlay.count)) == FALSE) {
+        if (InterlockedCompareExchange(
+                &g_toolMenuOverlayFailureLogged, 1, 0) == 0 &&
+            g_passThroughLog != nullptr) {
+            g_passThroughLog(
+                "m5_vr_tool_menu_overlay_failed",
+                overlay.overflowed
+                    ? "triangle_buffer_overflow=1"
+                : !placed
+                    ? "stereo_panel_placement_invalid=1"
+                    : "bridge_draw_rejected=1");
+        }
+    }
+}
+
+bool DrawWeaponGripCalibrationControllerGizmo(
+    const RigidTransformAbi& eyeCamera,
+    const fearvr::TrackingVector& gripWorldPosition,
+    const fearvr::TrackingQuaternion& gripWorldRotation,
+    const fearvr::TrackingQuaternion& aimWorldRotation,
+    float horizontalFovRadians,
+    float verticalFovRadians) noexcept {
+    if (g_drawOverlayLines == nullptr ||
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationActive, 0, 0) == 0) {
+        return false;
+    }
+    const WeaponGripCalibrationGizmo gizmo =
+        BuildWeaponGripCalibrationGizmo(
+            gripWorldPosition, gripWorldRotation,
+            aimWorldRotation);
+    const WeaponGripCalibrationGizmoCamera camera{
+        {eyeCamera.position[0], eyeCamera.position[1],
+         eyeCamera.position[2]},
+        {eyeCamera.rotation[0], eyeCamera.rotation[1],
+         eyeCamera.rotation[2], eyeCamera.rotation[3]},
+        horizontalFovRadians, verticalFovRadians};
+    FearVrOverlayLineVertex projected[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t vertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            gizmo, camera, projected,
+            sizeof(projected) / sizeof(projected[0]));
+    if (vertexCount == 0) {
+        return false;
+    }
+    const bool drawn = g_drawOverlayLines(
+        projected, static_cast<std::uint32_t>(vertexCount)) != FALSE;
+    if (drawn && InterlockedCompareExchange(
+                     &g_weaponGripControllerGizmoActiveLogged,
+                     1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_weapon_grip_controller_gizmo_active",
+            "shape=generic_controller_wireframe "
+            "pose=openxr_right_grip aim_ray=openxr_right_aim "
+            "projection=verified_per_eye_camera overlay_depth=always_visible");
+    } else if (!drawn && InterlockedCompareExchange(
+                            &g_weaponGripControllerGizmoFailureLogged,
+                            1, 0) == 0 &&
+               g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_weapon_grip_controller_gizmo_failed",
+            "bridge_overlay_draw_rejected=1 weapon_visual_continues=1");
+    }
+    return drawn;
+}
+
+struct CalibrationButtonLatch {
+    bool releaseRequired{true};
+    bool wasDown{false};
+};
+
+bool ConsumeCalibrationButton(
+    CalibrationButtonLatch& latch,
+    bool captured,
+    bool down) noexcept {
+    if (!captured) {
+        latch.releaseRequired = true;
+        latch.wasDown = false;
+        return false;
+    }
+    if (!down) {
+        latch.releaseRequired = false;
+        latch.wasDown = false;
+        return false;
+    }
+    if (latch.releaseRequired || latch.wasDown) {
+        latch.wasDown = true;
+        return false;
+    }
+    latch.wasDown = true;
+    return true;
+}
+
+void HandleWeaponGripCalibrationControls() noexcept {
+    if (InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 ||
+        !GameOwnsForegroundWindow()) {
+        return;
+    }
+
+    static bool f11Down = false;
+    static bool numpadModeDown = false;
+    static bool letterModeDown = false;
+    static bool numpadFinerDown = false;
+    static bool commaFinerDown = false;
+    static bool numpadCoarserDown = false;
+    static bool periodCoarserDown = false;
+    static bool numpadResetDown = false;
+    static bool letterResetDown = false;
+    static bool numpadSnapshotDown = false;
+    static bool letterSnapshotDown = false;
+    static RepeatingCalibrationKey xNegative{};
+    static RepeatingCalibrationKey xPositive{};
+    static RepeatingCalibrationKey yNegative{};
+    static RepeatingCalibrationKey yPositive{};
+    static RepeatingCalibrationKey zNegative{};
+    static RepeatingCalibrationKey zPositive{};
+    static RepeatingCalibrationKey letterXNegative{};
+    static RepeatingCalibrationKey letterXPositive{};
+    static RepeatingCalibrationKey letterYNegative{};
+    static RepeatingCalibrationKey letterYPositive{};
+    static RepeatingCalibrationKey letterZNegative{};
+    static RepeatingCalibrationKey letterZPositive{};
+    static CalibrationButtonLatch controllerPosition{};
+    static CalibrationButtonLatch controllerRotation{};
+    static CalibrationButtonLatch controllerReset{};
+    static CalibrationButtonLatch controllerSnapshot{};
+    static CalibrationButtonLatch controllerFiner{};
+    static CalibrationButtonLatch controllerCoarser{};
+    static std::uint64_t controllerObservedSampleId = 0;
+    static ULONGLONG controllerObservedTick = 0;
+    static std::uint64_t controllerAxisSampleId = 0;
+    static ULONGLONG controllerAxisTick = 0;
+    static ULONGLONG controllerAdjustmentLogTick = 0;
+    static bool controllerWasCaptured = false;
+
+    if (PressedOnce(VK_F11, f11Down)) {
+        const bool active = InterlockedCompareExchange(
+            &g_weaponGripCalibrationActive, 0, 0) == 0;
+        InterlockedExchange(
+            &g_weaponGripCalibrationActive, active ? 1 : 0);
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            active ? "resume" : "pause");
+    }
+    if (InterlockedCompareExchange(
+            &g_weaponGripCalibrationActive, 0, 0) == 0) {
+        controllerPosition = {};
+        controllerRotation = {};
+        controllerReset = {};
+        controllerSnapshot = {};
+        controllerFiner = {};
+        controllerCoarser = {};
+        controllerAxisSampleId = 0;
+        controllerAxisTick = 0;
+        controllerWasCaptured = false;
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    FearVrInputState controllerState{};
+    bool controllerFresh = false;
+    if (g_getInputState != nullptr &&
+        g_getInputState(&controllerState) != FALSE &&
+        controllerState.sampleId != 0) {
+        if (controllerState.sampleId != controllerObservedSampleId) {
+            controllerObservedSampleId = controllerState.sampleId;
+            controllerObservedTick = now;
+        }
+        controllerFresh = controllerObservedTick != 0 &&
+            now - controllerObservedTick <=
+                kHeadAimFreshnessMilliseconds;
+    }
+    const WeaponGripCalibrationControls controller =
+        ResolveWeaponGripCalibrationControls(
+            controllerState, controllerFresh);
+    if (controller.captured != controllerWasCaptured) {
+        controllerWasCaptured = controller.captured;
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            controller.captured
+                ? "controller_capture_begin"
+                : "controller_capture_end");
+    }
+
+    if (ConsumeCalibrationButton(
+            controllerPosition, controller.captured,
+            controller.positionDown)) {
+        g_weaponGripCalibrationMode =
+            WeaponGripCalibrationMode::Position;
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "controller_position_mode");
+    }
+    if (ConsumeCalibrationButton(
+            controllerRotation, controller.captured,
+            controller.rotationDown)) {
+        g_weaponGripCalibrationMode =
+            WeaponGripCalibrationMode::Rotation;
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "controller_rotation_mode");
+    }
+    if (ConsumeCalibrationButton(
+            controllerFiner, controller.captured,
+            controller.finerDown)) {
+        if (g_weaponGripCalibrationStepIndex > 0) {
+            --g_weaponGripCalibrationStepIndex;
+        }
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "controller_finer_step");
+    }
+    if (ConsumeCalibrationButton(
+            controllerCoarser, controller.captured,
+            controller.coarserDown)) {
+        g_weaponGripCalibrationStepIndex = std::min(
+            g_weaponGripCalibrationStepIndex + 1,
+            kWeaponGripStepCount - 1);
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "controller_coarser_step");
+    }
+    if (ConsumeCalibrationButton(
+            controllerReset, controller.captured,
+            controller.resetDown) &&
+        ResetActiveWeaponGripCalibration()) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            "controller_reset_weapon");
+    }
+    if (ConsumeCalibrationButton(
+            controllerSnapshot, controller.captured,
+            controller.snapshotDown)) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_snapshot",
+            "controller_snapshot");
+    }
+
+    if (!controller.captured) {
+        controllerAxisSampleId = 0;
+        controllerAxisTick = 0;
+    } else if (controllerState.sampleId != controllerAxisSampleId) {
+        float deltaSeconds = 0.0F;
+        if (controllerAxisSampleId != 0 &&
+            controllerAxisTick != 0 && now >= controllerAxisTick) {
+            deltaSeconds = std::min(
+                static_cast<float>(now - controllerAxisTick) /
+                    1000.0F,
+                0.05F);
+        }
+        controllerAxisSampleId = controllerState.sampleId;
+        controllerAxisTick = now;
+        const float step =
+            g_weaponGripCalibrationMode ==
+                    WeaponGripCalibrationMode::Position
+                ? kWeaponGripTranslationSteps[
+                      g_weaponGripCalibrationStepIndex]
+                : kWeaponGripRotationSteps[
+                      g_weaponGripCalibrationStepIndex];
+        const float rate =
+            g_weaponGripCalibrationMode ==
+                    WeaponGripCalibrationMode::Position
+                ? 20.0F : 30.0F;
+        const float x = controller.x * step * rate * deltaSeconds;
+        const float y = controller.y * step * rate * deltaSeconds;
+        const float z = controller.z * step * rate * deltaSeconds;
+        if (deltaSeconds > 0.0F &&
+            (x != 0.0F || y != 0.0F || z != 0.0F) &&
+            AdjustActiveWeaponGripCalibration(x, y, z) &&
+            (controllerAdjustmentLogTick == 0 ||
+             now - controllerAdjustmentLogTick >= 100)) {
+            controllerAdjustmentLogTick = now;
+            LogWeaponGripCalibrationState(
+                "m5_weapon_grip_calibration_changed",
+                g_weaponGripCalibrationMode ==
+                        WeaponGripCalibrationMode::Position
+                    ? "controller_adjust_position"
+                    : "controller_adjust_rotation");
+        }
+    }
+
+    const bool numpadModePressed =
+        PressedOnce(VK_NUMPAD5, numpadModeDown);
+    const bool letterModePressed =
+        PressedOnce('T', letterModeDown);
+    if (numpadModePressed || letterModePressed) {
+        g_weaponGripCalibrationMode =
+            g_weaponGripCalibrationMode ==
+                    WeaponGripCalibrationMode::Position
+                ? WeaponGripCalibrationMode::Rotation
+                : WeaponGripCalibrationMode::Position;
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed", "toggle_mode");
+    }
+    const bool numpadFinerPressed =
+        PressedOnce(VK_NUMPAD7, numpadFinerDown);
+    const bool commaFinerPressed =
+        PressedOnce(VK_OEM_COMMA, commaFinerDown);
+    if (numpadFinerPressed || commaFinerPressed) {
+        if (g_weaponGripCalibrationStepIndex > 0) {
+            --g_weaponGripCalibrationStepIndex;
+        }
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed", "finer_step");
+    }
+    const bool numpadCoarserPressed =
+        PressedOnce(VK_NUMPAD9, numpadCoarserDown);
+    const bool periodCoarserPressed =
+        PressedOnce(VK_OEM_PERIOD, periodCoarserDown);
+    if (numpadCoarserPressed || periodCoarserPressed) {
+        g_weaponGripCalibrationStepIndex = std::min(
+            g_weaponGripCalibrationStepIndex + 1,
+            kWeaponGripStepCount - 1);
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed", "coarser_step");
+    }
+    const bool numpadResetPressed =
+        PressedOnce(VK_NUMPAD0, numpadResetDown);
+    const bool letterResetPressed =
+        PressedOnce('R', letterResetDown);
+    if ((numpadResetPressed || letterResetPressed) &&
+        ResetActiveWeaponGripCalibration()) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed", "reset_weapon");
+    }
+    const bool numpadSnapshotPressed =
+        PressedOnce(VK_DECIMAL, numpadSnapshotDown);
+    const bool letterSnapshotPressed =
+        PressedOnce('P', letterSnapshotDown);
+    if (numpadSnapshotPressed || letterSnapshotPressed) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_snapshot", "snapshot");
+    }
+
+    const float step =
+        g_weaponGripCalibrationMode ==
+                WeaponGripCalibrationMode::Position
+            ? kWeaponGripTranslationSteps[
+                  g_weaponGripCalibrationStepIndex]
+            : kWeaponGripRotationSteps[
+                  g_weaponGripCalibrationStepIndex];
+    float x = 0.0F;
+    float y = 0.0F;
+    float z = 0.0F;
+    if (PressedOrRepeated(VK_NUMPAD4, xNegative, now)) {
+        x -= step;
+    }
+    if (PressedOrRepeated('J', letterXNegative, now)) {
+        x -= step;
+    }
+    if (PressedOrRepeated(VK_NUMPAD6, xPositive, now)) {
+        x += step;
+    }
+    if (PressedOrRepeated('L', letterXPositive, now)) {
+        x += step;
+    }
+    if (PressedOrRepeated(VK_NUMPAD2, yNegative, now)) {
+        y -= step;
+    }
+    if (PressedOrRepeated('K', letterYNegative, now)) {
+        y -= step;
+    }
+    if (PressedOrRepeated(VK_NUMPAD8, yPositive, now)) {
+        y += step;
+    }
+    if (PressedOrRepeated('I', letterYPositive, now)) {
+        y += step;
+    }
+    if (PressedOrRepeated(VK_NUMPAD1, zNegative, now)) {
+        z -= step;
+    }
+    if (PressedOrRepeated('U', letterZNegative, now)) {
+        z -= step;
+    }
+    if (PressedOrRepeated(VK_NUMPAD3, zPositive, now)) {
+        z += step;
+    }
+    if (PressedOrRepeated('O', letterZPositive, now)) {
+        z += step;
+    }
+    if ((x != 0.0F || y != 0.0F || z != 0.0F) &&
+        AdjustActiveWeaponGripCalibration(x, y, z)) {
+        LogWeaponGripCalibrationState(
+            "m5_weapon_grip_calibration_changed",
+            g_weaponGripCalibrationMode ==
+                    WeaponGripCalibrationMode::Position
+                ? "adjust_position" : "adjust_rotation");
+    }
+}
+
 void LogStereoTuningState(const char* action) noexcept {
     if (g_passThroughLog == nullptr) {
         return;
     }
-    char detail[256]{};
+    char detail[320]{};
     std::snprintf(
         detail, sizeof(detail),
         "action=%s enabled=%u units_per_meter=%.1f polarity=%s "
-        "fov_scale_percent=%.0f hmd_translation=%u",
+        "fov_scale_percent=%.0f hmd_translation=%u "
+        "menu_scale_percent=%.0f menu_distance_m=%.2f",
         action, g_continuousStereoEnabled ? 1U : 0U,
         g_tuningUnitsPerMeter,
         g_tuningReversePolarity ? "reversed" : "normal",
         g_tuningFovScale * 100.0F,
-        g_hmdTranslationEnabled ? 1U : 0U);
+        g_hmdTranslationEnabled ? 1U : 0U,
+        g_toolMenuPanelPlacement.scale * 100.0F,
+        g_toolMenuPanelPlacement.distanceMeters);
     g_passThroughLog("m3_stereo_tuning_changed", detail);
 }
 
@@ -244,6 +2165,7 @@ void SampleControllerInputReadOnly() noexcept {
         return;
     }
     g_lastInputSampleId = input.sampleId;
+    g_lastInputSampleTick = GetTickCount64();
     ++g_inputSamplesObserved;
     if (g_controllerRecenterEnabled) {
         const HWND foreground = GetForegroundWindow();
@@ -255,9 +2177,18 @@ void SampleControllerInputReadOnly() noexcept {
         const bool foregroundOwned =
             foreground != nullptr &&
             foregroundProcessId == GetCurrentProcessId();
+        const bool calibrationCaptured =
+            VrToolMenuCapturesControllerInput(
+                input, foregroundOwned) ||
+            (InterlockedCompareExchange(
+                 &g_weaponGripCalibrationEnabled, 0, 0) != 0 &&
+             InterlockedCompareExchange(
+                 &g_weaponGripCalibrationActive, 0, 0) != 0 &&
+             ResolveWeaponGripCalibrationControls(
+                 input, foregroundOwned).captured);
         if (ConsumeRecenterPress(
                 g_controllerRecenterLatch, input,
-                foregroundOwned)) {
+                foregroundOwned && !calibrationCaptured)) {
             g_controllerRecenterRequested = true;
         }
     }
@@ -319,6 +2250,359 @@ bool CameraRightVector(
     right[2] = 2.0F * (qx * qz - qw * qy);
     return std::isfinite(right[0]) && std::isfinite(right[1]) &&
         std::isfinite(right[2]);
+}
+
+PhysicalMeleeRigidTransform ToPhysicalMeleeTransform(
+    const RigidTransformAbi& transform) noexcept {
+    return {
+        {transform.position[0], transform.position[1],
+         transform.position[2]},
+        {transform.rotation[0], transform.rotation[1],
+         transform.rotation[2], transform.rotation[3]}};
+}
+
+RigidTransformAbi ToRigidTransformAbi(
+    const PhysicalMeleeRigidTransform& transform) noexcept {
+    return {
+        {transform.positionUnits.x, transform.positionUnits.y,
+         transform.positionUnits.z},
+        {transform.rotation.x, transform.rotation.y,
+         transform.rotation.z, transform.rotation.w}};
+}
+
+bool RigidTransformNear(
+    const RigidTransformAbi& left,
+    const RigidTransformAbi& right) noexcept {
+    constexpr float kPositionTolerance = 0.001F;
+    constexpr float kRotationTolerance = 0.0001F;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(left.position[axis]) ||
+            !std::isfinite(right.position[axis]) ||
+            std::fabs(left.position[axis] - right.position[axis]) >
+                kPositionTolerance) {
+            return false;
+        }
+    }
+    float quaternionDot = 0.0F;
+    float leftLength = 0.0F;
+    float rightLength = 0.0F;
+    for (std::size_t axis = 0; axis < 4; ++axis) {
+        if (!std::isfinite(left.rotation[axis]) ||
+            !std::isfinite(right.rotation[axis])) {
+            return false;
+        }
+        quaternionDot += left.rotation[axis] * right.rotation[axis];
+        leftLength += left.rotation[axis] * left.rotation[axis];
+        rightLength += right.rotation[axis] * right.rotation[axis];
+    }
+    if (leftLength < 0.25F || rightLength < 0.25F) {
+        return false;
+    }
+    quaternionDot = std::fabs(
+        quaternionDot / std::sqrt(leftLength * rightLength));
+    return std::isfinite(quaternionDot) &&
+        1.0F - quaternionDot <= kRotationTolerance;
+}
+
+void ClearPhysicalMeleeVisualSource() noexcept {
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    g_physicalMeleeVisualWeaponReference = nullptr;
+    g_physicalMeleeVisualWeapon = nullptr;
+    g_physicalMeleeVisualWeaponIndex = -1;
+    g_physicalMeleeVisualModelReference = nullptr;
+    g_physicalMeleeVisualModel = nullptr;
+    g_physicalMeleeVisualModelLocalGripPosition = {};
+    g_physicalMeleeVisualModelLocalGripRotation = {
+        0.0F, 0.0F, 0.0F, 1.0F};
+    g_activeWeaponGripCalibrationSlot = -1;
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+}
+
+bool ApplyPhysicalMeleeWeaponWeight(
+    const fearvr::TrackingVector& rawPositionUnits,
+    const fearvr::TrackingQuaternion& rawRotation,
+    std::uint64_t sampleId,
+    std::uint64_t timestampNs,
+    fearvr::TrackingVector& weightedPositionUnits,
+    fearvr::TrackingQuaternion& weightedRotation) noexcept {
+    weightedPositionUnits = rawPositionUnits;
+    weightedRotation = rawRotation;
+    if (!fearvr::IsFinite(rawPositionUnits) ||
+        !fearvr::IsFinite(rawRotation)) {
+        ResetPhysicalMeleeWeaponWeight(
+            fearvr::WeaponWeightResetReason::nonFiniteValue);
+        return false;
+    }
+
+    std::int32_t weaponIndex = -1;
+    std::uint64_t sourceGeneration = 0;
+    AcquireSRWLockShared(&g_physicalMeleeVisualLock);
+    weaponIndex = g_physicalMeleeVisualWeaponIndex;
+    sourceGeneration = g_physicalMeleeVisualSourceGeneration;
+    ReleaseSRWLockShared(&g_physicalMeleeVisualLock);
+    PhysicalMeleeProfile profile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    ApplyToolMenuMeleeSettings(
+        CopyToolMenuMeleeSettings(weaponIndex), profile);
+    const bool weightedHandling =
+        profile.handlingWeight > 1.001F;
+
+    if (weaponIndex != g_physicalMeleeWeightedWeaponIndex ||
+        sourceGeneration !=
+            g_physicalMeleeWeightedSourceGeneration) {
+        fearvr::ClearWeaponWeightFilter(
+            g_physicalMeleeWeaponWeightFilter,
+            fearvr::WeaponWeightResetReason::weaponChanged);
+        g_physicalMeleeWeightedWeaponIndex = weaponIndex;
+        g_physicalMeleeWeightedSourceGeneration = sourceGeneration;
+        g_physicalMeleeWeightedSampleId = 0;
+        g_physicalMeleeWeightedPoseValid = false;
+        InterlockedExchange(&g_physicalMeleeWeightActiveLogged, 0);
+    }
+    if (!weightedHandling) {
+        if (g_physicalMeleeWeaponWeightFilter.initialized) {
+            fearvr::ClearWeaponWeightFilter(
+                g_physicalMeleeWeaponWeightFilter,
+                fearvr::WeaponWeightResetReason::enabledChanged);
+        }
+        g_physicalMeleeWeightedSampleId = 0;
+        g_physicalMeleeWeightedPoseValid = false;
+        return true;
+    }
+    if (sampleId == 0 || timestampNs == 0) {
+        return true;
+    }
+    if (sampleId == g_physicalMeleeWeightedSampleId &&
+        g_physicalMeleeWeightedPoseValid) {
+        weightedPositionUnits = g_physicalMeleeWeightedPosition;
+        weightedRotation = g_physicalMeleeWeightedRotation;
+        return true;
+    }
+
+    const float inverseUnitsPerMeter =
+        1.0F / profile.unitsPerMeter;
+    const fearvr::WeaponWeightPose target{
+        {rawPositionUnits.x * inverseUnitsPerMeter,
+         rawPositionUnits.y * inverseUnitsPerMeter,
+         rawPositionUnits.z * inverseUnitsPerMeter},
+        {rawRotation.x, rawRotation.y, rawRotation.z, rawRotation.w}};
+    const fearvr::WeaponWeightProfile weightProfile{
+        profile.handlingWeight,
+        profile.positionalFollow,
+        profile.rotationalFollow,
+        profile.catchUpStrength,
+        profile.dampingRatio};
+    fearvr::WeaponWeightPose filtered{};
+    fearvr::WeaponWeightDiagnostics diagnostics{};
+    if (!fearvr::UpdateWeaponWeightFilter(
+            g_physicalMeleeWeaponWeightFilter,
+            target, true, timestampNs, true,
+            weightProfile, filtered, &diagnostics)) {
+        return true;
+    }
+
+    weightedPositionUnits = {
+        filtered.position.x * profile.unitsPerMeter,
+        filtered.position.y * profile.unitsPerMeter,
+        filtered.position.z * profile.unitsPerMeter};
+    weightedRotation = fearvr::Normalize(
+        fearvr::TrackingQuaternion{
+            filtered.orientation.x, filtered.orientation.y,
+            filtered.orientation.z, filtered.orientation.w});
+    if (!fearvr::IsFinite(weightedPositionUnits) ||
+        !fearvr::IsFinite(weightedRotation)) {
+        ResetPhysicalMeleeWeaponWeight(
+            fearvr::WeaponWeightResetReason::nonFiniteValue);
+        weightedPositionUnits = rawPositionUnits;
+        weightedRotation = rawRotation;
+        return true;
+    }
+    g_physicalMeleeWeightedPosition = weightedPositionUnits;
+    g_physicalMeleeWeightedRotation = weightedRotation;
+    g_physicalMeleeWeightedSampleId = sampleId;
+    g_physicalMeleeWeightedPoseValid = true;
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeWeightActiveLogged, 1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s mass_kg=%.2f "
+            "handling_weight=%.2f positional_follow=%.2f "
+            "rotational_follow=%.2f catch_up=%.2f damping_ratio=%.2f "
+            "filter=bounded_damped_spring momentum_follow_through=1 "
+            "bounded_tracking_fallback=1",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(profile.id),
+            profile.massKilograms, profile.handlingWeight,
+            profile.positionalFollow, profile.rotationalFollow,
+            profile.catchUpStrength, profile.dampingRatio);
+        g_passThroughLog(
+            "m5_physical_melee_weight_active", detail);
+    }
+    return true;
+}
+
+bool BeginPhysicalMeleeVisualOverride(
+    const fearvr::TrackingVector& controllerPosition,
+    const fearvr::TrackingQuaternion& controllerRotation,
+    bool controllerPoseFresh,
+    PhysicalMeleeVisualOverride& overrideState) noexcept {
+    overrideState = {};
+    if (!controllerPoseFresh ||
+        InterlockedCompareExchange(
+            &g_physicalMeleeVisualEnabled, 0, 0) == 0 ||
+        g_client == nullptr || g_getRigidTransform == nullptr ||
+        g_setRigidTransform == nullptr ||
+        !fearvr::IsFinite(controllerPosition) ||
+        !fearvr::IsFinite(controllerRotation)) {
+        return false;
+    }
+
+    void* const* weaponReference = nullptr;
+    void* weapon = nullptr;
+    void* const* modelReference = nullptr;
+    void* modelObject = nullptr;
+    fearvr::TrackingVector modelLocalGripPosition{};
+    fearvr::TrackingQuaternion modelLocalGripRotation{};
+    std::uint64_t sourceGeneration = 0;
+    AcquireSRWLockShared(&g_physicalMeleeVisualLock);
+    weaponReference = g_physicalMeleeVisualWeaponReference;
+    weapon = g_physicalMeleeVisualWeapon;
+    modelReference = g_physicalMeleeVisualModelReference;
+    modelObject = g_physicalMeleeVisualModel;
+    modelLocalGripPosition =
+        g_physicalMeleeVisualModelLocalGripPosition;
+    modelLocalGripRotation =
+        g_physicalMeleeVisualModelLocalGripRotation;
+    sourceGeneration = g_physicalMeleeVisualSourceGeneration;
+    ReleaseSRWLockShared(&g_physicalMeleeVisualLock);
+
+    if (weaponReference == nullptr && weapon == nullptr &&
+        modelReference == nullptr && modelObject == nullptr) {
+        return false;
+    }
+
+    void* referencedWeapon = nullptr;
+    void* referencedModel = nullptr;
+    bool referencesLive = false;
+    if (weaponReference != nullptr && weapon != nullptr &&
+        modelReference != nullptr && modelObject != nullptr) {
+        __try {
+            std::memcpy(
+                &referencedWeapon, weaponReference,
+                sizeof(referencedWeapon));
+            std::memcpy(
+                &referencedModel, modelReference,
+                sizeof(referencedModel));
+            referencesLive = referencedWeapon == weapon &&
+                referencedModel == modelObject;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            referencesLive = false;
+        }
+    }
+    if (!referencesLive) {
+        ClearPhysicalMeleeVisualSource();
+        return false;
+    }
+    const fearvr::TrackingQuaternion desiredRotation =
+        fearvr::Normalize(controllerRotation);
+    const PhysicalMeleeRigidTransform desiredGripWorld{
+        controllerPosition, desiredRotation};
+    const PhysicalMeleeVisualProxyTransform solved =
+        ResolvePhysicalMeleeHeldModelTransform(
+            desiredGripWorld, modelLocalGripPosition,
+            modelLocalGripRotation, true);
+    if (!solved.active) {
+        return false;
+    }
+
+    RigidTransformAbi original{};
+    const RigidTransformAbi applied =
+        ToRigidTransformAbi(solved.objectWorld);
+    RigidTransformAbi readback{};
+    bool set = false;
+    bool verified = false;
+    __try {
+        set = g_getRigidTransform(
+                  g_client, modelObject, &original) == 0UL &&
+            PhysicalMeleeRigidTransformIsValid(
+                ToPhysicalMeleeTransform(original)) &&
+            g_setRigidTransform(
+                g_client, modelObject, &applied) == 0UL;
+        verified = set &&
+            g_getRigidTransform(
+                g_client, modelObject, &readback) == 0UL &&
+            RigidTransformNear(readback, applied);
+        if (set && !verified) {
+            g_setRigidTransform(
+                g_client, modelObject, &original);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (set) {
+            __try {
+                g_setRigidTransform(
+                    g_client, modelObject, &original);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        verified = false;
+    }
+    if (!verified) {
+        ClearPhysicalMeleeVisualSource();
+        return false;
+    }
+
+    overrideState.object = modelObject;
+    overrideState.original = original;
+    overrideState.active = true;
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeVisualActiveLogged, 1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon=%p model_object=%p source_generation=%llu "
+            "alignment=retail_model_grip_to_openxr_grip "
+            "rotation=right_controller_aim "
+            "temporary_render_override=1 native_impact_dispatch=blocked",
+            weapon, modelObject,
+            static_cast<unsigned long long>(sourceGeneration));
+        g_passThroughLog(
+            "m5_physical_melee_visual_proxy_active", detail);
+    }
+    return true;
+}
+
+bool EndPhysicalMeleeVisualOverride(
+    PhysicalMeleeVisualOverride& overrideState) noexcept {
+    if (!overrideState.active) {
+        return true;
+    }
+    RigidTransformAbi readback{};
+    bool restored = false;
+    __try {
+        restored = g_setRigidTransform(
+                       g_client, overrideState.object,
+                       &overrideState.original) == 0UL &&
+            g_getRigidTransform(
+                g_client, overrideState.object, &readback) == 0UL &&
+            RigidTransformNear(readback, overrideState.original);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        restored = false;
+    }
+    overrideState.active = false;
+    if (!restored) {
+        InterlockedExchange(&g_physicalMeleeVisualEnabled, 0);
+        if (InterlockedCompareExchange(
+                &g_physicalMeleeVisualRestoreFailed, 1, 0) == 0 &&
+            g_passThroughLog != nullptr) {
+            g_passThroughLog(
+                "m5_physical_melee_visual_proxy_restore_failed",
+                "visual_proxy_disabled=1 exact_retail_transform_restore=0");
+        }
+    }
+    return restored;
 }
 
 bool RestoreAndVerifyCamera(
@@ -429,13 +2713,24 @@ bool ResolveDoubleRenderDiagnosticExports(HMODULE bridge) noexcept {
                 bridge, "CondemnedVr_SetFovScalePercent"));
     g_getInputState = reinterpret_cast<GetInputStateFunction>(
         GetProcAddress(bridge, "CondemnedVr_GetInputState"));
+    g_drawOverlayLines = reinterpret_cast<DrawOverlayLinesFunction>(
+        GetProcAddress(bridge, "CondemnedVr_DrawOverlayLines"));
+    g_drawOverlayTriangles =
+        reinterpret_cast<DrawOverlayTrianglesFunction>(
+            GetProcAddress(
+                bridge, "CondemnedVr_DrawOverlayTriangles"));
+    const bool calibrationOverlayReady =
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        g_drawOverlayLines != nullptr;
     return g_getRenderRequest != nullptr &&
         g_waitForNewRenderRequest != nullptr && g_beginEye != nullptr &&
         g_clearEye != nullptr && g_captureEye != nullptr &&
         g_endStereoDiagnosticFrame != nullptr &&
         g_endStereoFrame != nullptr &&
         g_setFovScalePercent != nullptr &&
-        g_getInputState != nullptr;
+        g_getInputState != nullptr && calibrationOverlayReady &&
+        g_drawOverlayTriangles != nullptr;
 }
 
 void ReleaseStereoAttempt(bool retryOneShot) noexcept {
@@ -479,6 +2774,7 @@ bool TryDoubleRenderDiagnostic(
     FearVrRenderRequest request{};
     if (!g_getRenderRequest(&request) || request.frameId == 0 ||
         (request.flags & FEARVR_RF_VALID) == 0) {
+        InvalidateTrackedHeadAim();
         ReleaseStereoAttempt(true);
         return false;
     }
@@ -512,6 +2808,7 @@ bool TryDoubleRenderDiagnostic(
         }
     }
     if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
+        InvalidateTrackedHeadAim();
         // Retail composes menus, screens, and movies after RenderCamera. Let
         // the normal single camera call complete so Present capture can send
         // the finished backbuffer to both eyes as a world-locked panel.
@@ -528,6 +2825,21 @@ bool TryDoubleRenderDiagnostic(
     float stereoFovY = 0.0F;
     fearvr::RelativeEyePose trackedEye[FEARVR_EYE_COUNT]{};
     fearvr::TrackingVector headTranslation{};
+    fearvr::TrackingVector headAimWorldPosition{};
+    fearvr::TrackingQuaternion retailBaseWorldRotation{};
+    fearvr::TrackingQuaternion headAimWorldRotation{};
+    fearvr::TrackingVector controllerAimWorldPosition{};
+    fearvr::TrackingQuaternion controllerAimWorldRotation{};
+    fearvr::TrackingVector controllerWeaponWorldPosition{};
+    fearvr::TrackingQuaternion controllerGripWorldRotation{};
+    fearvr::TrackingQuaternion controllerWeaponWorldRotation{};
+    fearvr::TrackingVector physicalWeaponWorldPosition{};
+    fearvr::TrackingQuaternion physicalWeaponWorldRotation{};
+    std::uint64_t controllerAimSampleId = 0;
+    std::uint64_t controllerAimTimestampNs = 0;
+    bool headAimReady = false;
+    bool controllerAimReady = false;
+    bool controllerWeaponReady = false;
     if (g_eyeOffsetDiagnostic) {
         const FearVrPose& left = request.eye[FEARVR_EYE_LEFT].pose;
         const FearVrPose& right = request.eye[FEARVR_EYE_RIGHT].pose;
@@ -576,11 +2888,20 @@ bool TryDoubleRenderDiagnostic(
                 } else {
                     if (!g_trackingRecenterValid ||
                         g_trackingRecenterPending) {
+                        const bool referenceChanged =
+                            g_trackingRecenterPending ||
+                            !g_trackingRecenterValid;
                         g_trackingRecenter =
                             fearvr::YawOnlyRecenterPose(currentCenter);
                         g_trackingRecenterValid =
                             fearvr::IsValidPose(g_trackingRecenter);
                         g_trackingRecenterPending = false;
+                        if (g_trackingRecenterValid &&
+                            referenceChanged) {
+                            ResetPhysicalMeleeWeaponWeight(
+                                fearvr::WeaponWeightResetReason::
+                                    teleportedOrRecentered);
+                        }
                         if (g_trackingRecenterValid &&
                             g_passThroughLog != nullptr) {
                             g_passThroughLog(
@@ -603,6 +2924,84 @@ bool TryDoubleRenderDiagnostic(
                             cameraReady = cameraReady &&
                                 trackedEye[eye].valid;
                         }
+                        if (cameraReady && g_headAimEnabled) {
+                            const fearvr::RelativeEyePose headRelative =
+                                fearvr::TrackedPoseRelativeToRecenter(
+                                    g_trackingRecenter, currentCenter);
+                            const fearvr::TrackingQuaternion baseRotation{
+                                originalTransform.rotation[0],
+                                originalTransform.rotation[1],
+                                originalTransform.rotation[2],
+                                originalTransform.rotation[3]};
+                            retailBaseWorldRotation =
+                                fearvr::Normalize(baseRotation);
+                            const fearvr::TrackingVector worldHeadOffset =
+                                fearvr::Rotate(
+                                    retailBaseWorldRotation,
+                                    {headTranslation.x * 100.0F,
+                                     headTranslation.y * 100.0F,
+                                     headTranslation.z * 100.0F});
+                            headAimWorldPosition = {
+                                originalTransform.position[0] +
+                                    worldHeadOffset.x,
+                                originalTransform.position[1] +
+                                    worldHeadOffset.y,
+                                originalTransform.position[2] +
+                                    worldHeadOffset.z};
+                            headAimWorldRotation = fearvr::Multiply(
+                                retailBaseWorldRotation,
+                                headRelative.rotation);
+                            headAimReady = headRelative.valid &&
+                                fearvr::IsFinite(headAimWorldPosition) &&
+                                fearvr::IsFinite(retailBaseWorldRotation) &&
+                                fearvr::IsFinite(headAimWorldRotation);
+
+                            FearVrInputState input{};
+                            const ULONGLONG now = GetTickCount64();
+                            const bool inputFresh =
+                                g_getInputState != nullptr &&
+                                g_getInputState(&input) != FALSE &&
+                                input.sampleId != 0 &&
+                                g_lastInputSampleTick != 0 &&
+                                now - g_lastInputSampleTick <=
+                                    kHeadAimFreshnessMilliseconds;
+                            const ControllerAimWorldPose controllerAim =
+                                ResolveControllerAimWorldPose(
+                                    input, inputFresh,
+                                    g_trackingRecenter,
+                                    {originalTransform.position[0],
+                                     originalTransform.position[1],
+                                     originalTransform.position[2]},
+                                    baseRotation, 100.0F);
+                            controllerAimWorldPosition =
+                                controllerAim.worldPosition;
+                            controllerAimWorldRotation =
+                                controllerAim.worldRotation;
+                            controllerAimReady = controllerAim.active;
+                            const ControllerAimWorldPose controllerGrip =
+                                ResolveControllerGripWorldPose(
+                                    input, inputFresh,
+                                    g_trackingRecenter,
+                                    {originalTransform.position[0],
+                                     originalTransform.position[1],
+                                     originalTransform.position[2]},
+                                    baseRotation, 100.0F);
+                            controllerWeaponWorldPosition =
+                                controllerGrip.worldPosition;
+                            controllerGripWorldRotation =
+                                controllerGrip.worldRotation;
+                            controllerWeaponWorldRotation =
+                                controllerAim.worldRotation;
+                            controllerWeaponReady =
+                                controllerAim.active &&
+                                controllerGrip.active;
+                            if (controllerAimReady &&
+                                controllerWeaponReady) {
+                                controllerAimSampleId = input.sampleId;
+                                controllerAimTimestampNs =
+                                    input.predictedDisplayTimeNs;
+                            }
+                        }
                     }
                 }
             }
@@ -619,6 +3018,30 @@ bool TryDoubleRenderDiagnostic(
                  : 100.0F);
     }
 
+    physicalWeaponWorldPosition = controllerWeaponWorldPosition;
+    physicalWeaponWorldRotation = controllerWeaponWorldRotation;
+    if (controllerWeaponReady) {
+        const std::uint64_t weightTimestampNs =
+            controllerAimTimestampNs != 0
+                ? controllerAimTimestampNs
+                : request.predictedDisplayTimeNs;
+        controllerWeaponReady = ApplyPhysicalMeleeWeaponWeight(
+            controllerWeaponWorldPosition,
+            controllerWeaponWorldRotation,
+            controllerAimSampleId, weightTimestampNs,
+            physicalWeaponWorldPosition,
+            physicalWeaponWorldRotation);
+    } else {
+        ResetPhysicalMeleeWeaponWeight(
+            fearvr::WeaponWeightResetReason::trackingLost);
+    }
+
+    PhysicalMeleeVisualOverride meleeVisualOverride{};
+    BeginPhysicalMeleeVisualOverride(
+        physicalWeaponWorldPosition,
+        physicalWeaponWorldRotation,
+        controllerWeaponReady,
+        meleeVisualOverride);
     unsigned long eyeResult[FEARVR_EYE_COUNT]{1UL, 1UL};
     std::uint32_t renderedEyes = 0;
     bool exceptionOccurred = false;
@@ -626,6 +3049,7 @@ bool TryDoubleRenderDiagnostic(
     __try {
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
             bool eyeStateSet = false;
+            RigidTransformAbi renderedEyeTransform = originalTransform;
             __try {
                 if (g_eyeOffsetDiagnostic) {
                     RigidTransformAbi eyeTransform = originalTransform;
@@ -683,6 +3107,7 @@ bool TryDoubleRenderDiagnostic(
                     if (!eyeStateSet) {
                         break;
                     }
+                    renderedEyeTransform = eyeTransform;
                     g_setCameraFov(camera, stereoFovX, stereoFovY);
                     float appliedFovX = 0.0F;
                     float appliedFovY = 0.0F;
@@ -703,6 +3128,20 @@ bool TryDoubleRenderDiagnostic(
                 }
                 eyeResult[eye] = g_renderCameraOverride(
                     renderer, camera, nullptr);
+                if (eyeResult[eye] == 0UL && controllerWeaponReady) {
+                    DrawWeaponGripCalibrationControllerGizmo(
+                        renderedEyeTransform,
+                        controllerWeaponWorldPosition,
+                        controllerGripWorldRotation,
+                        controllerAimWorldRotation,
+                        stereoFovX, stereoFovY);
+                }
+                if (eyeResult[eye] == 0UL) {
+                    DrawVrToolMenuOverlay(
+                        eye,
+                        fearvr::InterpupillaryDistanceMeters(request),
+                        stereoFovX);
+                }
                 g_captureEye(eye);
                 ++renderedEyes;
             } __finally {
@@ -718,6 +3157,9 @@ bool TryDoubleRenderDiagnostic(
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         exceptionOccurred = true;
+    }
+    if (!EndPhysicalMeleeVisualOverride(meleeVisualOverride)) {
+        restoreFailed = true;
     }
 
     if (exceptionOccurred || restoreFailed) {
@@ -760,6 +3202,7 @@ bool TryDoubleRenderDiagnostic(
         }
     }
     if (!submitted) {
+        InvalidateTrackedHeadAim();
         EndFailedStereoAttempt();
         if (renderedEyes == 0) {
             ReleaseStereoAttempt(true);
@@ -779,6 +3222,32 @@ bool TryDoubleRenderDiagnostic(
         }
         result = eyeResult[renderedEyes - 1];
         return !g_continuousStereoTuning;
+    }
+
+    if (headAimReady) {
+        PublishTrackedHeadAim(
+            camera, headAimWorldPosition,
+            retailBaseWorldRotation, headAimWorldRotation);
+        if (controllerAimReady) {
+            PublishTrackedControllerAim(
+                controllerAimWorldPosition,
+                controllerAimWorldRotation,
+                controllerAimSampleId,
+                controllerAimTimestampNs);
+            if (controllerWeaponReady) {
+                PublishTrackedControllerWeaponPose(
+                    physicalWeaponWorldPosition,
+                    physicalWeaponWorldRotation,
+                    controllerAimSampleId,
+                    controllerAimTimestampNs);
+            } else {
+                InvalidateTrackedControllerWeaponPose();
+            }
+        } else {
+            InvalidateTrackedControllerAim();
+        }
+    } else {
+        InvalidateTrackedHeadAim();
     }
 
     g_lastStereoRenderRequestId = request.frameId;
@@ -833,7 +3302,9 @@ unsigned long __fastcall HookRenderCamera(
     void* camera) {
     (void)ignoredEdx;
     const LONG count = InterlockedIncrement(&g_renderCameraCalls);
+    HandleVrToolMenuControls();
     HandleStereoTuningControls();
+    HandleWeaponGripCalibrationControls();
     SampleControllerInputReadOnly();
     if (g_cameraReadProbe && (count == 1 || count % 600 == 0)) {
         SampleCameraReadOnly(camera, count);
@@ -1127,7 +3598,8 @@ bool InstallRendererPassThroughProbe(
     bool reverseEyeOffsetDiagnostic,
     bool zeroEyeOffsetDiagnostic,
     bool continuousStereoTuning,
-    bool controllerRecenter) noexcept {
+    bool controllerRecenter,
+    bool headAim) noexcept {
     if (masterDatabase == nullptr || log == nullptr) {
         return false;
     }
@@ -1222,7 +3694,8 @@ bool InstallRendererPassThroughProbe(
         return false;
     }
 
-    const bool cameraAbiRequired = cameraReadProbe || stereoCameraPair;
+    const bool cameraAbiRequired =
+        cameraReadProbe || stereoCameraPair || headAim;
     if (cameraAbiRequired) {
         bool cameraReadSignaturesMatch = false;
         __try {
@@ -1281,10 +3754,46 @@ bool InstallRendererPassThroughProbe(
         }
     }
 
+    if (headAim) {
+        const MH_STATUS initialize = MH_Initialize();
+        if (initialize != MH_OK &&
+            initialize != MH_ERROR_ALREADY_INITIALIZED) {
+            log(
+                "m5_head_camera_transform_rejected",
+                MH_StatusToString(initialize));
+            ReleaseSRWLockExclusive(&g_passThroughLock);
+            return false;
+        }
+        MH_STATUS status = MH_CreateHook(
+            rigidTransformTarget,
+            reinterpret_cast<void*>(&HookGetRigidTransformForHeadAim),
+            reinterpret_cast<void**>(
+                &g_originalHeadAimGetRigidTransform));
+        if (status == MH_OK) {
+            status = MH_EnableHook(rigidTransformTarget);
+        }
+        if (status != MH_OK) {
+            MH_RemoveHook(rigidTransformTarget);
+            g_originalHeadAimGetRigidTransform = nullptr;
+            log(
+                "m5_head_camera_transform_rejected",
+                MH_StatusToString(status));
+            ReleaseSRWLockExclusive(&g_passThroughLock);
+            return false;
+        }
+        g_headAimGetRigidTransformTarget = rigidTransformTarget;
+    }
+
     DWORD oldProtection = 0;
     if (!VirtualProtect(
             &vtable[kRenderCameraSlot], sizeof(void*),
             PAGE_READWRITE, &oldProtection)) {
+        if (g_headAimGetRigidTransformTarget != nullptr) {
+            MH_DisableHook(g_headAimGetRigidTransformTarget);
+            MH_RemoveHook(g_headAimGetRigidTransformTarget);
+            g_headAimGetRigidTransformTarget = nullptr;
+            g_originalHeadAimGetRigidTransform = nullptr;
+        }
         log("m3_pass_through_rejected", "vtable_protect_failed");
         ReleaseSRWLockExclusive(&g_passThroughLock);
         return false;
@@ -1299,8 +3808,20 @@ bool InstallRendererPassThroughProbe(
     g_reverseEyeOffsetDiagnostic = reverseEyeOffsetDiagnostic;
     g_zeroEyeOffsetDiagnostic = zeroEyeOffsetDiagnostic;
     g_continuousStereoTuning = continuousStereoTuning;
+    g_toolMenuState = {};
+    g_toolMenuWeaponSettingsRegistry = {};
+    g_toolMenuPanelPlacement = {};
+    InterlockedExchange(
+        &g_toolMenuEnabled,
+        continuousStereoTuning && g_drawOverlayTriangles != nullptr
+            ? 1 : 0);
+    InterlockedExchange(&g_toolMenuOpen, 0);
+    InterlockedExchange(&g_toolMenuReleaseCapture, 0);
+    InterlockedExchange(&g_toolMenuOverlayFailureLogged, 0);
     g_controllerRecenterEnabled =
         controllerRecenter && continuousStereoTuning;
+    g_headAimEnabled = headAim && continuousStereoTuning;
+    InvalidateTrackedHeadAim();
     if (continuousStereoTuning) {
         g_tuningUnitsPerMeter = 100.0F;
         g_tuningReversePolarity = false;
@@ -1311,8 +3832,10 @@ bool InstallRendererPassThroughProbe(
     }
     g_client = cameraAbiRequired ? client : nullptr;
     g_getRigidTransform = cameraAbiRequired
-        ? reinterpret_cast<GetRigidTransformFunction>(
-              rigidTransformTarget)
+        ? (g_headAimEnabled
+               ? g_originalHeadAimGetRigidTransform
+               : reinterpret_cast<GetRigidTransformFunction>(
+                     rigidTransformTarget))
         : nullptr;
     g_setRigidTransform = stereoCameraPair
         ? reinterpret_cast<SetRigidTransformFunction>(
@@ -1360,11 +3883,24 @@ bool InstallRendererPassThroughProbe(
         g_setCameraFov = nullptr;
         g_setFovScalePercent = nullptr;
         g_getInputState = nullptr;
+        g_drawOverlayLines = nullptr;
+        g_drawOverlayTriangles = nullptr;
+        InterlockedExchange(&g_toolMenuEnabled, 0);
+        InterlockedExchange(&g_toolMenuOpen, 0);
+        InterlockedExchange(&g_toolMenuReleaseCapture, 0);
         g_cameraReadProbe = false;
         g_eyeOffsetDiagnostic = false;
         g_reverseEyeOffsetDiagnostic = false;
         g_zeroEyeOffsetDiagnostic = false;
         g_continuousStereoTuning = false;
+        g_headAimEnabled = false;
+        InvalidateTrackedHeadAim();
+        if (g_headAimGetRigidTransformTarget != nullptr) {
+            MH_DisableHook(g_headAimGetRigidTransformTarget);
+            MH_RemoveHook(g_headAimGetRigidTransformTarget);
+            g_headAimGetRigidTransformTarget = nullptr;
+            g_originalHeadAimGetRigidTransform = nullptr;
+        }
         log("m3_pass_through_rejected", "vtable_exchange_failed");
         ReleaseSRWLockExclusive(&g_passThroughLock);
         return false;
@@ -1414,6 +3950,16 @@ bool InstallRendererPassThroughProbe(
             "m4_input_probe_armed",
             "source=openxr_shared_state polling=render_camera "
             "engine_writes=0 state_changes_and_periodic_samples=1");
+        log(
+            "m5_vr_tool_menu_armed",
+            "toggle=both_grips_plus_y keyboard=F12 "
+            "tabs=melee,weapon,grip,display,controls,debug "
+            "navigation=triggers,left_stick,right_stick,a,b "
+            "render=depth_aware_stereo_ndc_triangle_overlay "
+            "menu_scale_percent=62 menu_distance_m=1.50 "
+            "settings_scope=retail_weapon_index settings_slots=64 "
+            "unknown_weapon_swing_attack=disabled "
+            "gameplay_controller_input_captured_while_open=1");
     }
     if (g_controllerRecenterEnabled) {
         log(
@@ -1421,8 +3967,264 @@ bool InstallRendererPassThroughProbe(
             "button=right_stick gameplay=yaw_and_translation_origin "
             "flat_panel=openxr_host release_gated=1 foreground_gated=1");
     }
+    if (g_headAimEnabled) {
+        log(
+            "m5_head_camera_transform_armed",
+            "get_transform_slot=21 freshness_ms=250 "
+            "consumers=flashlight,focus_detectors "
+            "retail_render_base_bypassed=1 flat_panel_disabled=1");
+    }
     ReleaseSRWLockExclusive(&g_passThroughLock);
     return true;
+}
+
+bool ReadTrackedHeadAimRotation(float (&rotation)[4]) noexcept {
+    return CopyFreshTrackedHeadAim(nullptr, rotation);
+}
+
+bool TrackedHeadAimIsFresh() noexcept {
+    float rotation[4]{};
+    return CopyFreshTrackedHeadAim(nullptr, rotation);
+}
+
+bool ReadTrackedControllerAimRotation(float (&rotation)[4]) noexcept {
+    return CopyFreshTrackedControllerAim(rotation);
+}
+
+bool ReadTrackedControllerWorldPose(
+    float (&position)[3],
+    float (&rotation)[4],
+    std::uint64_t& sampleId,
+    std::uint64_t& timestampNs) noexcept {
+    return CopyFreshTrackedControllerWorldPose(
+        position, rotation, sampleId, timestampNs);
+}
+
+bool ReadTrackedMeleeAimBasis(
+    float (&position)[3],
+    float (&baseRotation)[4],
+    float (&controllerRotation)[4]) noexcept {
+    return CopyFreshTrackedMeleeAimBasis(
+        position, baseRotation, controllerRotation);
+}
+
+void SetPhysicalMeleeVisualProxyEnabled(bool enabled) noexcept {
+    InterlockedExchange(
+        &g_physicalMeleeVisualEnabled, enabled ? 1 : 0);
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    g_physicalMeleeVisualWeaponReference = nullptr;
+    g_physicalMeleeVisualWeapon = nullptr;
+    g_physicalMeleeVisualWeaponIndex = -1;
+    g_physicalMeleeVisualModelReference = nullptr;
+    g_physicalMeleeVisualModel = nullptr;
+    g_physicalMeleeVisualModelLocalGripPosition = {};
+    g_physicalMeleeVisualModelLocalGripRotation = {
+        0.0F, 0.0F, 0.0F, 1.0F};
+    g_physicalMeleeVisualSourceGeneration = 0;
+    g_activeWeaponGripCalibrationSlot = -1;
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+    InterlockedExchange(&g_physicalMeleeVisualActiveLogged, 0);
+    InterlockedExchange(&g_physicalMeleeVisualRestoreFailed, 0);
+    if (!enabled) {
+        InterlockedExchange(&g_weaponGripCalibrationEnabled, 0);
+        InterlockedExchange(&g_weaponGripCalibrationActive, 0);
+    }
+}
+
+void SetWeaponGripCalibrationEnabled(bool enabled) noexcept {
+    InterlockedExchange(
+        &g_weaponGripCalibrationEnabled, enabled ? 1 : 0);
+    InterlockedExchange(
+        &g_weaponGripCalibrationActive,
+        enabled && InterlockedCompareExchange(
+            &g_toolMenuEnabled, 0, 0) == 0 ? 1 : 0);
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    if (!enabled && g_activeWeaponGripCalibrationSlot >= 0 &&
+        static_cast<std::size_t>(
+            g_activeWeaponGripCalibrationSlot) <
+            kWeaponGripCalibrationSlotCount) {
+        const WeaponGripCalibrationSlot& active =
+            g_weaponGripCalibrationSlots[
+                g_activeWeaponGripCalibrationSlot];
+        if (active.occupied) {
+            g_physicalMeleeVisualModelLocalGripPosition =
+                active.calibration.basePositionUnits;
+            g_physicalMeleeVisualModelLocalGripRotation =
+                active.calibration.baseRotation;
+        }
+    }
+    for (WeaponGripCalibrationSlot& slot :
+         g_weaponGripCalibrationSlots) {
+        slot = {};
+    }
+    g_activeWeaponGripCalibrationSlot = -1;
+    g_weaponGripCalibrationUseSequence = 0;
+    g_weaponGripCalibrationMode =
+        WeaponGripCalibrationMode::Position;
+    g_weaponGripCalibrationStepIndex = 2;
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+    InterlockedExchange(&g_weaponGripControllerGizmoActiveLogged, 0);
+    InterlockedExchange(&g_weaponGripControllerGizmoFailureLogged, 0);
+}
+
+bool WeaponGripCalibrationAcceptsControllerInput() noexcept {
+    return InterlockedCompareExchange(
+               &g_weaponGripCalibrationEnabled, 0, 0) != 0 &&
+        InterlockedCompareExchange(
+               &g_weaponGripCalibrationActive, 0, 0) != 0;
+}
+
+bool VrToolMenuCapturesControllerInput(
+    const FearVrInputState& input,
+    bool sampleFresh) noexcept {
+    if (InterlockedCompareExchange(&g_toolMenuEnabled, 0, 0) == 0) {
+        return false;
+    }
+    return InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 ||
+        InterlockedCompareExchange(
+            &g_toolMenuReleaseCapture, 0, 0) != 0 ||
+        ToolMenuToggleChordDown(input, sampleFresh);
+}
+
+bool VrToolMenuIsOpen() noexcept {
+    return InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0;
+}
+
+ToolMenuMeleeSettings ReadVrToolMenuMeleeSettings(
+    std::int32_t weaponIndex) noexcept {
+    return CopyToolMenuMeleeSettings(weaponIndex);
+}
+
+bool PublishEquippedWeaponVisualProxySource(
+    void* const* equippedWeaponReference,
+    void* equippedWeapon,
+    std::int32_t equippedWeaponIndex,
+    void* const* modelObjectReference,
+    void* modelObject,
+    const float (&modelLocalGripPositionUnits)[3],
+    const float (&modelLocalGripRotation)[4]) noexcept {
+    if (equippedWeaponReference == nullptr ||
+        equippedWeapon == nullptr ||
+        modelObjectReference == nullptr || modelObject == nullptr ||
+        InterlockedCompareExchange(
+            &g_physicalMeleeVisualEnabled, 0, 0) == 0) {
+        return false;
+    }
+    const fearvr::TrackingVector localGripPosition{
+        modelLocalGripPositionUnits[0],
+        modelLocalGripPositionUnits[1],
+        modelLocalGripPositionUnits[2]};
+    const fearvr::TrackingQuaternion localGripRotation{
+        modelLocalGripRotation[0], modelLocalGripRotation[1],
+        modelLocalGripRotation[2], modelLocalGripRotation[3]};
+    const PhysicalMeleeRigidTransform localGrip{
+        localGripPosition, localGripRotation};
+    if (!PhysicalMeleeRigidTransformIsValid(localGrip) ||
+        PhysicalMeleeLength(localGripPosition) > 300.0F) {
+        return false;
+    }
+
+    void* referencedWeapon = nullptr;
+    void* referencedModel = nullptr;
+    bool referencesLive = false;
+    __try {
+        std::memcpy(
+            &referencedWeapon, equippedWeaponReference,
+            sizeof(referencedWeapon));
+        std::memcpy(
+            &referencedModel, modelObjectReference,
+            sizeof(referencedModel));
+        referencesLive = referencedWeapon == equippedWeapon &&
+            referencedModel == modelObject;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        referencesLive = false;
+    }
+    if (!referencesLive) {
+        return false;
+    }
+
+    bool sourceChanged = false;
+    std::uint64_t generation = 0;
+    AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
+    sourceChanged =
+        equippedWeaponReference !=
+            g_physicalMeleeVisualWeaponReference ||
+        equippedWeapon != g_physicalMeleeVisualWeapon ||
+        equippedWeaponIndex !=
+            g_physicalMeleeVisualWeaponIndex ||
+        modelObjectReference !=
+            g_physicalMeleeVisualModelReference ||
+        modelObject != g_physicalMeleeVisualModel;
+    if (sourceChanged) {
+        ++g_physicalMeleeVisualSourceGeneration;
+    }
+    g_physicalMeleeVisualWeaponReference =
+        equippedWeaponReference;
+    g_physicalMeleeVisualWeapon = equippedWeapon;
+    g_physicalMeleeVisualWeaponIndex = equippedWeaponIndex;
+    g_physicalMeleeVisualModelReference = modelObjectReference;
+    g_physicalMeleeVisualModel = modelObject;
+    const bool calibrationEnabled =
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) != 0;
+    if (calibrationEnabled &&
+        (sourceChanged ||
+         g_activeWeaponGripCalibrationSlot < 0)) {
+        g_activeWeaponGripCalibrationSlot =
+            FindOrCreateWeaponGripCalibrationSlot(
+                equippedWeapon, equippedWeaponIndex, modelObject,
+                localGripPosition, localGripRotation);
+    }
+    if (calibrationEnabled &&
+        g_activeWeaponGripCalibrationSlot >= 0 &&
+        static_cast<std::size_t>(
+            g_activeWeaponGripCalibrationSlot) <
+            kWeaponGripCalibrationSlotCount) {
+        const WeaponGripCalibrationSlot& slot =
+            g_weaponGripCalibrationSlots[
+                g_activeWeaponGripCalibrationSlot];
+        g_physicalMeleeVisualModelLocalGripPosition =
+            slot.calibration.positionUnits;
+        g_physicalMeleeVisualModelLocalGripRotation =
+            ResolvePhysicalMeleeGripCalibrationRotation(
+                slot.calibration);
+    } else {
+        g_activeWeaponGripCalibrationSlot = -1;
+        g_physicalMeleeVisualModelLocalGripPosition =
+            localGripPosition;
+        g_physicalMeleeVisualModelLocalGripRotation =
+            fearvr::Normalize(localGripRotation);
+    }
+    generation = g_physicalMeleeVisualSourceGeneration;
+    ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
+
+    if (sourceChanged && g_passThroughLog != nullptr) {
+        char detail[448]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld weapon=%p model_object=%p "
+            "source_generation=%llu "
+            "acquisition=current_CClientWeaponMgr gameplay_update "
+            "grip_calibration=%s "
+            "lifetime_guard=current_weapon_and_model_LTObjRef",
+            static_cast<long>(equippedWeaponIndex),
+            equippedWeapon, modelObject,
+            static_cast<unsigned long long>(generation),
+            calibrationEnabled ? "live_per_weapon_session" :
+                "profile_data");
+        g_passThroughLog(
+            "m5_physical_melee_visual_source_captured", detail);
+        if (calibrationEnabled) {
+            LogWeaponGripCalibrationState(
+                "m5_weapon_grip_calibration_snapshot",
+                "source_selected");
+        }
+    }
+    return true;
+}
+
+void InvalidatePhysicalMeleeVisualProxySource() noexcept {
+    ClearPhysicalMeleeVisualSource();
 }
 
 } // namespace condemnedvr

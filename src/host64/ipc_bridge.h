@@ -15,9 +15,8 @@ using IpcLogFunction =
     std::function<void(const char* level, const char* event,
                        const std::string& message)>;
 
-// Rohdaten für die in ANWEISUNG.md §14 geforderte Host-Copyzeit. Gemessen
-// wird das Öffnen der Shared-Textures und das Kopieren beider Augen in die
-// privaten D3D11-Zieltexturen, ohne das anschließende Warten auf die Query.
+// Raw timing for opening shared textures and copying both eyes into private
+// D3D11 targets. The subsequent query wait is deliberately excluded.
 struct BridgeCopyStats {
     std::uint64_t samples{0};
     std::uint64_t totalMicroseconds{0};

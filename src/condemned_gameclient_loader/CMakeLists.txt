@@ -77,7 +77,7 @@ target_link_libraries(verify-condemned-executable PRIVATE
   fearvr-warnings
 )
 
-if(FEARVR_BUILD_TESTS)
+if(CONDEMNEDVR_BUILD_TESTS)
   add_executable(test-condemned-module-identity
     test_module_identity.cpp
   )

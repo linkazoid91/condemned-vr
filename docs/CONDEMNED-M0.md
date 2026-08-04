@@ -139,10 +139,11 @@ Initial classification of the five external behaviors:
 | `FixMenu` | Do not assume it is needed; preserve original UI proportions on the comfort panel first. |
 | `FixLowFramerate` | Implemented in-repo as a byte-verified Jupiter EX HID correction; OpenXR-request pacing handles the separate stale-frame problem. See `CONDEMNED-PERFORMANCE.md`. |
 | `FixSavePath` | Prefer the repository-owned isolated `-userdirectory`; verify persistence there. |
-| `BorderlessWindowed` | Not required for headset presentation; keep only if later needed for a desktop mirror or reliable focus handling. |
+| `BorderlessWindowed` | The external implementation is not required. Repository-owned `-DesktopWindow` supplies the test mirror and version-guarded focus/cursor handling needed for headset development. |
 
-Menu behavior and the HID-dependent low-frame-rate behavior are live verified.
-Save/load persistence and a longer release soak remain unverified.
+Menu behavior, the HID-dependent low-frame-rate behavior, and repository-owned
+windowed Alt-Tab handling are live verified. Save/load persistence and a
+longer release soak remain unverified.
 
 ## Remaining M0 gates
 

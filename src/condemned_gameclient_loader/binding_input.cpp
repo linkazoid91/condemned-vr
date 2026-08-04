@@ -11,12 +11,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 
 #include <MinHook.h>
 
 #include "binding_input.h"
 #include "condemned_controller_input.h"
+#include "condemned_physical_melee.h"
 #include "condemned_locomotion.h"
+#include "head_tracking_math.h"
 #include "protocol.h"
 
 namespace condemnedvr {
@@ -47,6 +50,31 @@ using GetExtremalCommandValueFunction =
 using GetInputStateFunction = BOOL(__cdecl*)(FearVrInputState*);
 using SubmitHapticRequestFunction =
     BOOL(__cdecl*)(const FearVrHapticRequest*);
+struct VectorAbi {
+    float x;
+    float y;
+    float z;
+};
+static_assert(sizeof(VectorAbi) == 12);
+struct QuaternionAbi {
+    float x;
+    float y;
+    float z;
+    float w;
+};
+static_assert(sizeof(QuaternionAbi) == 16);
+using GetFireVectorsFunction = bool(__thiscall*)(
+    const void*, VectorAbi&, VectorAbi&, VectorAbi&, VectorAbi&);
+using MeleeEnableCollisionsFunction = std::uintptr_t(__thiscall*)(
+    void*, std::uintptr_t, std::uintptr_t, std::uintptr_t,
+    std::uintptr_t, std::uintptr_t);
+using MeleeUpdateCollisionFunction = void(__thiscall*)(void*, void*);
+using BuildRigidTransformFunction = void*(__thiscall*)(
+    void*, const VectorAbi*, const QuaternionAbi*);
+using MeleeImpactDispatchFunction = std::uintptr_t(__thiscall*)(
+    void*, std::uintptr_t, std::uintptr_t, std::uintptr_t,
+    std::uintptr_t, std::uintptr_t, std::uintptr_t,
+    std::uintptr_t, std::uintptr_t, std::uintptr_t);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
 using ClientShellUpdateFunction = void(__thiscall*)(void*);
 using ClientShellKeyUpFunction = void(__thiscall*)(void*, int);
@@ -57,6 +85,30 @@ using ClientShellGetInterfaceManagerFunction =
 
 constexpr std::uintptr_t kGetBindingValueRva = 0x000095F0U;
 constexpr std::uintptr_t kGetExtremalCommandValueRva = 0x00009900U;
+constexpr std::uintptr_t kGetFireVectorsRva = 0x0002AF70U;
+constexpr std::uintptr_t kMeleeEnableCollisionsRva = 0x0001FD00U;
+constexpr std::uintptr_t kMeleeUpdateCollisionRva = 0x0001FC00U;
+constexpr std::uintptr_t kBuildRigidTransformRva = 0x0000F690U;
+constexpr std::uintptr_t kMeleeBuildRigidTransformReturnRva =
+    0x0001FCDEU;
+constexpr std::uintptr_t kMeleeImpactDispatchRva = 0x0001F270U;
+constexpr std::uintptr_t kMeleeImpactDispatchReturnRva =
+    0x0001FBC8U;
+constexpr std::uintptr_t kMeleeCollisionCallbackRva = 0x0001F830U;
+constexpr std::uintptr_t kMeleeImpactDispatchCallRva = 0x0001FBC3U;
+constexpr std::uintptr_t kMeleeCollisionLimitTextRva = 0x0013A6B8U;
+constexpr std::uintptr_t kMeleeClientGlobalRva = 0x00168EECU;
+// Verified local-player weapon lifecycle. CClientWeaponMgr::GetCurrentWeapon
+// at +0x2F910 returns m_pCurrentWeapon (+0x0C) only when its index (+0x08)
+// is valid. CClientWeapon::SetWeaponTransform at +0x255F0 reads the primary
+// engine-owned model HOBJECT from the LTObjRef field at +0x1C.
+constexpr std::uintptr_t kWeaponManagerGlobalRva = 0x00168EBCU;
+constexpr std::uintptr_t kGetCurrentWeaponRva = 0x0002F910U;
+constexpr std::uintptr_t kSetWeaponTransformRva = 0x000255F0U;
+constexpr std::size_t kCurrentWeaponIndexOffset = 0x08U;
+constexpr std::size_t kCurrentWeaponOffset = 0x0CU;
+constexpr std::size_t kRightWeaponModelObjectOffset = 0x1CU;
+constexpr std::uintptr_t kRetailGameImageSize = 0x00194000U;
 constexpr std::uintptr_t kClientShellVtableRva = 0x0013E714U;
 constexpr std::uintptr_t kClientShellKeyUpRva = 0x0004AD90U;
 constexpr std::uintptr_t kClientShellKeyDownRva = 0x0004CC00U;
@@ -102,6 +154,50 @@ constexpr unsigned char kGetExtremalBindingStride[] = {
 constexpr unsigned char kGetExtremalCommandValueTail[] = {
     0xD9, 0x44, 0x24, 0x08, 0x5F, 0x5E, 0x59, 0xC2,
     0x04, 0x00};
+constexpr unsigned char kGetFireVectorsPrefix[] = {
+    0x83, 0xEC, 0x58};
+constexpr unsigned char kGetFireVectorsStackInit[] = {
+    0x53, 0x55, 0xC7, 0x44, 0x24, 0x30,
+    0x00, 0x00, 0x00, 0x00};
+constexpr unsigned char kGetFireVectorsCameraProbe[] = {
+    0x8B, 0xE9, 0x8B, 0x48, 0x28,
+    0x8B, 0x81, 0x18, 0x01, 0x00, 0x00,
+    0x85, 0xC0, 0x56, 0x57};
+constexpr unsigned char kMeleeEnableCollisionsPrefix[] = {
+    0x81, 0xEC, 0x6C, 0x01, 0x00, 0x00, 0xA1};
+constexpr unsigned char kMeleeEnableCollisionsBodyPrefix[] = {
+    0x8B, 0x50, 0x10, 0x53, 0x55, 0x8B, 0xE9};
+constexpr unsigned char kMeleeCollisionLimitTextReferencePrefix[] = {
+    0x8B, 0x94, 0x24, 0x88, 0x01, 0x00, 0x00, 0x52, 0x68};
+constexpr unsigned char kMeleeUpdateCollisionPrefix[] = {
+    0x83, 0xEC, 0x3C, 0x56, 0x8B, 0x74, 0x24, 0x44,
+    0x8B, 0x46, 0x40, 0x85, 0xC0, 0x57, 0x8B, 0xF9};
+constexpr unsigned char kMeleeUpdateCollisionNodeQuery[] = {
+    0x8B, 0x46, 0x38, 0x8B, 0x0D};
+constexpr unsigned char kMeleeUpdateCollisionSetTransform[] = {
+    0x50, 0x8B, 0xCF, 0xFF, 0x93, 0xC4, 0x00, 0x00, 0x00};
+constexpr unsigned char kBuildRigidTransformPrefix[] = {
+    0x8B, 0xC1, 0xC7, 0x40, 0x18, 0x00, 0x00, 0x80,
+    0x3F, 0x33, 0xC9, 0x89, 0x48, 0x0C, 0x89, 0x48,
+    0x10, 0x89, 0x48, 0x14};
+constexpr unsigned char kBuildRigidTransformTail[] = {
+    0x8B, 0x49, 0x0C, 0x89, 0x48, 0x18, 0xC2, 0x08, 0x00};
+constexpr unsigned char kMeleeImpactDispatchPrefix[] = {
+    0x8B, 0x44, 0x24, 0x0C, 0x83, 0xEC, 0x4C, 0x83,
+    0xF8, 0x10, 0x53, 0x56, 0x8B, 0xD9, 0x75, 0x50};
+constexpr unsigned char kMeleeImpactDispatchCallsitePrefix[] = {
+    0x8B, 0x46, 0x24, 0x8B, 0x56, 0x38, 0x50, 0x33,
+    0xC9, 0x8A, 0x4E, 0x28, 0x57, 0x8D, 0x44, 0x24,
+    0x44, 0x51, 0x52};
+constexpr unsigned char kGetCurrentWeaponBody[] = {
+    0x83, 0x79, 0x08, 0xFF, 0x75, 0x03, 0x33,
+    0xC0, 0xC3, 0x8B, 0x41, 0x0C, 0xC3};
+constexpr unsigned char kSetWeaponTransformPrefix[] = {
+    0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x1C, 0x85,
+    0xC0, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x74, 0x0D};
+constexpr unsigned char kSetWeaponTransformSecondModel[] = {
+    0x8B, 0x86, 0xEC, 0x00, 0x00, 0x00,
+    0x85, 0xC0, 0x74, 0x0D};
 constexpr unsigned char kClientShellKeyUpPrefix[] = {
     0x83, 0xEC, 0x28, 0x55, 0x8B, 0x6C, 0x24, 0x30,
     0x83, 0xFD, 0x77, 0x57, 0x8B, 0xF9, 0x0F, 0x84};
@@ -133,6 +229,11 @@ constexpr unsigned char kClientShellKeyUpMenuCompare[] = {
 SRWLOCK g_bindingLock = SRWLOCK_INIT;
 GetBindingValueFunction g_originalGetBindingValue = nullptr;
 GetExtremalCommandValueFunction g_originalGetExtremalCommandValue = nullptr;
+GetFireVectorsFunction g_originalGetFireVectors = nullptr;
+MeleeEnableCollisionsFunction g_originalMeleeEnableCollisions = nullptr;
+MeleeUpdateCollisionFunction g_originalMeleeUpdateCollision = nullptr;
+BuildRigidTransformFunction g_originalBuildRigidTransform = nullptr;
+MeleeImpactDispatchFunction g_originalMeleeImpactDispatch = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
 SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 SetMenuActiveFunction g_setMenuActive = nullptr;
@@ -142,6 +243,11 @@ ClientShellKeyDownFunction g_clientShellKeyDown = nullptr;
 RendererProbeLogFunction g_log = nullptr;
 void* g_bindingValueHookTarget = nullptr;
 void* g_turningHookTarget = nullptr;
+void* g_fireVectorsHookTarget = nullptr;
+void* g_meleeEnableCollisionsHookTarget = nullptr;
+void* g_meleeUpdateCollisionHookTarget = nullptr;
+void* g_buildRigidTransformHookTarget = nullptr;
+void* g_meleeImpactDispatchHookTarget = nullptr;
 void* g_menuHookTarget = nullptr;
 void* g_clientShell = nullptr;
 void* g_interfaceManager = nullptr;
@@ -161,6 +267,40 @@ volatile LONG g_lastCoreActionActive[7]{};
 alignas(8) volatile LONG64 g_hapticRequestId = 0;
 volatile LONG g_hapticsEnabled = 0;
 volatile LONG g_hapticFailureReported = 0;
+volatile LONG g_headAimInputEnabled = 0;
+volatile LONG g_mouseLookSuppressionLogged = 0;
+volatile LONG g_controllerFireAimLogged = 0;
+volatile LONG g_aimPathProbeEnabled = 0;
+volatile LONG g_aimPathFireVectorCalls = 0;
+volatile LONG g_aimPathMeleeCalls = 0;
+volatile LONG g_aimPathMeleeUpdateCalls = 0;
+volatile LONG g_aimPathMeleeTransformCalls = 0;
+volatile LONG g_aimPathMeleeImpactCalls = 0;
+volatile LONG g_controllerMeleeAimEnabled = 0;
+volatile LONG g_controllerMeleeAimLogged = 0;
+SRWLOCK g_physicalMeleeLock = SRWLOCK_INIT;
+PhysicalMeleeKinematicsState g_physicalMeleeState{};
+PhysicalMeleeKinematicsState g_physicalMeleeSwingKinematicsState{};
+PhysicalMeleeFrame g_physicalMeleeFrame{};
+PhysicalMeleeProfile g_physicalMeleeProfile{};
+std::int32_t g_physicalMeleeProfileWeaponIndex = -1;
+PhysicalMeleeContactState g_physicalMeleeContactState{};
+PhysicalMeleeSwingAttackState g_physicalMeleeSwingAttackState{};
+std::uint64_t g_physicalMeleeSampleId = 0;
+ULONGLONG g_physicalMeleeSampleTick = 0;
+std::uint64_t g_physicalMeleeSwingSampleId = 0;
+ULONGLONG g_physicalMeleeSwingSampleTick = 0;
+float g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+volatile LONG g_physicalMeleeProbeEnabled = 0;
+volatile LONG g_physicalMeleeSampleCalls = 0;
+volatile LONG g_physicalMeleeDamageQualified = 0;
+volatile LONG g_physicalMeleeSwingAttackTriggered = 0;
+volatile LONG g_physicalMeleeWallProxyEnabled = 0;
+volatile LONG g_physicalMeleeVisualProxyEnabled = 0;
+volatile LONG g_physicalMeleeWallProxyAppliedLogged = 0;
+volatile LONG g_physicalMeleeContactAccepted = 0;
+volatile LONG g_physicalMeleeContactRearmed = 0;
+unsigned char* g_gameClientBase = nullptr;
 MenuToggleLatch g_menuToggleLatch;
 
 int ReadRetailGameState(void* interfaceManager) noexcept;
@@ -197,6 +337,672 @@ bool ReadUsableControllerInput(
     }
     return SampleIsFresh(input.sampleId, GetTickCount64()) &&
         ProcessOwnsForegroundWindow();
+}
+
+bool WeaponGripCalibrationCapturesInput(
+    const FearVrInputState& input,
+    bool sampleFresh) noexcept {
+    return VrToolMenuCapturesControllerInput(input, sampleFresh) ||
+        (WeaponGripCalibrationAcceptsControllerInput() &&
+         ResolveWeaponGripCalibrationControls(
+             input, sampleFresh).captured);
+}
+
+void FormatGameClientStack(
+    char* output, std::size_t outputSize) noexcept {
+    if (output == nullptr || outputSize == 0) {
+        return;
+    }
+    output[0] = '\0';
+    void* frames[16]{};
+    const USHORT count = CaptureStackBackTrace(
+        0, static_cast<DWORD>(
+            sizeof(frames) / sizeof(frames[0])), frames, nullptr);
+    std::size_t used = 0;
+    for (USHORT index = 0; index < count; ++index) {
+        auto* const address = static_cast<unsigned char*>(frames[index]);
+        if (g_gameClientBase == nullptr ||
+            address < g_gameClientBase ||
+            address >= g_gameClientBase + kRetailGameImageSize) {
+            continue;
+        }
+        const auto rva = static_cast<unsigned long>(
+            address - g_gameClientBase);
+        const int written = std::snprintf(
+            output + used, outputSize - used,
+            used == 0 ? "0x%08lX" : ",0x%08lX", rva);
+        if (written <= 0 ||
+            static_cast<std::size_t>(written) >= outputSize - used) {
+            output[outputSize - 1] = '\0';
+            break;
+        }
+        used += static_cast<std::size_t>(written);
+    }
+    if (used == 0) {
+        std::snprintf(output, outputSize, "none");
+    }
+}
+
+bool ReadControllerForward(VectorAbi& forward) noexcept {
+    float rotation[4]{};
+    if (!ReadTrackedControllerAimRotation(rotation)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion controller = fearvr::Normalize({
+        rotation[0], rotation[1], rotation[2], rotation[3]});
+    if (!fearvr::IsFinite(controller)) {
+        return false;
+    }
+    const fearvr::TrackingVector value =
+        fearvr::Rotate(controller, {0.0F, 0.0F, 1.0F});
+    if (!fearvr::IsFinite(value)) {
+        return false;
+    }
+    forward = {value.x, value.y, value.z};
+    return true;
+}
+
+bool ReadControllerSwingPose(
+    fearvr::TrackingVector& gripPositionMeters,
+    fearvr::TrackingQuaternion& aimRotation,
+    std::uint64_t& sampleId,
+    std::uint64_t& timestampNs) noexcept {
+    gripPositionMeters = {};
+    aimRotation = {};
+    sampleId = 0;
+    timestampNs = 0;
+    if (g_getInputState == nullptr) {
+        return false;
+    }
+    FearVrInputState input{};
+    if (g_getInputState(&input) == FALSE ||
+        !fearvr::IsInputStateUsable(input, true) ||
+        (input.activeHands & FEARVR_HAND_MASK_RIGHT) == 0 ||
+        (input.gripPoseValidHands & FEARVR_HAND_MASK_RIGHT) == 0 ||
+        (input.aimPoseValidHands & FEARVR_HAND_MASK_RIGHT) == 0 ||
+        input.sampleId == 0 || input.predictedDisplayTimeNs == 0 ||
+        !fearvr::IsValidPose(
+            input.handGripPose[FEARVR_HAND_RIGHT]) ||
+        !fearvr::IsValidPose(
+            input.handAimPose[FEARVR_HAND_RIGHT])) {
+        return false;
+    }
+
+    // Tracking-space motion excludes Retail camera translation and turning,
+    // so walking or snap-turning cannot masquerade as a hand swing. The
+    // OpenXR-to-LithTech conversion is orthonormal and preserves speed.
+    gripPositionMeters = fearvr::OpenXrToLithTech(
+        fearvr::PosePosition(
+            input.handGripPose[FEARVR_HAND_RIGHT]));
+    aimRotation = fearvr::OpenXrToLithTech(
+        fearvr::PoseRotation(
+            input.handAimPose[FEARVR_HAND_RIGHT]));
+    if (!fearvr::IsFinite(gripPositionMeters) ||
+        !fearvr::IsFinite(aimRotation)) {
+        gripPositionMeters = {};
+        aimRotation = {};
+        return false;
+    }
+    sampleId = input.sampleId;
+    timestampNs = input.predictedDisplayTimeNs;
+    return true;
+}
+
+bool ReadVectorCandidate(
+    std::uintptr_t address,
+    VectorAbi& value) noexcept {
+    value = {};
+    if (address == 0) {
+        return false;
+    }
+    __try {
+        std::memcpy(
+            &value, reinterpret_cast<const void*>(address),
+            sizeof(value));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        value = {};
+        return false;
+    }
+    return std::isfinite(value.x) &&
+        std::isfinite(value.y) &&
+        std::isfinite(value.z);
+}
+
+const char* PhysicalMeleeResetReasonName(
+    PhysicalMeleeResetReason reason) noexcept {
+    switch (reason) {
+    case PhysicalMeleeResetReason::None:
+        return "none";
+    case PhysicalMeleeResetReason::FirstPose:
+        return "first_pose";
+    case PhysicalMeleeResetReason::TrackingLost:
+        return "tracking_lost";
+    case PhysicalMeleeResetReason::TrackingReacquired:
+        return "tracking_reacquired";
+    case PhysicalMeleeResetReason::InvalidPose:
+        return "invalid_pose";
+    case PhysicalMeleeResetReason::InvalidProfile:
+        return "invalid_profile";
+    case PhysicalMeleeResetReason::NonPositiveTime:
+        return "non_positive_time";
+    case PhysicalMeleeResetReason::InsufficientSampleInterval:
+        return "insufficient_sample_interval";
+    case PhysicalMeleeResetReason::ExcessiveSampleGap:
+        return "excessive_sample_gap";
+    case PhysicalMeleeResetReason::ExcessiveTravel:
+        return "excessive_travel";
+    default:
+        return "unknown";
+    }
+}
+
+const char* PhysicalMeleeContactReasonName(
+    PhysicalMeleeContactReason reason) noexcept {
+    switch (reason) {
+    case PhysicalMeleeContactReason::None:
+        return "none";
+    case PhysicalMeleeContactReason::Accepted:
+        return "accepted";
+    case PhysicalMeleeContactReason::InvalidProfile:
+        return "invalid_profile";
+    case PhysicalMeleeContactReason::MissingTarget:
+        return "missing_target";
+    case PhysicalMeleeContactReason::InvalidContact:
+        return "invalid_contact";
+    case PhysicalMeleeContactReason::InvalidFrame:
+        return "invalid_frame";
+    case PhysicalMeleeContactReason::BelowNormalSpeed:
+        return "below_normal_speed";
+    case PhysicalMeleeContactReason::BelowNormalEnergy:
+        return "below_normal_energy";
+    case PhysicalMeleeContactReason::ContactLatched:
+        return "contact_latched";
+    default:
+        return "unknown";
+    }
+}
+
+bool CopyLatestPhysicalMeleeFrame(
+    PhysicalMeleeFrame& frame,
+    std::uint64_t& sampleId) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    frame = g_physicalMeleeFrame;
+    sampleId = g_physicalMeleeSampleId;
+    const bool available = sampleId != 0 && frame.poseValid &&
+        g_physicalMeleeSampleTick != 0 &&
+        now - g_physicalMeleeSampleTick <=
+            kInputFreshnessMilliseconds;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    return available && ProcessOwnsForegroundWindow();
+}
+
+bool ReadPhysicalMeleeSwingAttackActive(
+    bool inputEligible) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    const bool probeEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeProbeEnabled, 0, 0) != 0;
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    const bool sampleFresh = g_physicalMeleeSampleId != 0 &&
+        g_physicalMeleeSampleTick != 0 &&
+        now - g_physicalMeleeSampleTick <=
+            kInputFreshnessMilliseconds &&
+        g_physicalMeleeSwingSampleId != 0 &&
+        g_physicalMeleeSwingSampleTick != 0 &&
+        now - g_physicalMeleeSwingSampleTick <=
+            kInputFreshnessMilliseconds;
+    if (!inputEligible || !probeEnabled || !sampleFresh ||
+        !g_physicalMeleeProfile.swingAttackEnabled) {
+        ResetPhysicalMeleeSwingAttack(
+            g_physicalMeleeSwingAttackState);
+        ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+        return false;
+    }
+    const bool active = PhysicalMeleeSwingAttackPulseIsActive(
+        g_physicalMeleeSwingAttackState,
+        static_cast<std::uint64_t>(now));
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    return active;
+}
+
+bool EvaluatePhysicalMeleeContact(
+    std::uintptr_t targetId,
+    const VectorAbi& contactPosition,
+    const VectorAbi& contactNormal,
+    PhysicalMeleeFrame& frame,
+    std::uint64_t& sampleId,
+    PhysicalMeleeContactQualification& qualification) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    const bool foreground = ProcessOwnsForegroundWindow();
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    frame = g_physicalMeleeFrame;
+    sampleId = g_physicalMeleeSampleId;
+    const bool available = foreground && sampleId != 0 &&
+        frame.poseValid && g_physicalMeleeSampleTick != 0 &&
+        now - g_physicalMeleeSampleTick <=
+            kInputFreshnessMilliseconds;
+    if (available) {
+        qualification = QualifyPhysicalMeleeContact(
+            g_physicalMeleeContactState,
+            targetId,
+            {contactPosition.x, contactPosition.y, contactPosition.z},
+            {contactNormal.x, contactNormal.y, contactNormal.z},
+            frame, sampleId, g_physicalMeleeProfile);
+    } else {
+        qualification = {};
+        qualification.reason = PhysicalMeleeContactReason::InvalidFrame;
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    return available;
+}
+
+void UpdatePhysicalMeleeProbe() noexcept {
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeProbeEnabled, 0, 0) == 0) {
+        return;
+    }
+
+    float position[3]{};
+    float rotation[4]{};
+    std::uint64_t sampleId = 0;
+    std::uint64_t timestampNs = 0;
+    const bool fresh = ReadTrackedControllerWorldPose(
+        position, rotation, sampleId, timestampNs);
+    fearvr::TrackingVector swingGripPositionMeters{};
+    fearvr::TrackingQuaternion swingAimRotation{};
+    std::uint64_t swingSampleId = 0;
+    std::uint64_t swingTimestampNs = 0;
+    const bool swingPoseFresh = ReadControllerSwingPose(
+        swingGripPositionMeters, swingAimRotation,
+        swingSampleId, swingTimestampNs);
+    if (!fresh) {
+        bool trackingWasActive = false;
+        AcquireSRWLockExclusive(&g_physicalMeleeLock);
+        trackingWasActive = g_physicalMeleeState.havePose;
+        if (trackingWasActive) {
+            ResetPhysicalMeleeKinematics(
+                g_physicalMeleeState,
+                PhysicalMeleeResetReason::TrackingLost);
+        }
+        ResetPhysicalMeleeKinematics(
+            g_physicalMeleeSwingKinematicsState,
+            PhysicalMeleeResetReason::TrackingLost);
+        ResetPhysicalMeleeContactState(g_physicalMeleeContactState);
+        ResetPhysicalMeleeSwingAttack(
+            g_physicalMeleeSwingAttackState);
+        g_physicalMeleeFrame = {};
+        g_physicalMeleeFrame.resetReason =
+            PhysicalMeleeResetReason::TrackingLost;
+        g_physicalMeleeSampleId = 0;
+        g_physicalMeleeSampleTick = 0;
+        g_physicalMeleeSwingSampleId = 0;
+        g_physicalMeleeSwingSampleTick = 0;
+        g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+        ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+        InterlockedExchange(&g_physicalMeleeDamageQualified, 0);
+        if (trackingWasActive && g_log != nullptr) {
+            g_log(
+                "m5_physical_melee_tracking_lost",
+                "history_cleared=1 engine_writes=0");
+        }
+        return;
+    }
+
+    PhysicalMeleeFrame frame{};
+    PhysicalMeleeFrame swingFrame{};
+    PhysicalMeleeSwingAttackResult swingAttack{};
+    PhysicalMeleeProfile sampledProfile{};
+    bool newSample = false;
+    bool newSwingSample = false;
+    bool contactRearmed = false;
+    const ULONGLONG now = GetTickCount64();
+    const bool swingAttackContext = ProcessOwnsForegroundWindow() &&
+        !VrToolMenuIsOpen() &&
+        ReadRetailGameState(g_interfaceManager) ==
+            kCondemnedGameStatePlaying;
+    std::int32_t toolSettingsWeaponIndex = -1;
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    toolSettingsWeaponIndex = g_physicalMeleeProfileWeaponIndex;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    const ToolMenuMeleeSettings toolSettings =
+        ReadVrToolMenuMeleeSettings(toolSettingsWeaponIndex);
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    if (toolSettingsWeaponIndex ==
+        g_physicalMeleeProfileWeaponIndex) {
+        ApplyToolMenuMeleeSettings(
+            toolSettings, g_physicalMeleeProfile);
+    }
+    if (sampleId != g_physicalMeleeSampleId) {
+        const PhysicalMeleePose pose{
+            {position[0], position[1], position[2]},
+            {rotation[0], rotation[1], rotation[2], rotation[3]}};
+        frame = UpdatePhysicalMeleeKinematics(
+            g_physicalMeleeState, pose, true, timestampNs,
+            g_physicalMeleeProfile);
+        g_physicalMeleeFrame = frame;
+        g_physicalMeleeSampleId = sampleId;
+        g_physicalMeleeSampleTick = now;
+        contactRearmed = UpdatePhysicalMeleeContactSeparation(
+            g_physicalMeleeContactState,
+            frame.currentTipUnits, frame.poseValid,
+            g_physicalMeleeProfile);
+        sampledProfile = g_physicalMeleeProfile;
+        newSample = true;
+    }
+    if (swingPoseFresh &&
+        swingSampleId != g_physicalMeleeSwingSampleId) {
+        const PhysicalMeleePose swingPose{
+            PhysicalMeleeScale(
+                swingGripPositionMeters,
+                g_physicalMeleeProfile.unitsPerMeter),
+            swingAimRotation};
+        swingFrame = UpdatePhysicalMeleeKinematics(
+            g_physicalMeleeSwingKinematicsState,
+            swingPose, true, swingTimestampNs,
+            g_physicalMeleeProfile);
+        g_physicalMeleeSwingSampleId = swingSampleId;
+        g_physicalMeleeSwingSampleTick = now;
+        g_physicalMeleeSwingSpeedMetersPerSecond =
+            swingFrame.sweepValid
+                ? swingFrame.impactSpeedMetersPerSecond
+                : 0.0F;
+        swingAttack = UpdatePhysicalMeleeSwingAttack(
+            g_physicalMeleeSwingAttackState, swingFrame,
+            static_cast<std::uint64_t>(now),
+            swingAttackContext, g_physicalMeleeProfile);
+        sampledProfile = g_physicalMeleeProfile;
+        newSwingSample = true;
+    } else if (!swingPoseFresh) {
+        ResetPhysicalMeleeKinematics(
+            g_physicalMeleeSwingKinematicsState,
+            PhysicalMeleeResetReason::TrackingLost);
+        ResetPhysicalMeleeSwingAttack(
+            g_physicalMeleeSwingAttackState);
+        g_physicalMeleeSwingSampleId = 0;
+        g_physicalMeleeSwingSampleTick = 0;
+        g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    if ((!newSample && !newSwingSample) || g_log == nullptr) {
+        return;
+    }
+
+    if (swingAttack.triggered) {
+        const LONG trigger = InterlockedIncrement(
+            &g_physicalMeleeSwingAttackTriggered);
+        if (trigger <= 512) {
+            char triggerDetail[384]{};
+            std::snprintf(
+                triggerDetail, sizeof(triggerDetail),
+                "trigger=%ld sample_id=%llu profile=%s "
+                "speed_mps=%.3f threshold_mps=%.3f "
+                "pulse_ms=%u cooldown_ms=%u "
+                "motion_space=openxr_tracking "
+                "output=retail_fire_command_17",
+                trigger,
+                static_cast<unsigned long long>(swingSampleId),
+                PhysicalMeleeProfileName(sampledProfile.id),
+                swingFrame.impactSpeedMetersPerSecond,
+                sampledProfile
+                    .swingAttackTriggerSpeedMetersPerSecond,
+                sampledProfile.swingAttackPulseMilliseconds,
+                sampledProfile.swingAttackCooldownMilliseconds);
+            g_log(
+                "m5_physical_melee_swing_attack_triggered",
+                triggerDetail);
+        }
+    }
+
+    if (!newSample) {
+        return;
+    }
+
+    if (contactRearmed) {
+        const LONG rearm = InterlockedIncrement(
+            &g_physicalMeleeContactRearmed);
+        if (rearm <= 512) {
+            char rearmDetail[256]{};
+            std::snprintf(
+                rearmDetail, sizeof(rearmDetail),
+                "rearm=%ld sample_id=%llu normal_separation_m=0.12 "
+                "native_impact_dispatch=blocked",
+                rearm,
+                static_cast<unsigned long long>(sampleId));
+            g_log(
+                "m5_physical_melee_contact_rearmed",
+                rearmDetail);
+        }
+    }
+
+    const LONG sampleCall = InterlockedIncrement(
+        &g_physicalMeleeSampleCalls);
+    const LONG wasDamageQualified = InterlockedExchange(
+        &g_physicalMeleeDamageQualified,
+        frame.damageQualified ? 1 : 0);
+    const bool logSample = sampleCall <= 4 ||
+        (frame.damageQualified && wasDamageQualified == 0) ||
+        frame.resetReason ==
+            PhysicalMeleeResetReason::InsufficientSampleInterval ||
+        frame.resetReason ==
+            PhysicalMeleeResetReason::ExcessiveSampleGap ||
+        frame.resetReason ==
+            PhysicalMeleeResetReason::ExcessiveTravel;
+    if (!logSample || sampleCall > 512) {
+        return;
+    }
+    char detail[896]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "sample_call=%ld sample_id=%llu timestamp_ns=%llu "
+        "base=(%.3f,%.3f,%.3f) tip=(%.3f,%.3f,%.3f) "
+        "sweep_valid=%u sweep_m=%.4f speed_mps=%.3f "
+        "energy_j=%.3f damage_qualified=%u reset=%s "
+        "profile=%s engine_writes=0",
+        sampleCall,
+        static_cast<unsigned long long>(sampleId),
+        static_cast<unsigned long long>(timestampNs),
+        frame.currentBaseUnits.x, frame.currentBaseUnits.y,
+        frame.currentBaseUnits.z, frame.currentTipUnits.x,
+        frame.currentTipUnits.y, frame.currentTipUnits.z,
+        frame.sweepValid ? 1U : 0U,
+        frame.sweepDistanceMeters,
+        frame.impactSpeedMetersPerSecond,
+        frame.impactEnergyJoules,
+        frame.damageQualified ? 1U : 0U,
+        PhysicalMeleeResetReasonName(frame.resetReason),
+        PhysicalMeleeProfileName(sampledProfile.id));
+    g_log("m5_physical_melee_sample", detail);
+}
+
+void SelectPhysicalMeleeProfileForWeaponIndex(
+    std::int32_t weaponIndex) noexcept {
+    PhysicalMeleeProfile selected =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    ApplyToolMenuMeleeSettings(
+        ReadVrToolMenuMeleeSettings(weaponIndex), selected);
+    bool changed = false;
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    if (weaponIndex != g_physicalMeleeProfileWeaponIndex) {
+        g_physicalMeleeProfileWeaponIndex = weaponIndex;
+        g_physicalMeleeProfile = selected;
+        g_physicalMeleeState = {};
+        g_physicalMeleeSwingKinematicsState = {};
+        g_physicalMeleeFrame = {};
+        g_physicalMeleeContactState = {};
+        g_physicalMeleeSwingAttackState = {};
+        g_physicalMeleeSampleId = 0;
+        g_physicalMeleeSampleTick = 0;
+        g_physicalMeleeSwingSampleId = 0;
+        g_physicalMeleeSwingSampleTick = 0;
+        g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+        changed = true;
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    if (!changed) {
+        return;
+    }
+    InterlockedExchange(&g_physicalMeleeDamageQualified, 0);
+    if (g_log != nullptr) {
+        char detail[640]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s mass_kg=%.2f "
+            "handling_weight=%.2f positional_follow=%.2f "
+            "rotational_follow=%.2f catch_up=%.2f damping_ratio=%.2f "
+            "swing_attack=%u swing_trigger_mps=%.2f "
+            "swing_rearm_mps=%.2f swing_pulse_ms=%u "
+            "swing_cooldown_ms=%u "
+            "grip_position=(%.3f,%.3f,%.3f) "
+            "grip_rotation=(%.6f,%.6f,%.6f,%.6f) "
+            "kinematics_reset=1",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(selected.id),
+            selected.massKilograms, selected.handlingWeight,
+            selected.positionalFollow, selected.rotationalFollow,
+            selected.catchUpStrength, selected.dampingRatio,
+            selected.swingAttackEnabled ? 1U : 0U,
+            selected.swingAttackTriggerSpeedMetersPerSecond,
+            selected.swingAttackRearmSpeedMetersPerSecond,
+            selected.swingAttackPulseMilliseconds,
+            selected.swingAttackCooldownMilliseconds,
+            selected.modelLocalGripPositionUnits.x,
+            selected.modelLocalGripPositionUnits.y,
+            selected.modelLocalGripPositionUnits.z,
+            selected.modelLocalGripRotation.x,
+            selected.modelLocalGripRotation.y,
+            selected.modelLocalGripRotation.z,
+            selected.modelLocalGripRotation.w);
+        g_log("m5_physical_melee_profile_selected", detail);
+    }
+}
+
+void UpdateEquippedWeaponVisualSource() noexcept {
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeVisualProxyEnabled, 0, 0) == 0 ||
+        g_gameClientBase == nullptr) {
+        return;
+    }
+    if (g_interfaceManager != nullptr &&
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        SelectPhysicalMeleeProfileForWeaponIndex(-1);
+        InvalidatePhysicalMeleeVisualProxySource();
+        return;
+    }
+
+    void* weaponManager = nullptr;
+    std::int32_t currentWeaponIndex = -1;
+    void* const* currentWeaponReference = nullptr;
+    void* currentWeapon = nullptr;
+    void* const* modelObjectReference = nullptr;
+    void* modelObject = nullptr;
+    bool readable = false;
+    __try {
+        std::memcpy(
+            &weaponManager,
+            g_gameClientBase + kWeaponManagerGlobalRva,
+            sizeof(weaponManager));
+        if (weaponManager != nullptr) {
+            currentWeaponIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    static_cast<unsigned char*>(weaponManager) +
+                    kCurrentWeaponIndexOffset);
+        }
+        if (weaponManager != nullptr && currentWeaponIndex != -1) {
+            currentWeaponReference =
+                reinterpret_cast<void* const*>(
+                    static_cast<unsigned char*>(weaponManager) +
+                    kCurrentWeaponOffset);
+            std::memcpy(
+                &currentWeapon, currentWeaponReference,
+                sizeof(currentWeapon));
+        }
+        if (currentWeapon != nullptr) {
+            modelObjectReference =
+                reinterpret_cast<void* const*>(
+                    static_cast<unsigned char*>(currentWeapon) +
+                    kRightWeaponModelObjectOffset);
+            std::memcpy(
+                &modelObject, modelObjectReference,
+                sizeof(modelObject));
+        }
+        readable = weaponManager != nullptr &&
+            currentWeaponIndex != -1 &&
+            currentWeaponReference != nullptr &&
+            currentWeapon != nullptr &&
+            modelObjectReference != nullptr &&
+            modelObject != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        readable = false;
+    }
+    if (!readable) {
+        SelectPhysicalMeleeProfileForWeaponIndex(-1);
+        InvalidatePhysicalMeleeVisualProxySource();
+        return;
+    }
+
+    SelectPhysicalMeleeProfileForWeaponIndex(currentWeaponIndex);
+
+    float localGripPosition[3]{};
+    float localGripRotation[4]{};
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    localGripPosition[0] =
+        g_physicalMeleeProfile.modelLocalGripPositionUnits.x;
+    localGripPosition[1] =
+        g_physicalMeleeProfile.modelLocalGripPositionUnits.y;
+    localGripPosition[2] =
+        g_physicalMeleeProfile.modelLocalGripPositionUnits.z;
+    localGripRotation[0] =
+        g_physicalMeleeProfile.modelLocalGripRotation.x;
+    localGripRotation[1] =
+        g_physicalMeleeProfile.modelLocalGripRotation.y;
+    localGripRotation[2] =
+        g_physicalMeleeProfile.modelLocalGripRotation.z;
+    localGripRotation[3] =
+        g_physicalMeleeProfile.modelLocalGripRotation.w;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    PublishEquippedWeaponVisualProxySource(
+        currentWeaponReference, currentWeapon,
+        currentWeaponIndex,
+        modelObjectReference, modelObject,
+        localGripPosition, localGripRotation);
+}
+
+bool AimPathCommand(std::uint32_t command) noexcept {
+    return command == kCondemnedFireCommand ||
+        command == kCondemnedBlockCommand ||
+        command == kCondemnedToggleMeleeCommand ||
+        command == kCondemnedStunGunCommand;
+}
+
+void LogAimPathCommandEdge(
+    std::uint32_t command,
+    LONG active,
+    bool controllerApplied,
+    float retailValue,
+    float outputValue) noexcept {
+    if (InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) == 0 ||
+        !AimPathCommand(command) || g_log == nullptr) {
+        return;
+    }
+    VectorAbi controllerForward{};
+    const bool controllerAim = ReadControllerForward(controllerForward);
+    char stack[192]{};
+    FormatGameClientStack(stack, sizeof(stack));
+    char detail[512]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "command=%u edge=%s controller_applied=%u "
+        "retail_value=%.3f output_value=%.3f "
+        "controller_aim_valid=%u controller_forward=(%.4f,%.4f,%.4f) "
+        "gameorig_stack_rvas=%s",
+        command, active != 0 ? "down" : "up",
+        controllerApplied ? 1U : 0U, retailValue, outputValue,
+        controllerAim ? 1U : 0U,
+        controllerForward.x, controllerForward.y, controllerForward.z,
+        stack);
+    g_log("m5_aim_path_command_edge", detail);
 }
 
 struct InterfaceArrayAbi {
@@ -434,6 +1240,8 @@ void ReportCoreActionTransition(
     const bool controllerApplied = action.active &&
         std::isfinite(action.value) && std::isfinite(retailValue) &&
         std::fabs(action.value) > std::fabs(retailValue);
+    LogAimPathCommandEdge(
+        command, active, controllerApplied, retailValue, outputValue);
     RequestCoreActionHaptic(command, controllerApplied);
     if (g_log != nullptr) {
         char detail[256]{};
@@ -493,8 +1301,11 @@ float __fastcall HookGetBindingValue(
             &g_locomotionEnabled, 0, 0) != 0) {
         FearVrInputState input{};
         const bool usable = ReadUsableControllerInput(input);
+        const bool calibrationCaptured =
+            WeaponGripCalibrationCapturesInput(input, usable);
         const LocomotionDirections directions =
-            ResolveLocomotionDirections(input, usable);
+            ResolveLocomotionDirections(
+                input, usable && !calibrationCaptured);
         ReportDirectionTransition(DirectionMask(directions));
         if (DirectionActive(binding->command, directions)) {
             return ActiveBindingValue(*binding);
@@ -509,8 +1320,11 @@ float __fastcall HookGetBindingValue(
             ReadRetailGameState(g_interfaceManager);
         const bool usable = ReadUsableControllerInput(input) &&
             retailGameState == kCondemnedGameStatePlaying;
+        const bool calibrationCaptured =
+            WeaponGripCalibrationCapturesInput(input, usable);
         const ActivateValue activate =
-            ResolveActivateValue(input, usable);
+            ResolveActivateValue(
+                input, usable && !calibrationCaptured);
         const float outputValue =
             MergeActivateWithRetail(original, activate);
         ReportInteractionTransition(
@@ -526,8 +1340,16 @@ float __fastcall HookGetBindingValue(
             ReadRetailGameState(g_interfaceManager);
         const bool usable = ReadUsableControllerInput(input) &&
             retailGameState == kCondemnedGameStatePlaying;
-        const CoreActionValue action = ResolveCoreActionValue(
-            input, usable, binding->command);
+        const bool calibrationCaptured =
+            WeaponGripCalibrationCapturesInput(input, usable);
+        CoreActionValue action = ResolveCoreActionValue(
+            input, usable && !calibrationCaptured,
+            binding->command);
+        if (binding->command == kCondemnedFireCommand &&
+            ReadPhysicalMeleeSwingAttackActive(
+                usable && !calibrationCaptured)) {
+            action = {ActiveBindingValue(*binding), true};
+        }
         const float outputValue = MergeCoreActionWithRetail(
             original, action);
         ReportCoreActionTransition(
@@ -546,6 +1368,27 @@ float __fastcall HookGetExtremalCommandValue(
     (void)ignoredEdx;
     const float retailValue =
         g_originalGetExtremalCommandValue(bindManager, command);
+    UpdatePhysicalMeleeProbe();
+    if (command == kCondemnedYawAccelCommand) {
+        UpdateEquippedWeaponVisualSource();
+    }
+    if ((command == kCondemnedPitchCommand ||
+         command == kCondemnedYawCommand) &&
+        InterlockedCompareExchange(
+            &g_headAimInputEnabled, 0, 0) != 0 &&
+        TrackedHeadAimIsFresh()) {
+        if (retailValue != 0.0F &&
+            InterlockedCompareExchange(
+                &g_mouseLookSuppressionLogged, 1, 0) == 0 &&
+            g_log != nullptr) {
+            g_log(
+                "m5_vr_mouse_look_suppressed",
+                "commands=11,12 replacement=0 "
+                "condition=fresh_focused_hmd_look "
+                "keyboard_mouse_fallback_on_stale=1");
+        }
+        return 0.0F;
+    }
     if (command != kCondemnedYawAccelCommand ||
         g_getInputState == nullptr) {
         return retailValue;
@@ -553,11 +1396,509 @@ float __fastcall HookGetExtremalCommandValue(
 
     FearVrInputState input{};
     const bool usable = ReadUsableControllerInput(input);
-    const TurningValue turning = ResolveTurningValue(input, usable);
+    const bool calibrationCaptured =
+        WeaponGripCalibrationCapturesInput(input, usable);
+    const TurningValue turning = ResolveTurningValue(
+        input, usable && !calibrationCaptured);
     const float outputValue = MergeTurningWithRetail(
         retailValue, turning);
     ReportTurnTransition(turning, retailValue, outputValue);
     return outputValue;
+}
+
+bool __fastcall HookGetFireVectors(
+    const void* weapon,
+    void* ignoredEdx,
+    VectorAbi& right,
+    VectorAbi& up,
+    VectorAbi& forward,
+    VectorAbi& firePosition) {
+    (void)ignoredEdx;
+    const bool result = g_originalGetFireVectors(
+        weapon, right, up, forward, firePosition);
+    if (InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) != 0 &&
+        g_log != nullptr) {
+        const LONG call = InterlockedIncrement(
+            &g_aimPathFireVectorCalls);
+        if (call <= 512) {
+            VectorAbi controllerForward{};
+            const bool controllerAim =
+                ReadControllerForward(controllerForward);
+            char stack[192]{};
+            FormatGameClientStack(stack, sizeof(stack));
+            char detail[640]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "call=%ld result=%u weapon=%p "
+                "retail_forward=(%.4f,%.4f,%.4f) "
+                "retail_fire_position=(%.3f,%.3f,%.3f) "
+                "controller_aim_valid=%u "
+                "controller_forward=(%.4f,%.4f,%.4f) "
+                "gameorig_stack_rvas=%s",
+                call, result ? 1U : 0U, weapon,
+                forward.x, forward.y, forward.z,
+                firePosition.x, firePosition.y, firePosition.z,
+                controllerAim ? 1U : 0U,
+                controllerForward.x, controllerForward.y,
+                controllerForward.z, stack);
+            g_log("m5_aim_path_fire_vectors", detail);
+        }
+    }
+    float rotation[4]{};
+    if (!result || !ReadTrackedControllerAimRotation(rotation)) {
+        return result;
+    }
+    const fearvr::TrackingQuaternion controller = fearvr::Normalize({
+        rotation[0], rotation[1], rotation[2], rotation[3]});
+    if (!fearvr::IsFinite(controller)) {
+        return result;
+    }
+    const fearvr::TrackingVector controllerRight =
+        fearvr::Rotate(controller, {1.0F, 0.0F, 0.0F});
+    const fearvr::TrackingVector controllerUp =
+        fearvr::Rotate(controller, {0.0F, 1.0F, 0.0F});
+    const fearvr::TrackingVector controllerForward =
+        fearvr::Rotate(controller, {0.0F, 0.0F, 1.0F});
+    if (!fearvr::IsFinite(controllerRight) ||
+        !fearvr::IsFinite(controllerUp) ||
+        !fearvr::IsFinite(controllerForward)) {
+        return result;
+    }
+    right = {
+        controllerRight.x, controllerRight.y, controllerRight.z};
+    up = {controllerUp.x, controllerUp.y, controllerUp.z};
+    forward = {
+        controllerForward.x,
+        controllerForward.y,
+        controllerForward.z};
+    if (InterlockedCompareExchange(
+            &g_controllerFireAimLogged, 1, 0) == 0 &&
+        g_log != nullptr) {
+        g_log(
+            "m5_controller_fire_vectors_active",
+            "target=GameOrig+0x0002AF70 "
+            "direction=right_controller_world_basis "
+            "retail_fire_position_preserved=1 stale_fallback=retail");
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall HookMeleeEnableCollisions(
+    void* controller,
+    void* ignoredEdx,
+    std::uintptr_t argument1,
+    std::uintptr_t argument2,
+    std::uintptr_t argument3,
+    std::uintptr_t argument4,
+    std::uintptr_t argument5) {
+    (void)ignoredEdx;
+    if (InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) != 0 &&
+        g_log != nullptr) {
+        const LONG call = InterlockedIncrement(&g_aimPathMeleeCalls);
+        if (call <= 512) {
+            VectorAbi controllerForward{};
+            const bool controllerAim =
+                ReadControllerForward(controllerForward);
+            char stack[192]{};
+            FormatGameClientStack(stack, sizeof(stack));
+            char detail[704]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "call=%ld controller=%p "
+                "args=(0x%08lX,0x%08lX,0x%08lX,0x%08lX,0x%08lX) "
+                "controller_aim_valid=%u "
+                "controller_forward=(%.4f,%.4f,%.4f) "
+                "gameorig_stack_rvas=%s behavior=pass_through",
+                call, controller,
+                static_cast<unsigned long>(argument1),
+                static_cast<unsigned long>(argument2),
+                static_cast<unsigned long>(argument3),
+                static_cast<unsigned long>(argument4),
+                static_cast<unsigned long>(argument5),
+                controllerAim ? 1U : 0U,
+                controllerForward.x, controllerForward.y,
+                controllerForward.z, stack);
+            g_log("m5_aim_path_melee_collision_enable", detail);
+        }
+    }
+    return g_originalMeleeEnableCollisions(
+        controller, argument1, argument2, argument3, argument4,
+        argument5);
+}
+
+void __fastcall HookMeleeUpdateCollision(
+    void* controller,
+    void* ignoredEdx,
+    void* record) {
+    (void)ignoredEdx;
+    g_originalMeleeUpdateCollision(controller, record);
+    if (InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) == 0 ||
+        g_log == nullptr || record == nullptr) {
+        return;
+    }
+
+    std::uintptr_t sourceObject = 0;
+    std::uintptr_t sourceNode = 0;
+    std::uintptr_t collisionObject = 0;
+    unsigned int attackIndex = 0;
+    unsigned int collisionFinished = 0;
+    bool readable = false;
+    __try {
+        auto* const bytes = static_cast<unsigned char*>(record);
+        std::memcpy(
+            &sourceObject, bytes + 0x38, sizeof(sourceObject));
+        std::memcpy(&sourceNode, bytes + 0x3C, sizeof(sourceNode));
+        std::memcpy(
+            &collisionObject, bytes + 0x40,
+            sizeof(collisionObject));
+        attackIndex = bytes[0x10];
+        collisionFinished = bytes[0x58];
+        readable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        readable = false;
+    }
+    if (!readable || collisionObject == 0) {
+        return;
+    }
+
+    const LONG call = InterlockedIncrement(
+        &g_aimPathMeleeUpdateCalls);
+    if (call > 512) {
+        return;
+    }
+    VectorAbi controllerForward{};
+    const bool controllerAim = ReadControllerForward(controllerForward);
+    int slot = -1;
+    const auto controllerAddress = reinterpret_cast<std::uintptr_t>(
+        controller);
+    const auto recordAddress = reinterpret_cast<std::uintptr_t>(record);
+    if (controllerAddress != 0 && recordAddress >= controllerAddress + 0x18 &&
+        recordAddress < controllerAddress + 0xD8) {
+        slot = static_cast<int>(
+            (recordAddress - (controllerAddress + 0x18)) / 0x60);
+    }
+    char stack[192]{};
+    FormatGameClientStack(stack, sizeof(stack));
+    char detail[896]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "call=%ld slot=%d controller=%p record=%p attack_index=%u "
+        "source_object=0x%08lX source_node=0x%08lX "
+        "collision_object=0x%08lX collision_finished=%u "
+        "controller_aim_valid=%u "
+        "controller_forward=(%.4f,%.4f,%.4f) "
+        "gameorig_stack_rvas=%s behavior=pass_through",
+        call, slot, controller, record, attackIndex,
+        static_cast<unsigned long>(sourceObject),
+        static_cast<unsigned long>(sourceNode),
+        static_cast<unsigned long>(collisionObject),
+        collisionFinished,
+        controllerAim ? 1U : 0U,
+        controllerForward.x, controllerForward.y,
+        controllerForward.z, stack);
+    g_log("m5_aim_path_melee_collision_update", detail);
+}
+
+void* __fastcall HookBuildRigidTransform(
+    void* destination,
+    void* ignoredEdx,
+    const VectorAbi* position,
+    const QuaternionAbi* rotation) {
+    (void)ignoredEdx;
+    const auto* const caller = static_cast<const unsigned char*>(
+        _ReturnAddress());
+    const bool meleeTransformCall = g_gameClientBase != nullptr &&
+        caller == g_gameClientBase +
+            kMeleeBuildRigidTransformReturnRva;
+    if (!meleeTransformCall || position == nullptr ||
+        rotation == nullptr) {
+        return g_originalBuildRigidTransform(
+            destination, position, rotation);
+    }
+
+    VectorAbi retailPosition{};
+    QuaternionAbi retailRotation{};
+    bool readable = false;
+    __try {
+        retailPosition = *position;
+        retailRotation = *rotation;
+        readable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        readable = false;
+    }
+    if (!readable ||
+        !std::isfinite(retailPosition.x) ||
+        !std::isfinite(retailPosition.y) ||
+        !std::isfinite(retailPosition.z) ||
+        !std::isfinite(retailRotation.x) ||
+        !std::isfinite(retailRotation.y) ||
+        !std::isfinite(retailRotation.z) ||
+        !std::isfinite(retailRotation.w)) {
+        return g_originalBuildRigidTransform(
+            destination, position, rotation);
+    }
+
+    VectorAbi appliedPosition = retailPosition;
+    QuaternionAbi appliedRotation = retailRotation;
+    bool physicalWallProxyApplied = false;
+    std::uint64_t physicalSampleId = 0;
+    const bool physicalWallProxyRequested =
+        InterlockedCompareExchange(
+            &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
+    if (physicalWallProxyRequested) {
+        PhysicalMeleeFrame frame{};
+        if (CopyLatestPhysicalMeleeFrame(frame, physicalSampleId)) {
+            const PhysicalMeleeWallProxyTransform proxy =
+                ResolvePhysicalMeleeWallProxyTransform(frame, true);
+            if (proxy.active) {
+                appliedPosition = {
+                    proxy.positionUnits.x,
+                    proxy.positionUnits.y,
+                    proxy.positionUnits.z};
+                appliedRotation = {
+                    proxy.rotation.x,
+                    proxy.rotation.y,
+                    proxy.rotation.z,
+                    proxy.rotation.w};
+                physicalWallProxyApplied = true;
+            }
+        }
+    }
+    bool meleeAimApplied = false;
+    if (!physicalWallProxyRequested &&
+        InterlockedCompareExchange(
+            &g_controllerMeleeAimEnabled, 0, 0) != 0) {
+        float pivot[3]{};
+        float baseRotation[4]{};
+        float controllerRotation[4]{};
+        const bool basisFresh = ReadTrackedMeleeAimBasis(
+            pivot, baseRotation, controllerRotation);
+        const auto resolved =
+            ResolveControllerRelativeMeleeTransform(
+                {retailPosition.x, retailPosition.y, retailPosition.z},
+                {retailRotation.x, retailRotation.y,
+                 retailRotation.z, retailRotation.w},
+                {pivot[0], pivot[1], pivot[2]},
+                {baseRotation[0], baseRotation[1],
+                 baseRotation[2], baseRotation[3]},
+                {controllerRotation[0], controllerRotation[1],
+                 controllerRotation[2], controllerRotation[3]},
+                basisFresh);
+        if (resolved.active) {
+            appliedPosition = {
+                resolved.position.x,
+                resolved.position.y,
+                resolved.position.z};
+            appliedRotation = {
+                resolved.rotation.x,
+                resolved.rotation.y,
+                resolved.rotation.z,
+                resolved.rotation.w};
+            meleeAimApplied = true;
+        }
+    }
+
+    void* const result = g_originalBuildRigidTransform(
+        destination, &appliedPosition, &appliedRotation);
+    if (physicalWallProxyApplied &&
+        InterlockedCompareExchange(
+            &g_physicalMeleeWallProxyAppliedLogged, 1, 0) == 0 &&
+        g_log != nullptr) {
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "target=GameOrig+0x0000F690 sample_id=%llu "
+            "source=controller_weapon_tip native_impact_dispatch=blocked "
+            "actor_damage=0 stale_fallback=retail_transform",
+            static_cast<unsigned long long>(physicalSampleId));
+        g_log("m5_physical_melee_wall_proxy_active", detail);
+    }
+    if (meleeAimApplied &&
+        InterlockedCompareExchange(
+            &g_controllerMeleeAimLogged, 1, 0) == 0 &&
+        g_log != nullptr) {
+        g_log(
+            "m5_controller_melee_aim_active",
+            "target=GameOrig+0x0000F690 "
+            "source=melee_node_transform "
+            "operation=controller_delta_about_camera_pivot "
+            "retail_swing_timing_and_shape_preserved=1 "
+            "stale_fallback=retail");
+    }
+    if (InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) == 0 ||
+        g_log == nullptr) {
+        return result;
+    }
+    const LONG call = InterlockedIncrement(
+        &g_aimPathMeleeTransformCalls);
+    if (call > 512) {
+        return result;
+    }
+    VectorAbi controllerForward{};
+    const bool controllerAim = ReadControllerForward(controllerForward);
+    char detail[960]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "call=%ld retail_position=(%.3f,%.3f,%.3f) "
+        "applied_position=(%.3f,%.3f,%.3f) "
+        "retail_rotation=(%.5f,%.5f,%.5f,%.5f) "
+        "applied_rotation=(%.5f,%.5f,%.5f,%.5f) "
+        "melee_aim_applied=%u physical_wall_proxy_applied=%u "
+        "physical_sample_id=%llu "
+        "controller_aim_valid=%u "
+        "controller_forward=(%.4f,%.4f,%.4f) "
+        "source=melee_node_transform",
+        call, retailPosition.x, retailPosition.y, retailPosition.z,
+        appliedPosition.x, appliedPosition.y, appliedPosition.z,
+        retailRotation.x, retailRotation.y, retailRotation.z,
+        retailRotation.w,
+        appliedRotation.x, appliedRotation.y, appliedRotation.z,
+        appliedRotation.w, meleeAimApplied ? 1U : 0U,
+        physicalWallProxyApplied ? 1U : 0U,
+        static_cast<unsigned long long>(physicalSampleId),
+        controllerAim ? 1U : 0U,
+        controllerForward.x, controllerForward.y,
+        controllerForward.z);
+    g_log("m5_aim_path_melee_physics_transform", detail);
+    return result;
+}
+
+std::uintptr_t __fastcall HookMeleeImpactDispatch(
+    void* impactController,
+    void* ignoredEdx,
+    std::uintptr_t argument1,
+    std::uintptr_t argument2,
+    std::uintptr_t argument3,
+    std::uintptr_t argument4,
+    std::uintptr_t argument5,
+    std::uintptr_t argument6,
+    std::uintptr_t argument7,
+    std::uintptr_t argument8,
+    std::uintptr_t argument9) {
+    (void)ignoredEdx;
+    const auto* const caller = static_cast<const unsigned char*>(
+        _ReturnAddress());
+    const bool verifiedMeleeCallback = g_gameClientBase != nullptr &&
+        caller == g_gameClientBase +
+            kMeleeImpactDispatchReturnRva;
+    if (!verifiedMeleeCallback ||
+        InterlockedCompareExchange(
+            &g_aimPathProbeEnabled, 0, 0) == 0) {
+        return g_originalMeleeImpactDispatch(
+            impactController, argument1, argument2, argument3,
+            argument4, argument5, argument6, argument7,
+            argument8, argument9);
+    }
+
+    VectorAbi contactPosition{};
+    VectorAbi contactNormal{};
+    const bool contactPositionValid = ReadVectorCandidate(
+        argument4, contactPosition);
+    const bool contactNormalValid = ReadVectorCandidate(
+        argument5, contactNormal);
+    VectorAbi controllerForward{};
+    const bool controllerAim = ReadControllerForward(controllerForward);
+    PhysicalMeleeFrame physicalFrame{};
+    std::uint64_t physicalSampleId = 0;
+    const bool physicalWallProxyEnabled =
+        InterlockedCompareExchange(
+            &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
+    PhysicalMeleeContactQualification physicalContact{};
+    const bool physicalFrameAvailable =
+        InterlockedCompareExchange(
+            &g_physicalMeleeProbeEnabled, 0, 0) != 0 &&
+        (physicalWallProxyEnabled
+             ? EvaluatePhysicalMeleeContact(
+                   argument1, contactPosition, contactNormal,
+                   physicalFrame, physicalSampleId,
+                   physicalContact)
+             : CopyLatestPhysicalMeleeFrame(
+                   physicalFrame, physicalSampleId));
+    if (physicalContact.accepted) {
+        InterlockedIncrement(&g_physicalMeleeContactAccepted);
+    }
+    const bool nativeImpactForwarded =
+        ShouldDispatchPhysicalMeleeNativeImpact(
+            physicalWallProxyEnabled);
+    const std::uintptr_t result = nativeImpactForwarded
+        ? g_originalMeleeImpactDispatch(
+              impactController, argument1, argument2, argument3,
+              argument4, argument5, argument6, argument7,
+              argument8, argument9)
+        : 0U;
+    if (g_log == nullptr) {
+        return result;
+    }
+    const LONG call = InterlockedIncrement(
+        &g_aimPathMeleeImpactCalls);
+    if (call > 512) {
+        return result;
+    }
+    char detail[1792]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "call=%ld impact_controller=%p "
+        "args=(0x%08lX,0x%08lX,0x%08lX,0x%08lX,0x%08lX,"
+        "0x%08lX,0x%08lX,0x%08lX,0x%08lX) "
+        "contact_position_valid=%u "
+        "contact_position=(%.3f,%.3f,%.3f) "
+        "contact_normal_valid=%u "
+        "contact_normal=(%.4f,%.4f,%.4f) "
+        "controller_aim_valid=%u "
+        "controller_forward=(%.4f,%.4f,%.4f) "
+        "physical_sample_valid=%u physical_sample_id=%llu "
+        "physical_base=(%.3f,%.3f,%.3f) "
+        "physical_tip=(%.3f,%.3f,%.3f) "
+        "physical_sweep_valid=%u physical_speed_mps=%.3f "
+        "physical_energy_j=%.3f physical_damage_qualified=%u "
+        "physical_wall_proxy=%u native_impact_forwarded=%u "
+        "physical_contact_accepted=%u contact_reason=%s "
+        "normal_speed_mps=%.3f normal_energy_j=%.3f "
+        "result=0x%08lX source=melee_collision_callback "
+        "behavior=%s",
+        call, impactController,
+        static_cast<unsigned long>(argument1),
+        static_cast<unsigned long>(argument2),
+        static_cast<unsigned long>(argument3),
+        static_cast<unsigned long>(argument4),
+        static_cast<unsigned long>(argument5),
+        static_cast<unsigned long>(argument6),
+        static_cast<unsigned long>(argument7),
+        static_cast<unsigned long>(argument8),
+        static_cast<unsigned long>(argument9),
+        contactPositionValid ? 1U : 0U,
+        contactPosition.x, contactPosition.y, contactPosition.z,
+        contactNormalValid ? 1U : 0U,
+        contactNormal.x, contactNormal.y, contactNormal.z,
+        controllerAim ? 1U : 0U,
+        controllerForward.x, controllerForward.y,
+        controllerForward.z,
+        physicalFrameAvailable ? 1U : 0U,
+        static_cast<unsigned long long>(physicalSampleId),
+        physicalFrame.currentBaseUnits.x,
+        physicalFrame.currentBaseUnits.y,
+        physicalFrame.currentBaseUnits.z,
+        physicalFrame.currentTipUnits.x,
+        physicalFrame.currentTipUnits.y,
+        physicalFrame.currentTipUnits.z,
+        physicalFrame.sweepValid ? 1U : 0U,
+        physicalFrame.impactSpeedMetersPerSecond,
+        physicalFrame.impactEnergyJoules,
+        physicalFrame.damageQualified ? 1U : 0U,
+        physicalWallProxyEnabled ? 1U : 0U,
+        nativeImpactForwarded ? 1U : 0U,
+        physicalContact.accepted ? 1U : 0U,
+        PhysicalMeleeContactReasonName(physicalContact.reason),
+        physicalContact.normalSpeedMetersPerSecond,
+        physicalContact.normalEnergyJoules,
+        static_cast<unsigned long>(result),
+        nativeImpactForwarded ? "pass_through" : "wall_probe_blocked");
+    g_log("m5_aim_path_melee_impact_dispatch", detail);
+    return result;
 }
 
 const char* RetailGameStateName(int state) noexcept {
@@ -610,6 +1951,10 @@ int PublishMenuRenderState() noexcept {
         : kUnknownRetailGameState;
     const LONG previous = InterlockedExchange(
         &g_lastPublishedRetailGameState, publishedState);
+    if (previous == kCondemnedGameStatePlaying &&
+        publishedState != kCondemnedGameStatePlaying) {
+        InvalidatePhysicalMeleeVisualProxySource();
+    }
     if (previous == publishedState) {
         return state;
     }
@@ -659,8 +2004,11 @@ void PollMenuToggle(
     FearVrInputState input{};
     const bool usable = ReadUsableControllerInput(input) &&
         CondemnedGameStateAllowsMenuToggle(retailGameState);
+    const bool calibrationCaptured =
+        WeaponGripCalibrationCapturesInput(input, usable);
     if (!ConsumeMenuTogglePress(
-            g_menuToggleLatch, input, usable)) {
+            g_menuToggleLatch, input,
+            usable && !calibrationCaptured)) {
         return;
     }
 
@@ -750,6 +2098,158 @@ bool TurningTargetMatches(const unsigned char* target) noexcept {
                std::memcmp(
                    target + 0x63, kGetExtremalCommandValueTail,
                    sizeof(kGetExtremalCommandValueTail)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool FireVectorsTargetMatches(const unsigned char* target) noexcept {
+    if (target == nullptr) {
+        return false;
+    }
+    __try {
+        return std::memcmp(
+                   target, kGetFireVectorsPrefix,
+                   sizeof(kGetFireVectorsPrefix)) == 0 &&
+               std::memcmp(
+                   target + 0x08, kGetFireVectorsStackInit,
+                   sizeof(kGetFireVectorsStackInit)) == 0 &&
+               std::memcmp(
+                   target + 0x2A, kGetFireVectorsCameraProbe,
+                   sizeof(kGetFireVectorsCameraProbe)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool MeleeEnableCollisionsTargetMatches(
+    HMODULE gameClientModule,
+    const unsigned char* target) noexcept {
+    if (gameClientModule == nullptr || target == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    __try {
+        std::uint32_t clientGlobal = 0;
+        std::uint32_t limitText = 0;
+        std::memcpy(&clientGlobal, target + 7, sizeof(clientGlobal));
+        std::memcpy(&limitText, target + 0x10F, sizeof(limitText));
+        return std::memcmp(
+                   target, kMeleeEnableCollisionsPrefix,
+                   sizeof(kMeleeEnableCollisionsPrefix)) == 0 &&
+               clientGlobal == static_cast<std::uint32_t>(
+                   reinterpret_cast<std::uintptr_t>(
+                       base + kMeleeClientGlobalRva)) &&
+               std::memcmp(
+                   target + 0x0B, kMeleeEnableCollisionsBodyPrefix,
+                   sizeof(kMeleeEnableCollisionsBodyPrefix)) == 0 &&
+               std::memcmp(
+                   target + 0x106,
+                   kMeleeCollisionLimitTextReferencePrefix,
+                   sizeof(kMeleeCollisionLimitTextReferencePrefix)) == 0 &&
+               limitText == static_cast<std::uint32_t>(
+                   reinterpret_cast<std::uintptr_t>(
+                       base + kMeleeCollisionLimitTextRva));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool MeleeUpdateCollisionTargetMatches(
+    const unsigned char* target) noexcept {
+    if (target == nullptr) {
+        return false;
+    }
+    __try {
+        return std::memcmp(
+                   target, kMeleeUpdateCollisionPrefix,
+                   sizeof(kMeleeUpdateCollisionPrefix)) == 0 &&
+               std::memcmp(
+                   target + 0x7B, kMeleeUpdateCollisionNodeQuery,
+                   sizeof(kMeleeUpdateCollisionNodeQuery)) == 0 &&
+               std::memcmp(
+                   target + 0xE2, kMeleeUpdateCollisionSetTransform,
+                   sizeof(kMeleeUpdateCollisionSetTransform)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool BuildRigidTransformTargetMatches(
+    const unsigned char* target) noexcept {
+    if (target == nullptr) {
+        return false;
+    }
+    __try {
+        return std::memcmp(
+                   target, kBuildRigidTransformPrefix,
+                   sizeof(kBuildRigidTransformPrefix)) == 0 &&
+               std::memcmp(
+                   target + 0x3D, kBuildRigidTransformTail,
+                   sizeof(kBuildRigidTransformTail)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool MeleeImpactDispatchTargetMatches(
+    HMODULE gameClientModule,
+    const unsigned char* target) noexcept {
+    if (gameClientModule == nullptr || target == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    auto* const callbackCallsite =
+        base + kMeleeCollisionCallbackRva + 0x36DU;
+    auto* const dispatchCall =
+        base + kMeleeImpactDispatchCallRva;
+    __try {
+        std::int32_t relativeTarget = 0;
+        std::memcpy(
+            &relativeTarget, dispatchCall + 1,
+            sizeof(relativeTarget));
+        const auto resolvedTarget =
+            reinterpret_cast<std::uintptr_t>(dispatchCall + 5) +
+            static_cast<std::intptr_t>(relativeTarget);
+        return std::memcmp(
+                   target, kMeleeImpactDispatchPrefix,
+                   sizeof(kMeleeImpactDispatchPrefix)) == 0 &&
+               std::memcmp(
+                   callbackCallsite,
+                   kMeleeImpactDispatchCallsitePrefix,
+                   sizeof(kMeleeImpactDispatchCallsitePrefix)) == 0 &&
+               dispatchCall[0] == 0xE8 &&
+               resolvedTarget ==
+                   reinterpret_cast<std::uintptr_t>(target);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool EquippedWeaponLayoutMatches(
+    HMODULE gameClientModule) noexcept {
+    if (gameClientModule == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    auto* const getCurrentWeapon =
+        base + kGetCurrentWeaponRva;
+    auto* const setWeaponTransform =
+        base + kSetWeaponTransformRva;
+    __try {
+        return std::memcmp(
+                   getCurrentWeapon, kGetCurrentWeaponBody,
+                   sizeof(kGetCurrentWeaponBody)) == 0 &&
+               std::memcmp(
+                   setWeaponTransform, kSetWeaponTransformPrefix,
+                   sizeof(kSetWeaponTransformPrefix)) == 0 &&
+               std::memcmp(
+                   setWeaponTransform + 0x1C,
+                   kSetWeaponTransformSecondModel,
+                   sizeof(kSetWeaponTransformSecondModel)) == 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -1165,6 +2665,378 @@ bool InstallBindingTurningHook(
     return true;
 }
 
+bool InstallHeadAimHooks(
+    HMODULE gameClientModule,
+    RendererProbeLogFunction log,
+    bool aimPathProbe,
+    bool controllerMeleeAim,
+    bool physicalMeleeProbe,
+    bool physicalMeleeWallProxy,
+    bool physicalMeleeVisualProxy,
+    bool weaponGripCalibration) noexcept {
+    if (gameClientModule == nullptr || log == nullptr) {
+        return false;
+    }
+    if (g_turningHookTarget == nullptr ||
+        g_originalGetExtremalCommandValue == nullptr) {
+        log(
+            "m5_head_aim_rejected",
+            "verified_extremal_binding_hook_required");
+        return false;
+    }
+    if (controllerMeleeAim && !aimPathProbe) {
+        log(
+            "m5_controller_melee_aim_rejected",
+            "aim_path_probe_required_for_initial_live_gate");
+        return false;
+    }
+    if (physicalMeleeProbe && !aimPathProbe) {
+        log(
+            "m5_physical_melee_probe_rejected",
+            "aim_path_probe_required_for_native_impact_trace");
+        return false;
+    }
+    if (physicalMeleeWallProxy && !physicalMeleeProbe) {
+        log(
+            "m5_physical_melee_wall_proxy_rejected",
+            "physical_melee_probe_required");
+        return false;
+    }
+    if (physicalMeleeWallProxy && controllerMeleeAim) {
+        log(
+            "m5_physical_melee_wall_proxy_rejected",
+            "controller_melee_aim_conflicts_with_physical_proxy");
+        return false;
+    }
+    if (physicalMeleeVisualProxy && !physicalMeleeWallProxy) {
+        log(
+            "m5_physical_melee_visual_proxy_rejected",
+            "physical_melee_wall_proxy_required");
+        return false;
+    }
+    if (weaponGripCalibration && !physicalMeleeVisualProxy) {
+        log(
+            "m5_weapon_grip_calibration_rejected",
+            "physical_melee_visual_proxy_required");
+        return false;
+    }
+    auto* const fireVectors =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kGetFireVectorsRva;
+    auto* const meleeEnableCollisions =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kMeleeEnableCollisionsRva;
+    auto* const meleeUpdateCollision =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kMeleeUpdateCollisionRva;
+    auto* const buildRigidTransform =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kBuildRigidTransformRva;
+    auto* const meleeImpactDispatch =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kMeleeImpactDispatchRva;
+    if (!FireVectorsTargetMatches(fireVectors)) {
+        log(
+            "m5_head_aim_rejected",
+            "GameOrig_rva_0002af70_fire_vector_signature_mismatch");
+        return false;
+    }
+    if (aimPathProbe && !MeleeEnableCollisionsTargetMatches(
+            gameClientModule, meleeEnableCollisions)) {
+        log(
+            "m5_aim_path_rejected",
+            "GameOrig_rva_0001fd00_melee_collision_signature_mismatch");
+        return false;
+    }
+    if (aimPathProbe && !MeleeUpdateCollisionTargetMatches(
+            meleeUpdateCollision)) {
+        log(
+            "m5_aim_path_rejected",
+            "GameOrig_rva_0001fc00_melee_update_signature_mismatch");
+        return false;
+    }
+    if (aimPathProbe && !BuildRigidTransformTargetMatches(
+            buildRigidTransform)) {
+        log(
+            "m5_aim_path_rejected",
+            "GameOrig_rva_0000f690_transform_builder_signature_mismatch");
+        return false;
+    }
+    if (aimPathProbe && !MeleeImpactDispatchTargetMatches(
+            gameClientModule, meleeImpactDispatch)) {
+        log(
+            "m5_aim_path_rejected",
+            "GameOrig_rva_0001f270_melee_impact_signature_mismatch");
+        return false;
+    }
+    if (physicalMeleeVisualProxy &&
+        !EquippedWeaponLayoutMatches(gameClientModule)) {
+        log(
+            "m5_physical_melee_visual_proxy_rejected",
+            "GameOrig_current_weapon_or_model_layout_mismatch");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        log("m5_head_aim_rejected", MH_StatusToString(initialize));
+        return false;
+    }
+    MH_STATUS status = MH_CreateHook(
+        fireVectors,
+        reinterpret_cast<void*>(&HookGetFireVectors),
+        reinterpret_cast<void**>(&g_originalGetFireVectors));
+    if (status == MH_OK) {
+        status = MH_EnableHook(fireVectors);
+    }
+    if (status != MH_OK) {
+        MH_RemoveHook(fireVectors);
+        g_originalGetFireVectors = nullptr;
+        log("m5_head_aim_rejected", MH_StatusToString(status));
+        return false;
+    }
+    if (aimPathProbe) {
+        status = MH_CreateHook(
+            meleeEnableCollisions,
+            reinterpret_cast<void*>(&HookMeleeEnableCollisions),
+            reinterpret_cast<void**>(
+                &g_originalMeleeEnableCollisions));
+        if (status == MH_OK) {
+            status = MH_EnableHook(meleeEnableCollisions);
+        }
+        if (status != MH_OK) {
+            MH_RemoveHook(meleeEnableCollisions);
+            g_originalMeleeEnableCollisions = nullptr;
+            MH_DisableHook(fireVectors);
+            MH_RemoveHook(fireVectors);
+            g_originalGetFireVectors = nullptr;
+            log("m5_aim_path_rejected", MH_StatusToString(status));
+            return false;
+        }
+        status = MH_CreateHook(
+            meleeUpdateCollision,
+            reinterpret_cast<void*>(&HookMeleeUpdateCollision),
+            reinterpret_cast<void**>(
+                &g_originalMeleeUpdateCollision));
+        if (status == MH_OK) {
+            status = MH_EnableHook(meleeUpdateCollision);
+        }
+        if (status != MH_OK) {
+            MH_RemoveHook(meleeUpdateCollision);
+            g_originalMeleeUpdateCollision = nullptr;
+            MH_DisableHook(meleeEnableCollisions);
+            MH_RemoveHook(meleeEnableCollisions);
+            g_originalMeleeEnableCollisions = nullptr;
+            MH_DisableHook(fireVectors);
+            MH_RemoveHook(fireVectors);
+            g_originalGetFireVectors = nullptr;
+            log("m5_aim_path_rejected", MH_StatusToString(status));
+            return false;
+        }
+        status = MH_CreateHook(
+            buildRigidTransform,
+            reinterpret_cast<void*>(&HookBuildRigidTransform),
+            reinterpret_cast<void**>(
+                &g_originalBuildRigidTransform));
+        if (status == MH_OK) {
+            status = MH_EnableHook(buildRigidTransform);
+        }
+        if (status != MH_OK) {
+            MH_RemoveHook(buildRigidTransform);
+            g_originalBuildRigidTransform = nullptr;
+            MH_DisableHook(meleeUpdateCollision);
+            MH_RemoveHook(meleeUpdateCollision);
+            g_originalMeleeUpdateCollision = nullptr;
+            MH_DisableHook(meleeEnableCollisions);
+            MH_RemoveHook(meleeEnableCollisions);
+            g_originalMeleeEnableCollisions = nullptr;
+            MH_DisableHook(fireVectors);
+            MH_RemoveHook(fireVectors);
+            g_originalGetFireVectors = nullptr;
+            log("m5_aim_path_rejected", MH_StatusToString(status));
+            return false;
+        }
+        status = MH_CreateHook(
+            meleeImpactDispatch,
+            reinterpret_cast<void*>(&HookMeleeImpactDispatch),
+            reinterpret_cast<void**>(
+                &g_originalMeleeImpactDispatch));
+        if (status == MH_OK) {
+            status = MH_EnableHook(meleeImpactDispatch);
+        }
+        if (status != MH_OK) {
+            MH_RemoveHook(meleeImpactDispatch);
+            g_originalMeleeImpactDispatch = nullptr;
+            MH_DisableHook(buildRigidTransform);
+            MH_RemoveHook(buildRigidTransform);
+            g_originalBuildRigidTransform = nullptr;
+            MH_DisableHook(meleeUpdateCollision);
+            MH_RemoveHook(meleeUpdateCollision);
+            g_originalMeleeUpdateCollision = nullptr;
+            MH_DisableHook(meleeEnableCollisions);
+            MH_RemoveHook(meleeEnableCollisions);
+            g_originalMeleeEnableCollisions = nullptr;
+            MH_DisableHook(fireVectors);
+            MH_RemoveHook(fireVectors);
+            g_originalGetFireVectors = nullptr;
+            log("m5_aim_path_rejected", MH_StatusToString(status));
+            return false;
+        }
+    }
+
+    g_fireVectorsHookTarget = fireVectors;
+    g_meleeEnableCollisionsHookTarget = aimPathProbe
+        ? meleeEnableCollisions
+        : nullptr;
+    g_meleeUpdateCollisionHookTarget = aimPathProbe
+        ? meleeUpdateCollision
+        : nullptr;
+    g_buildRigidTransformHookTarget = aimPathProbe
+        ? buildRigidTransform
+        : nullptr;
+    g_meleeImpactDispatchHookTarget = aimPathProbe
+        ? meleeImpactDispatch
+        : nullptr;
+    g_gameClientBase = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    g_log = log;
+    InterlockedExchange(&g_mouseLookSuppressionLogged, 0);
+    InterlockedExchange(&g_controllerFireAimLogged, 0);
+    InterlockedExchange(&g_aimPathFireVectorCalls, 0);
+    InterlockedExchange(&g_aimPathMeleeCalls, 0);
+    InterlockedExchange(&g_aimPathMeleeUpdateCalls, 0);
+    InterlockedExchange(&g_aimPathMeleeTransformCalls, 0);
+    InterlockedExchange(&g_aimPathMeleeImpactCalls, 0);
+    InterlockedExchange(&g_controllerMeleeAimLogged, 0);
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    g_physicalMeleeState = {};
+    g_physicalMeleeSwingKinematicsState = {};
+    g_physicalMeleeFrame = {};
+    g_physicalMeleeProfile = {};
+    g_physicalMeleeProfileWeaponIndex = -1;
+    g_physicalMeleeContactState = {};
+    g_physicalMeleeSwingAttackState = {};
+    g_physicalMeleeSampleId = 0;
+    g_physicalMeleeSampleTick = 0;
+    g_physicalMeleeSwingSampleId = 0;
+    g_physicalMeleeSwingSampleTick = 0;
+    g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    InterlockedExchange(&g_physicalMeleeSampleCalls, 0);
+    InterlockedExchange(&g_physicalMeleeDamageQualified, 0);
+    InterlockedExchange(&g_physicalMeleeSwingAttackTriggered, 0);
+    InterlockedExchange(&g_physicalMeleeWallProxyAppliedLogged, 0);
+    InterlockedExchange(&g_physicalMeleeContactAccepted, 0);
+    InterlockedExchange(&g_physicalMeleeContactRearmed, 0);
+    InterlockedExchange(
+        &g_physicalMeleeWallProxyEnabled,
+        physicalMeleeWallProxy ? 1 : 0);
+    InterlockedExchange(
+        &g_physicalMeleeVisualProxyEnabled,
+        physicalMeleeVisualProxy ? 1 : 0);
+    SetPhysicalMeleeVisualProxyEnabled(
+        physicalMeleeVisualProxy);
+    SetWeaponGripCalibrationEnabled(
+        weaponGripCalibration);
+    InterlockedExchange(
+        &g_physicalMeleeProbeEnabled,
+        physicalMeleeProbe ? 1 : 0);
+    InterlockedExchange(
+        &g_controllerMeleeAimEnabled,
+        controllerMeleeAim ? 1 : 0);
+    InterlockedExchange(
+        &g_aimPathProbeEnabled, aimPathProbe ? 1 : 0);
+    InterlockedExchange(&g_headAimInputEnabled, 1);
+    log(
+        "m5_head_aim_armed",
+        "mouse_commands=11,12 suppression=fresh_hmd_look_only "
+        "fire_vectors=GameOrig+0x0002AF70 "
+        "direction=right_controller_world_basis fire_position=retail "
+        "stale_and_flat_fallback=retail");
+    if (aimPathProbe) {
+        log(
+            "m5_aim_path_probe_armed",
+            "behavior=observation_only command_edges=17,28,60,62 "
+            "fire_vectors=GameOrig+0x0002AF70 "
+            "melee_collision_enable=GameOrig+0x0001FD00 "
+            "melee_collision_update=GameOrig+0x0001FC00 "
+            "melee_transform_builder=GameOrig+0x0000F690 "
+            "melee_impact_dispatch=GameOrig+0x0001F270 "
+            "controller_forward_samples=1 gameorig_stack_rvas=1 "
+            "event_cap_per_path=512");
+    }
+    if (controllerMeleeAim) {
+        log(
+            "m5_controller_melee_aim_armed",
+            "target=GameOrig+0x0000F690 "
+            "operation=controller_delta_about_camera_pivot "
+            "retail_animation_curve_timing_damage_and_collision_rules=1 "
+            "freshness_ms=250 stale_and_flat_fallback=retail");
+    }
+    if (physicalMeleeProbe) {
+        log(
+            "m5_physical_melee_probe_armed",
+            "source=right_controller_weapon_pose "
+            "position=openxr_grip rotation=openxr_aim "
+            "swing_motion_space=openxr_tracking "
+            "retail_locomotion_and_turning_excluded=1 "
+            "profile=generic_one_handed_fallback "
+            "catalog=pipe,crowbar,fire_axe,plank "
+            "fire_axe_retail_index=17 fire_axe_mass_kg=4.5 "
+            "fire_axe_handling_weight=4.0 "
+            "fire_axe_swing_attack=retail_fire_command_17 "
+            "swing_trigger_mps=3.00 swing_rearm_mps=0.75 "
+            "swing_pulse_ms=100 swing_cooldown_ms=450 "
+            "length_m=0.75 radius_m=0.04 mass_kg=1.5 "
+            "sweep=base_and_tip speed_gate_mps=1.25 "
+            "energy_gate_j=1.0 native_impact_writes=0");
+    }
+    if (physicalMeleeWallProxy) {
+        log(
+            "m5_physical_melee_wall_proxy_armed",
+            "target=GameOrig+0x0000F690 "
+            "proxy_origin=controller_weapon_tip length_m=0.75 "
+            "requires_retail_attack_window=1 collision_writes=1 "
+            "contact_gate=normal_speed_and_energy "
+            "duplicate_latch=normal_separation_0.12m "
+            "native_impact_dispatch=blocked actor_damage=0 "
+            "stale_and_background_fallback=retail_transform");
+    }
+    if (physicalMeleeVisualProxy) {
+        log(
+            "m5_physical_melee_visual_proxy_armed",
+            "source=CClientWeaponMgr_current_weapon_model "
+            "manager=GameOrig+0x00168EBC current_weapon_offset=0x0C "
+            "model_LTObjRef_offset=0x1C acquisition=gameplay_update "
+            "alignment=model_local_grip_to_openxr_right_grip "
+            "rotation=openxr_right_aim profile_driven=1 "
+            "heavy_profiles=bounded_damped_spring_visible_inertia "
+            "attack_required=0 weapon_switch_auto_release=1 "
+            "render_override_only=1 exact_transform_restore=1 "
+            "placeholder_model=0 native_impact_dispatch=blocked");
+    }
+    if (weaponGripCalibration) {
+        log(
+            "m5_weapon_grip_calibration_armed",
+            "live_render_update=1 session_cache=per_weapon_index_pointer_model "
+            "start_mode=position start_active=1 "
+            "controller_capture=both_squeezes "
+            "controller_axes=right_stick_xy,left_stick_y_z "
+            "controller_buttons=a_position,b_rotation,x_reset,y_snapshot,"
+            "left_stick_finer,right_stick_coarser "
+            "visual_reference=generic_controller_wireframe "
+            "visual_grip_pose=openxr_right_grip "
+            "visual_aim_ray=openxr_right_aim "
+            "gameplay_input_suppressed_during_capture=1 "
+            "keyboard=j_l_x,k_i_y,u_o_z,t_mode,comma_period_step,"
+            "r_reset,p_snapshot,f11_pause "
+            "position_units=lithtech rotation_axes=model_local_xyz "
+            "foreground_only=1 retail_transform_restore=exact");
+    }
+    return true;
+}
+
 bool InstallMenuToggleHook(
     void* masterDatabase,
     HMODULE gameClientModule,
@@ -1274,6 +3146,31 @@ bool InstallMenuToggleHook(
         "direct_command_writes=0 system_input=0");
     PublishMenuRenderState();
     return true;
+}
+
+void ReadPhysicalMeleeToolTelemetry(
+    ToolMenuMeleeTelemetry& telemetry) noexcept {
+    telemetry = {};
+    const ULONGLONG now = GetTickCount64();
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    telemetry.weaponIndex = g_physicalMeleeProfileWeaponIndex;
+    telemetry.trackingFresh =
+        g_physicalMeleeSwingSampleId != 0 &&
+        g_physicalMeleeSwingSampleTick != 0 &&
+        now - g_physicalMeleeSwingSampleTick <=
+            kInputFreshnessMilliseconds;
+    telemetry.swingSpeedMetersPerSecond = telemetry.trackingFresh
+        ? g_physicalMeleeSwingSpeedMetersPerSecond
+        : 0.0F;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    telemetry.triggerCount = static_cast<std::uint32_t>(
+        std::max<LONG>(
+            0, InterlockedCompareExchange(
+                   &g_physicalMeleeSwingAttackTriggered, 0, 0)));
+    telemetry.wallProxyEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
+    telemetry.visualProxyEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeVisualProxyEnabled, 0, 0) != 0;
 }
 
 } // namespace condemnedvr

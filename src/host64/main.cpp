@@ -37,14 +37,14 @@ BOOL WINAPI ConsoleControlHandler(DWORD controlType) {
 
 void PrintUsage() {
     std::printf(
-        "Aufruf: %s [Optionen]\n"
-        "  --log-dir <Pfad>     Logverzeichnis (Standard: .\\logs)\n"
-        "  --max-frames <N>     Nach N eingereichten XR-Frames sauber beenden\n"
-        "  --ipc-session <ID>   M2-IPC-ID (dezimal oder 0x-hexadezimal)\n"
-        "  --exit-on-game-disconnect  Nach Game-Heartbeat-Timeout beenden\n"
-        "  --validate-only      Instance/System/D3D11/Session/Swapchains pruefen\n"
-        "  --d3d-debug          D3D11-Debug-Layer anfordern (falls installiert)\n"
-        "  --help               Diese Hilfe anzeigen\n",
+        "Usage: %s [options]\n"
+        "  --log-dir <path>     Log directory (default: .\\logs)\n"
+        "  --max-frames <N>     Exit cleanly after N submitted XR frames\n"
+        "  --ipc-session <ID>   M2 IPC ID (decimal or 0x hexadecimal)\n"
+        "  --exit-on-game-disconnect  Exit after game heartbeat timeout\n"
+        "  --validate-only      Validate instance/system/D3D11/session/swapchains\n"
+        "  --d3d-debug          Request the D3D11 debug layer if installed\n"
+        "  --help               Show this help\n",
         kHostExecutableName);
 }
 
@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
         }
         if (argument == "--log-dir") {
             if (++index >= argc) {
-                std::fprintf(stderr, "--log-dir benoetigt einen Pfad.\n");
+                std::fprintf(stderr, "--log-dir requires a path.\n");
                 return 2;
             }
             options.logDirectory = std::filesystem::u8path(argv[index]);
@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
                 !ParseUnsigned(argv[index], options.maxFrames) ||
                 options.maxFrames == 0) {
                 std::fprintf(stderr,
-                             "--max-frames benoetigt eine positive Ganzzahl.\n");
+                             "--max-frames requires a positive integer.\n");
                 return 2;
             }
             continue;
@@ -131,28 +131,28 @@ int main(int argc, char** argv) {
                 !ParseSessionId(argv[index], options.ipcSessionId)) {
                 std::fprintf(
                     stderr,
-                    "--ipc-session benoetigt eine von Null verschiedene ID.\n");
+                    "--ipc-session requires a non-zero ID.\n");
                 return 2;
             }
             continue;
         }
 
-        std::fprintf(stderr, "Unbekannte Option: %s\n", argument.c_str());
+        std::fprintf(stderr, "Unknown option: %s\n", argument.c_str());
         PrintUsage();
         return 2;
     }
 
     if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE)) {
         std::fprintf(stderr,
-                     "Warnung: Console-Control-Handler konnte nicht gesetzt "
-                     "werden (Win32=%lu).\n",
+                     "Warning: console control handler could not be installed "
+                     "(Win32=%lu).\n",
                      GetLastError());
     }
 
     try {
         return fearvr::RunOpenXrHost(options);
     } catch (const std::exception& error) {
-        std::fprintf(stderr, "Unbehandelter Hostfehler: %s\n", error.what());
+        std::fprintf(stderr, "Unhandled host error: %s\n", error.what());
         return 1;
     }
 }

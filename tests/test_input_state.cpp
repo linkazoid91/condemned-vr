@@ -335,6 +335,51 @@ int main() {
         return Fail("unknown or non-finite core actions must fail closed");
     }
 
+    FearVrInputState calibrationInput{};
+    calibrationInput.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    calibrationInput.activeHands =
+        FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT;
+    calibrationInput.squeeze[FEARVR_HAND_LEFT] = 0.75F;
+    calibrationInput.squeeze[FEARVR_HAND_RIGHT] = 0.75F;
+    calibrationInput.turnX = 0.625F;
+    calibrationInput.turnY = -0.625F;
+    calibrationInput.moveY = 1.0F;
+    calibrationInput.buttons =
+        FEARVR_IB_RIGHT_PRIMARY | FEARVR_IB_RIGHT_SECONDARY |
+        FEARVR_IB_LEFT_PRIMARY | FEARVR_IB_LEFT_SECONDARY |
+        FEARVR_IB_LEFT_STICK | FEARVR_IB_RIGHT_STICK;
+    const auto calibrationControls =
+        condemnedvr::ResolveWeaponGripCalibrationControls(
+            calibrationInput, true);
+    if (!calibrationControls.captured ||
+        !Near(calibrationControls.x, 0.5F) ||
+        !Near(calibrationControls.y, -0.5F) ||
+        !Near(calibrationControls.z, 1.0F) ||
+        !calibrationControls.positionDown ||
+        !calibrationControls.rotationDown ||
+        !calibrationControls.resetDown ||
+        !calibrationControls.snapshotDown ||
+        !calibrationControls.finerDown ||
+        !calibrationControls.coarserDown) {
+        return Fail(
+            "the two-grip calibration chord must map every setup control");
+    }
+    calibrationInput.squeeze[FEARVR_HAND_LEFT] = 0.74F;
+    if (condemnedvr::ResolveWeaponGripCalibrationControls(
+            calibrationInput, true).captured) {
+        return Fail("one loose grip must release calibration capture");
+    }
+    calibrationInput.squeeze[FEARVR_HAND_LEFT] = 0.75F;
+    if (condemnedvr::ResolveWeaponGripCalibrationControls(
+            calibrationInput, false).captured) {
+        return Fail("stale controller state must not capture calibration");
+    }
+    calibrationInput.activeHands = FEARVR_HAND_MASK_RIGHT;
+    if (condemnedvr::ResolveWeaponGripCalibrationControls(
+            calibrationInput, true).captured) {
+        return Fail("both active hands are required for calibration capture");
+    }
+
     const auto firePulse = condemnedvr::ResolveCoreActionHapticPulse(
         condemnedvr::kCondemnedFireCommand);
     const auto blockPulse = condemnedvr::ResolveCoreActionHapticPulse(
@@ -358,6 +403,158 @@ int main() {
         !Near(activatePulse.amplitude, 0.15F) ||
         unsupportedPulse.active) {
         return Fail("M4 haptic pulses must stay bounded and hand-specific");
+    }
+
+    FearVrInputState controllerAimInput{};
+    controllerAimInput.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
+    controllerAimInput.activeHands = FEARVR_HAND_MASK_RIGHT;
+    controllerAimInput.aimPoseValidHands = FEARVR_HAND_MASK_RIGHT;
+    controllerAimInput.handAimPose[FEARVR_HAND_RIGHT].qw = 1.0F;
+    FearVrPose trackingRecenter{};
+    trackingRecenter.qw = 1.0F;
+    const fearvr::TrackingQuaternion retailBase{};
+    auto controllerAim = condemnedvr::ResolveControllerAimRotation(
+        controllerAimInput, true, trackingRecenter, retailBase);
+    auto controllerForward = fearvr::Rotate(
+        controllerAim.worldRotation, {0.0F, 0.0F, 1.0F});
+    if (!controllerAim.active || !Near(controllerForward.x, 0.0F) ||
+        !Near(controllerForward.y, 0.0F) ||
+        !Near(controllerForward.z, 1.0F)) {
+        return Fail(
+            "neutral right-controller aim must map to engine +Z forward");
+    }
+
+    constexpr float kHalfSqrtTwo = 0.70710678F;
+    controllerAimInput.handAimPose[FEARVR_HAND_RIGHT].qy =
+        kHalfSqrtTwo;
+    controllerAimInput.handAimPose[FEARVR_HAND_RIGHT].qw =
+        kHalfSqrtTwo;
+    controllerAim = condemnedvr::ResolveControllerAimRotation(
+        controllerAimInput, true, trackingRecenter, retailBase);
+    controllerForward = fearvr::Rotate(
+        controllerAim.worldRotation, {0.0F, 0.0F, 1.0F});
+    if (!controllerAim.active || !Near(controllerForward.x, -1.0F) ||
+        !Near(controllerForward.y, 0.0F) ||
+        !Near(controllerForward.z, 0.0F)) {
+        return Fail(
+            "OpenXR controller -Z forward must preserve a leftward aim");
+    }
+
+    FearVrInputState controllerPoseInput = controllerAimInput;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].px = 0.2F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].py = -0.1F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].pz = -0.5F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].qx = 0.0F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].qy = 0.0F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].qz = 0.0F;
+    controllerPoseInput.handAimPose[FEARVR_HAND_RIGHT].qw = 1.0F;
+    const fearvr::TrackingVector retailCameraPosition{
+        1000.0F, 2000.0F, 3000.0F};
+    auto controllerWorldPose = condemnedvr::ResolveControllerAimWorldPose(
+        controllerPoseInput, true, trackingRecenter,
+        retailCameraPosition, retailBase, 100.0F);
+    if (!controllerWorldPose.active ||
+        !Near(controllerWorldPose.worldPosition.x, 1020.0F) ||
+        !Near(controllerWorldPose.worldPosition.y, 1990.0F) ||
+        !Near(controllerWorldPose.worldPosition.z, 3050.0F)) {
+        return Fail(
+            "controller position must share the stereo LithTech world basis");
+    }
+    FearVrInputState controllerGripInput = controllerPoseInput;
+    controllerGripInput.gripPoseValidHands =
+        FEARVR_HAND_MASK_RIGHT;
+    controllerGripInput.handGripPose[FEARVR_HAND_RIGHT].px = -0.1F;
+    controllerGripInput.handGripPose[FEARVR_HAND_RIGHT].py = 0.05F;
+    controllerGripInput.handGripPose[FEARVR_HAND_RIGHT].pz = -0.25F;
+    controllerGripInput.handGripPose[FEARVR_HAND_RIGHT].qw = 1.0F;
+    const auto controllerGripWorldPose =
+        condemnedvr::ResolveControllerGripWorldPose(
+            controllerGripInput, true, trackingRecenter,
+            retailCameraPosition, retailBase, 100.0F);
+    if (!controllerGripWorldPose.active ||
+        !Near(controllerGripWorldPose.worldPosition.x, 990.0F) ||
+        !Near(controllerGripWorldPose.worldPosition.y, 2005.0F) ||
+        !Near(controllerGripWorldPose.worldPosition.z, 3025.0F)) {
+        return Fail(
+            "held models must originate at the distinct OpenXR grip pose");
+    }
+    controllerGripInput.gripPoseValidHands = 0;
+    if (condemnedvr::ResolveControllerGripWorldPose(
+            controllerGripInput, true, trackingRecenter,
+            retailCameraPosition, retailBase, 100.0F).active) {
+        return Fail("an invalid grip pose must not drive a held model");
+    }
+    controllerWorldPose = condemnedvr::ResolveControllerAimWorldPose(
+        controllerPoseInput, true, trackingRecenter,
+        retailCameraPosition,
+        fearvr::TrackingQuaternion{
+            0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo},
+        100.0F);
+    if (!controllerWorldPose.active ||
+        !Near(controllerWorldPose.worldPosition.x, 1050.0F) ||
+        !Near(controllerWorldPose.worldPosition.y, 1990.0F) ||
+        !Near(controllerWorldPose.worldPosition.z, 2980.0F)) {
+        return Fail(
+            "controller position must rotate through the Retail camera base");
+    }
+    if (condemnedvr::ResolveControllerAimWorldPose(
+            controllerPoseInput, false, trackingRecenter,
+            retailCameraPosition, retailBase, 100.0F).active ||
+        condemnedvr::ResolveControllerAimWorldPose(
+            controllerPoseInput, true, trackingRecenter,
+            retailCameraPosition, retailBase, 0.0F).active) {
+        return Fail(
+            "stale controller poses and invalid world scales must fail closed");
+    }
+    if (condemnedvr::ResolveControllerAimRotation(
+            controllerAimInput, false,
+            trackingRecenter, retailBase).active) {
+        return Fail("stale controller tracking must not drive weapon aim");
+    }
+    controllerAimInput.aimPoseValidHands = 0;
+    if (condemnedvr::ResolveControllerAimRotation(
+            controllerAimInput, true,
+            trackingRecenter, retailBase).active) {
+        return Fail("an invalid right aim pose must preserve Retail aim");
+    }
+    controllerAimInput.aimPoseValidHands = FEARVR_HAND_MASK_RIGHT;
+    if (condemnedvr::ResolveControllerAimRotation(
+            controllerAimInput, true, trackingRecenter,
+            fearvr::TrackingQuaternion{0.0F, 0.0F, 0.0F, 0.0F}).active) {
+        return Fail("an invalid Retail base must preserve Retail aim");
+    }
+
+    const fearvr::TrackingVector meleePivot{10.0F, 20.0F, 30.0F};
+    const fearvr::TrackingVector retailMeleePosition{
+        10.0F, 20.0F, 35.0F};
+    const fearvr::TrackingQuaternion identityRotation{};
+    const fearvr::TrackingQuaternion rightwardRotation{
+        0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo};
+    const auto redirectedMelee =
+        condemnedvr::ResolveControllerRelativeMeleeTransform(
+            retailMeleePosition, identityRotation, meleePivot,
+            identityRotation, rightwardRotation, true);
+    const auto redirectedMeleeForward = fearvr::Rotate(
+        redirectedMelee.rotation, {0.0F, 0.0F, 1.0F});
+    if (!redirectedMelee.active ||
+        !Near(redirectedMelee.position.x, 15.0F) ||
+        !Near(redirectedMelee.position.y, 20.0F) ||
+        !Near(redirectedMelee.position.z, 30.0F) ||
+        !Near(redirectedMeleeForward.x, 1.0F) ||
+        !Near(redirectedMeleeForward.y, 0.0F) ||
+        !Near(redirectedMeleeForward.z, 0.0F)) {
+        return Fail(
+            "controller melee aim must redirect the complete Retail arc");
+    }
+    if (condemnedvr::ResolveControllerRelativeMeleeTransform(
+            retailMeleePosition, identityRotation, meleePivot,
+            identityRotation, rightwardRotation, false).active ||
+        condemnedvr::ResolveControllerRelativeMeleeTransform(
+            retailMeleePosition, identityRotation, meleePivot,
+            fearvr::TrackingQuaternion{0.0F, 0.0F, 0.0F, 0.0F},
+            rightwardRotation, true).active) {
+        return Fail(
+            "stale or invalid tracking must preserve Retail melee transforms");
     }
 
     FearVrInputState recenter{};

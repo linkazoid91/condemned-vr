@@ -1,22 +1,23 @@
 /* =============================================================================
- * F.E.A.R. VR — Gemeinsamer IPC-Vertrag (ANWEISUNG.md §6)
+ * Shared F.E.A.R. VR / Condemned VR IPC contract.
  *
- * Dieser Header MUSS bit-identisch in x86 (Proxy/GameClient) und x64 (Host)
- * kompilieren. Nur fest breite POD-Typen. Keine STL, keine size_t, keine
- * Pointer/Handles in nativer Breite, keine C++-Exceptions.
+ * This header must have an identical layout in the x86 game modules and x64
+ * host. Use fixed-width POD types only: no STL, size_t, native-width pointers
+ * or handles, or C++ exceptions.
  *
- * Layout-Regeln:
- *  - 8-Byte-Felder zuerst, dann 4-Byte, dann 2/1-Byte; explizites Padding.
- *  - Jeder gemappte Bereich beginnt mit Magic + Version + Strukturgröße.
- *  - Posen als Position + normalisiertes Quaternion; FOV als vier Winkel.
- *  - Shared-Texture-Handles als uint64_t serialisiert; Empfänger validiert.
+ * Layout rules:
+ *  - 8-byte fields first, then 4-byte and 2/1-byte fields; explicit padding.
+ *  - Every mapped region starts with magic, version and structure size.
+ *  - Poses use position plus a normalized quaternion; FOV uses four angles.
+ *  - Shared texture handles are serialized as uint64_t and validated by the
+ *    receiver.
  * ========================================================================== */
 #ifndef FEARVR_COMMON_PROTOCOL_H
 #define FEARVR_COMMON_PROTOCOL_H
 
 #include <stdint.h>
 
-/* ---- static_assert für C und C++ ---------------------------------------- */
+/* ---- static_assert for C and C++ ---------------------------------------- */
 #if defined(__cplusplus)
   #define FEARVR_STATIC_ASSERT(cond, msg) static_assert((cond), msg)
 #elif defined(_MSC_VER) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L)
@@ -30,31 +31,31 @@
 extern "C" {
 #endif
 
-/* ---- Protokoll-Identität ------------------------------------------------- */
-/* 'F','R','V','R' als Little-Endian-uint32 => 0x52565246 */
+/* ---- Protocol identity -------------------------------------------------- */
+/* 'F','R','V','R' as little-endian uint32 => 0x52565246. Retained for wire
+ * compatibility with the upstream protocol. */
 #define FEARVR_PROTOCOL_MAGIC   0x52565246u
 #define FEARVR_PROTOCOL_VERSION 5u
 
-/* Spielkamera und OpenXR-Projektionslayer verwenden dieselbe FOV-Skalierung.
- * Null steht fuer den kompatiblen Standard, falls eine alte Gegenstelle das
- * zuvor reservierte Feld nicht setzt. */
+/* The game camera and OpenXR projection layer use the same FOV scale. Zero
+ * selects the compatible default if an older peer leaves the field unset. */
 enum {
   FEARVR_FOV_SCALE_DEFAULT_PERCENT = 100u,
   FEARVR_FOV_SCALE_MIN_PERCENT = 100u,
   FEARVR_FOV_SCALE_MAX_PERCENT = 150u
 };
 
-/* ---- Augen & Ringpuffer -------------------------------------------------- */
+/* ---- Eyes and ring buffer ----------------------------------------------- */
 enum {
   FEARVR_EYE_LEFT  = 0,
   FEARVR_EYE_RIGHT = 1,
   FEARVR_EYE_COUNT = 2
 };
 
-/* Mind. 2, besser 3 Slots pro Auge (§6). */
+/* Three slots per eye keep producer and consumer work decoupled. */
 #define FEARVR_SLOTS_PER_EYE 3u
 
-/* ---- OpenXR-Controller --------------------------------------------------- */
+/* ---- OpenXR controllers ------------------------------------------------- */
 enum {
   FEARVR_HAND_LEFT  = 0,
   FEARVR_HAND_RIGHT = 1,
@@ -66,7 +67,7 @@ enum {
   FEARVR_HAND_MASK_RIGHT = 0x00000002u
 };
 
-/* Physische, noch nicht auf Spielbefehle abgebildete Tasten. */
+/* Physical buttons before game-command mapping. */
 enum {
   FEARVR_IB_LEFT_PRIMARY   = 0x00000001u,
   FEARVR_IB_LEFT_SECONDARY = 0x00000002u,
@@ -167,6 +168,18 @@ typedef struct FearVrInputState {
 } FearVrInputState;
 FEARVR_STATIC_ASSERT(sizeof(FearVrInputState) == 192,
                      "FearVrInputState size (192)");
+
+/* ---- In-process stereo setup overlay ----------------------------------- */
+/* NDC coordinates are projected by the game while its verified per-eye
+   camera is active. The D3D9 bridge expands each pair into a visible line
+   immediately before that eye is captured. This is not shared with Host. */
+typedef struct FearVrOverlayLineVertex {
+  float ndcX;
+  float ndcY;
+  uint32_t argb;
+} FearVrOverlayLineVertex;
+FEARVR_STATIC_ASSERT(sizeof(FearVrOverlayLineVertex) == 12,
+                     "FearVrOverlayLineVertex size (12)");
 
 /* ---- Haptikanforderung (Game -> Host) ----------------------------------- */
 typedef struct FearVrHapticRequest {

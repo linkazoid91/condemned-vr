@@ -42,6 +42,12 @@ BOOL WaitForNewRenderRequest(
     FearVrRenderRequest* request) noexcept;
 BOOL GetInputState(FearVrInputState* input) noexcept;
 BOOL SubmitHapticRequest(const FearVrHapticRequest* request) noexcept;
+BOOL DrawOverlayLines(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) noexcept;
+BOOL DrawOverlayTriangles(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) noexcept;
 void BeginEye(std::uint32_t eye) noexcept;
 BOOL ClearEye(std::uint32_t eye) noexcept;
 void CaptureEye(std::uint32_t eye) noexcept;

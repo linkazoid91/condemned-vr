@@ -470,8 +470,8 @@ private:
             });
         if (d3d11Extension == extensions.end()) {
             throw std::runtime_error(
-                "Die aktive OpenXR-Runtime bietet XR_KHR_D3D11_enable nicht "
-                "an.");
+                "The active OpenXR runtime does not provide "
+                "XR_KHR_D3D11_enable.");
         }
 
         const char* enabledExtensions[] = {
@@ -1386,10 +1386,9 @@ private:
                submittedFrames_ >= options_.maxFrames;
     }
 
-    // Fasst ein Messfenster zu genau einer Zeile zusammen (ANWEISUNG.md §14:
-    // Game-FPS/XR-Displayrate, reused frames, Renderzeit links/rechts und
-    // Host-Copyzeit). Alle Zähler werden danach zurückgesetzt, damit die
-    // Zeilen unabhängig voneinander auswertbar bleiben.
+    // Summarize one measurement window per log line: game/XR rates, reused
+    // frames, per-eye render time and host copy time. Counters are reset so
+    // consecutive windows remain independently useful.
     void LogPerformanceWindow() {
         const auto now = std::chrono::steady_clock::now();
         const auto windowMicroseconds =
@@ -1639,8 +1638,7 @@ private:
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
     std::vector<Swapchain> swapchains_;
-    // Renderzeit je Auge (ANWEISUNG.md §14), zwischen zwei perf_frame-
-    // Meldungen gesammelt und danach zurückgesetzt.
+    // Per-eye render timing collected between perf_frame messages.
     struct EyeStats {
         std::uint64_t samples{0};
         std::uint64_t totalMicroseconds{0};

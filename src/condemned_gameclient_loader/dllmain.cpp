@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 #include "binding_input.h"
+#include "loader_event_format.h"
 #include "module_identity.h"
 #include "renderer_probe.h"
 
@@ -70,13 +71,10 @@ void AppendLoaderEvent(const char* event, const char* detail) noexcept {
         return;
     }
 
-    char line[512]{};
-    const int length = sprintf_s(
-        line,
-        "{\"event\":\"%s\",\"detail\":\"%s\"}\r\n",
-        event == nullptr ? "" : event,
-        detail == nullptr ? "" : detail);
-    if (length > 0) {
+    char line[condemnedvr::kLoaderEventLineCapacity]{};
+    const std::size_t length = condemnedvr::FormatLoaderEventLine(
+        line, sizeof(line), event, detail);
+    if (length > 0U) {
         DWORD bytesWritten = 0;
         WriteFile(
             file,
@@ -223,6 +221,22 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
         condemnedvr::InstallBindingTurningHook(
             g_original, g_bridge, AppendLoaderEvent);
     }
+    if (CommandLineContains(L"-condemnedvr-m5-head-aim")) {
+        condemnedvr::InstallHeadAimHooks(
+            g_original, AppendLoaderEvent,
+            CommandLineContains(
+                L"-condemnedvr-m5-aim-path-probe"),
+            CommandLineContains(
+                L"-condemnedvr-m5-controller-melee-aim"),
+            CommandLineContains(
+                L"-condemnedvr-m5-physical-melee-probe"),
+            CommandLineContains(
+                L"-condemnedvr-m5-physical-melee-wall-proxy"),
+            CommandLineContains(
+                L"-condemnedvr-m5-physical-melee-visual-proxy"),
+            CommandLineContains(
+                L"-condemnedvr-m5-weapon-grip-calibration"));
+    }
     if (CommandLineContains(L"-condemnedvr-m4-menu")) {
         condemnedvr::InstallMenuToggleHook(
             masterDatabase, g_original, g_bridge,
@@ -243,10 +257,12 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             L"-condemnedvr-m3-stereo-tuning");
         const bool controllerRecenter = CommandLineContains(
             L"-condemnedvr-m4-recenter");
+        const bool headAim = CommandLineContains(
+            L"-condemnedvr-m5-head-aim");
         HMODULE const diagnosticBridge =
             stereoDiagnostic || doubleRenderDiagnostic ||
                 eyeOffsetDiagnostic || continuousStereoTuning ||
-                controllerRecenter
+                controllerRecenter || headAim
             ? g_bridge
             : nullptr;
         condemnedvr::InstallRendererPassThroughProbe(
@@ -261,7 +277,8 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             CommandLineContains(
                 L"-condemnedvr-m3-zero-eye-offset-diagnostic"),
             continuousStereoTuning,
-            controllerRecenter);
+            controllerRecenter,
+            headAim);
     }
 }
 

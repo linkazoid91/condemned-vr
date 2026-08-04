@@ -5,6 +5,7 @@
 #endif
 #include <Windows.h>
 
+#include "condemned_tool_menu.h"
 #include "renderer_probe.h"
 
 namespace condemnedvr {
@@ -49,6 +50,19 @@ bool InstallControllerHaptics(
     HMODULE bridgeModule,
     RendererProbeLogFunction log) noexcept;
 
+// Suppresses Retail mouse pitch/yaw only while a fresh HMD look snapshot is
+// available and redirects the verified weapon fire-vector path to a separate
+// freshness-gated right-controller world-space aim basis.
+bool InstallHeadAimHooks(
+    HMODULE gameClientModule,
+    RendererProbeLogFunction log,
+    bool aimPathProbe = false,
+    bool controllerMeleeAim = false,
+    bool physicalMeleeProbe = false,
+    bool physicalMeleeWallProxy = false,
+    bool physicalMeleeVisualProxy = false,
+    bool weaponGripCalibration = false) noexcept;
+
 // Polls a release-gated left-secondary edge from the Retail client-shell
 // update and routes it through the game's own Escape key callbacks.
 bool InstallMenuToggleHook(
@@ -56,5 +70,11 @@ bool InstallMenuToggleHook(
     HMODULE gameClientModule,
     HMODULE bridgeModule,
     RendererProbeLogFunction log) noexcept;
+
+// Snapshot consumed by the in-headset Debug and Melee tabs. Values are
+// copied under the physical-melee lock; the renderer never reads hook-owned
+// state directly.
+void ReadPhysicalMeleeToolTelemetry(
+    ToolMenuMeleeTelemetry& telemetry) noexcept;
 
 } // namespace condemnedvr

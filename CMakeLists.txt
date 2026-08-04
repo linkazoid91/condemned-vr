@@ -1,62 +1,38 @@
-# =============================================================================
-# F.E.A.R. VR — Root-CMake (ANWEISUNG.md §11)
-#
-# Ein Buildverzeichnis ist entweder Win32 ODER x64, nie beides. Getrennt bauen:
-#
-#   cmake -S . -B build/x86 -A Win32 -DFEARVR_BUILD_PROXY=ON  -DFEARVR_BUILD_HOST=OFF
-#   cmake --build build/x86 --config RelWithDebInfo
-#
-#   cmake -S . -B build/x64 -A x64   -DFEARVR_BUILD_PROXY=OFF -DFEARVR_BUILD_HOST=ON
-#   cmake --build build/x64 --config RelWithDebInfo
-# =============================================================================
+# Condemned VR builds x86 game-side modules and an x64 OpenXR host in separate
+# build trees. The retained fearvr-* target and macro names are compatibility
+# identifiers inherited from the MIT-licensed upstream implementation.
 cmake_minimum_required(VERSION 3.21)
 
-project(FearVr
-  VERSION 1.0.0
-  DESCRIPTION "Open-source VR mod for F.E.A.R. 1.08 (Singleplayer)"
+project(CondemnedVr
+  VERSION 0.5.0
+  DESCRIPTION "OpenXR VR mod for Condemned: Criminal Origins"
   LANGUAGES C CXX)
 
-# Vorabkennzeichnung nach SemVer. CMake selbst kennt keine Prerelease-Anhaenge,
-# deshalb steht das Label hier daneben und wird in fearvr-version.cmake zur
-# vollstaendigen Versionszeichenkette zusammengesetzt. Leer lassen fuer ein
-# endgueltiges Release. tools/make-release.ps1 liest beide Werte aus dieser
-# Datei, damit es nur eine Quelle der Wahrheit gibt.
-set(FEARVR_VERSION_LABEL "beta.7")
+set(FEARVR_VERSION_LABEL "dev")
 
-# ---- Optionen ---------------------------------------------------------------
-option(FEARVR_BUILD_HOST  "Build x64 OpenXR host (fearvr-host.exe)" OFF)
-option(FEARVR_BUILD_PROXY "Build x86 d3d9.dll proxy/bridge"          OFF)
-option(FEARVR_BUILD_TESTS "Build automated tests"                    ON)
 option(CONDEMNEDVR_BUILD_M1_LOADER
-  "Build the x86 Condemned stock-client pass-through loader" OFF)
+  "Build the x86 Condemned stock-client loader" OFF)
 option(CONDEMNEDVR_BUILD_M2_BRIDGE
-  "Build the x86 Condemned diagnostic D3D9 bridge" OFF)
+  "Build the x86 Condemned D3D9 bridge" OFF)
 option(CONDEMNEDVR_BUILD_HOST
   "Build the x64 Condemned OpenXR host" OFF)
+option(CONDEMNEDVR_BUILD_TESTS
+  "Build automated tests" ON)
 
-# ---- Nur MSVC / Windows -----------------------------------------------------
 if(NOT WIN32 OR NOT MSVC)
   message(FATAL_ERROR
-    "F.E.A.R. VR baut nur mit MSVC unter Windows (siehe docs/ENVIRONMENT.md).")
+    "Condemned VR builds only with MSVC on Windows.")
 endif()
 
-# ---- Architektur-Guard (§11) -----------------------------------------------
-# CMAKE_SIZEOF_VOID_P: 4 = Win32/x86, 8 = x64.
-if(FEARVR_BUILD_PROXY AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-  message(FATAL_ERROR
-    "FEARVR_BUILD_PROXY erfordert einen x86-Build: -A Win32.")
-endif()
-if(FEARVR_BUILD_HOST AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-  message(FATAL_ERROR
-    "FEARVR_BUILD_HOST erfordert einen x64-Build: -A x64.")
-endif()
+# A build directory targets one architecture. Never combine the x86 game-side
+# modules and x64 OpenXR host in the same CMake tree.
 if(CONDEMNEDVR_BUILD_M1_LOADER AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR
-    "CONDEMNEDVR_BUILD_M1_LOADER requires an x86 build: -A Win32.")
+    "CONDEMNEDVR_BUILD_M1_LOADER requires an x86 build (-A Win32).")
 endif()
 if(CONDEMNEDVR_BUILD_M2_BRIDGE AND NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR
-    "CONDEMNEDVR_BUILD_M2_BRIDGE requires an x86 build: -A Win32.")
+    "CONDEMNEDVR_BUILD_M2_BRIDGE requires an x86 build (-A Win32).")
 endif()
 if(CONDEMNEDVR_BUILD_M2_BRIDGE AND NOT CONDEMNEDVR_BUILD_M1_LOADER)
   message(FATAL_ERROR
@@ -64,10 +40,16 @@ if(CONDEMNEDVR_BUILD_M2_BRIDGE AND NOT CONDEMNEDVR_BUILD_M1_LOADER)
 endif()
 if(CONDEMNEDVR_BUILD_HOST AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR
-    "CONDEMNEDVR_BUILD_HOST requires an x64 build: -A x64.")
+    "CONDEMNEDVR_BUILD_HOST requires an x64 build (-A x64).")
 endif()
 
-# ---- Globale Einstellungen --------------------------------------------------
+if(NOT CONDEMNEDVR_BUILD_M1_LOADER AND
+   NOT CONDEMNEDVR_BUILD_M2_BRIDGE AND
+   NOT CONDEMNEDVR_BUILD_HOST AND
+   NOT CONDEMNEDVR_BUILD_TESTS)
+  message(FATAL_ERROR "No Condemned VR target is enabled.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
@@ -76,39 +58,32 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-# PDBs immer lokal erzeugen (auch in Release-ähnlichen Configs).
+# Keep debug symbols local even for release-like configurations.
 add_compile_options($<$<CONFIG:Release>:/Zi>)
 add_link_options($<$<CONFIG:Release>:/DEBUG>)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/fearvr-warnings.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/fearvr-version.cmake)
 
-# ---- Gemeinsamer Vertrag (header-only, x86 & x64) ---------------------------
+# Header-only x86/x64 protocol and shared math. The target name is retained to
+# avoid a risky protocol-wide rename during the port.
 add_library(fearvr-common INTERFACE)
 target_include_directories(fearvr-common INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common)
 
-message(STATUS "FearVr ${PROJECT_VERSION} | ptr=${CMAKE_SIZEOF_VOID_P}*8 bit "
-               "| HOST=${FEARVR_BUILD_HOST} PROXY=${FEARVR_BUILD_PROXY} "
-               "TESTS=${FEARVR_BUILD_TESTS} "
-               "CONDEMNED_M1=${CONDEMNEDVR_BUILD_M1_LOADER} "
-               "CONDEMNED_M2=${CONDEMNEDVR_BUILD_M2_BRIDGE} "
-               "CONDEMNED_HOST=${CONDEMNEDVR_BUILD_HOST}")
+message(STATUS
+  "CondemnedVr ${PROJECT_VERSION}-${FEARVR_VERSION_LABEL} | "
+  "ptr=${CMAKE_SIZEOF_VOID_P}*8 bit | "
+  "LOADER=${CONDEMNEDVR_BUILD_M1_LOADER} "
+  "BRIDGE=${CONDEMNEDVR_BUILD_M2_BRIDGE} "
+  "HOST=${CONDEMNEDVR_BUILD_HOST} "
+  "TESTS=${CONDEMNEDVR_BUILD_TESTS}")
 
-# ---- Subprojekte ------------------------------------------------------------
-if(FEARVR_BUILD_TESTS)
+if(CONDEMNEDVR_BUILD_TESTS)
   enable_testing()
-endif()
-if(FEARVR_BUILD_HOST)
-  add_subdirectory(src/host64)
 endif()
 if(CONDEMNEDVR_BUILD_HOST)
   add_subdirectory(src/condemned_host64)
-endif()
-if(FEARVR_BUILD_PROXY)
-  add_subdirectory(src/proxy32)
-  add_subdirectory(src/gameclient_loader)
-  add_subdirectory(src/launcher)   # Launcher ist x86-nah, baut mit dem Proxy
 endif()
 if(CONDEMNEDVR_BUILD_M1_LOADER)
   add_subdirectory(src/condemned_gameclient_loader)
@@ -116,6 +91,6 @@ endif()
 if(CONDEMNEDVR_BUILD_M2_BRIDGE)
   add_subdirectory(src/condemned_proxy32)
 endif()
-if(FEARVR_BUILD_TESTS)
+if(CONDEMNEDVR_BUILD_TESTS)
   add_subdirectory(tests)
 endif()

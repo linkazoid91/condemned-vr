@@ -64,6 +64,20 @@ CondemnedVr_SubmitHapticRequest(const FearVrHapticRequest* request) {
     return fearvr::SubmitHapticRequest(request);
 }
 
+extern "C" __declspec(dllexport) BOOL __cdecl
+CondemnedVr_DrawOverlayLines(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) {
+    return fearvr::DrawOverlayLines(vertices, vertexCount);
+}
+
+extern "C" __declspec(dllexport) BOOL __cdecl
+CondemnedVr_DrawOverlayTriangles(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) {
+    return fearvr::DrawOverlayTriangles(vertices, vertexCount);
+}
+
 extern "C" __declspec(dllexport) void __cdecl
 CondemnedVr_SetMenuActive(BOOL active) {
     fearvr::SetMenuActive(active);

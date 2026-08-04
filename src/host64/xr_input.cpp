@@ -60,7 +60,13 @@ void XrInput::Initialize(XrInstance instance) {
     CopyName(setInfo.actionSetName,
              sizeof(setInfo.actionSetName), "gameplay");
     CopyName(setInfo.localizedActionSetName,
-             sizeof(setInfo.localizedActionSetName), "F.E.A.R. VR");
+             sizeof(setInfo.localizedActionSetName),
+#if defined(CONDEMNEDVR_PRODUCT)
+             "Condemned VR"
+#else
+             "F.E.A.R. VR"
+#endif
+    );
     setInfo.priority = 0;
     const XrResult setResult =
         xrCreateActionSet(instance_, &setInfo, &actionSet_);

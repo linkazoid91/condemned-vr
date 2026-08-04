@@ -62,7 +62,7 @@ set_target_properties(condemnedvr-d3d9-bridge PROPERTIES
   PREFIX ""
 )
 
-if(FEARVR_BUILD_TESTS)
+if(CONDEMNEDVR_BUILD_TESTS)
   add_executable(test-condemned-bridge-guard
     test_bridge_guard.cpp
   )

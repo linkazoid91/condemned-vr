@@ -95,6 +95,23 @@ The 1920x1080 window mode was accepted live. The bridge independently observed
 a 1920x1080 source and stereo target at 100% render scale, and the tester
 confirmed that the desktop game no longer covered the entire display.
 
+Retail normally handles `WM_ACTIVATEAPP(FALSE)` by shutting down the renderer
+and continues calling `SetCursorPos` to centre the mouse. In VR that left the
+headset on a stale upward-looking frame after Alt-Tab and made the desktop
+mouse unusable. `-DesktopWindow` now enables two version-guarded corrections
+for Condemned 1.0.314.0: the verified branch at executable RVA `0x0007C5E3`
+returns without renderer shutdown, and the executable's `SetCursorPos` import
+is forwarded only while Condemned owns the foreground. Controller/gameplay
+overlays remain independently foreground-gated. `-NoBackgroundRender`
+restores Retail focus behavior for diagnostics.
+
+This focus path passed live on 1 August 2026 in run
+`run-20260801-065035`. The tester confirmed that the world continued updating
+smoothly after Alt-Tab, the desktop cursor moved freely, returning to the game
+was clean, and right-stick recenter still worked. The bridge recorded both
+`background_render_fix_applied` and the existing HID/FPS correction before
+the test.
+
 ## Right-stick turning and pause-menu gate
 
 Static analysis found that the Retail player update unconditionally queries

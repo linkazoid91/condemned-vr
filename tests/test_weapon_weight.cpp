@@ -32,6 +32,7 @@ int main() {
     assert(defaults.positionalFollow == 18.0F);
     assert(defaults.rotationalFollow == 20.0F);
     assert(defaults.catchUpStrength == 1.5F);
+    assert(defaults.dampingRatio == 1.0F);
 
     WeaponWeightFilterState disabled;
     WeaponWeightPose output;
@@ -128,6 +129,50 @@ int main() {
     assert(WeaponWeightCatchUpMultiplier(0.0F, 1.5F) == 1.0F);
     assert(WeaponWeightCatchUpMultiplier(0.001F, 1.5F) > 1.0F);
     assert(WeaponWeightCatchUpMultiplier(10000.0F, 1.5F) < 2.5001F);
+
+    WeaponWeightProfile invalidDamping{};
+    invalidDamping.dampingRatio =
+        std::numeric_limits<float>::quiet_NaN();
+    assert(SanitizeWeaponWeightProfile(invalidDamping).dampingRatio == 1.0F);
+    invalidDamping.dampingRatio = 0.0F;
+    assert(SanitizeWeaponWeightProfile(invalidDamping).dampingRatio == 0.35F);
+
+    // A heavy under-damped profile keeps controlled momentum after the hand
+    // reaches and stops at its target. The default critically damped response
+    // remains monotonic for existing profiles.
+    WeaponWeightFilterState criticalStop{};
+    WeaponWeightFilterState momentumStop{};
+    WeaponWeightPose criticalOutput{};
+    WeaponWeightPose momentumOutput{};
+    const WeaponWeightProfile criticalProfile{
+        4.0F, 10.0F, 8.0F, 0.0F, 1.0F};
+    const WeaponWeightProfile momentumProfile{
+        4.0F, 10.0F, 8.0F, 0.0F, 0.55F};
+    UpdateWeaponWeightFilter(
+        criticalStop, Pose(0.0F), true, 6'000'000'000ULL,
+        true, criticalProfile, criticalOutput);
+    UpdateWeaponWeightFilter(
+        momentumStop, Pose(0.0F), true, 6'000'000'000ULL,
+        true, momentumProfile, momentumOutput);
+    float criticalMaximum = 0.0F;
+    float momentumMaximum = 0.0F;
+    for (std::uint64_t frame = 1; frame <= 180; ++frame) {
+        const std::uint64_t timestamp =
+            6'000'000'000ULL + frame * 11'111'111ULL;
+        UpdateWeaponWeightFilter(
+            criticalStop, Pose(1.0F), true, timestamp,
+            true, criticalProfile, criticalOutput);
+        UpdateWeaponWeightFilter(
+            momentumStop, Pose(1.0F), true, timestamp,
+            true, momentumProfile, momentumOutput);
+        criticalMaximum = std::max(
+            criticalMaximum, criticalOutput.position.x);
+        momentumMaximum = std::max(
+            momentumMaximum, momentumOutput.position.x);
+    }
+    assert(criticalMaximum <= 1.0001F);
+    assert(momentumMaximum > 1.02F);
+    assert(momentumMaximum < 1.30F);
 
     const WeaponWeightQuaternion q = Pose(0.0F, 0.75F).orientation;
     const WeaponWeightVector positive = QuaternionToRotationVector(q);

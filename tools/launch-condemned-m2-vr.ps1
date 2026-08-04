@@ -11,7 +11,13 @@
 
 .PARAMETER DesktopWindow
     Runs Condemned in a smaller desktop window so other applications remain
-    visible. The default window render size is 1920x1080.
+    visible. The default window render size is 1920x1080. A verified Retail
+    focus patch keeps VR rendering while another desktop window is foreground,
+    while suppressing Condemned's cursor-centering outside the game.
+
+.PARAMETER NoBackgroundRender
+    Diagnostic rollback for DesktopWindow mode. Restores Retail's behavior of
+    shutting down its renderer whenever Condemned loses foreground focus.
 
 .PARAMETER TurningProbe
     Enables the separately guarded M4 right-stick turning gate.
@@ -30,6 +36,51 @@
 .PARAMETER HapticsProbe
     Enables bounded M4 Fire, Block, and Activate confirmation pulses.
     Requires -CoreActionsProbe or -InteractionProbe.
+
+.PARAMETER HeadAimProbe
+    Suppresses mouse look while fresh focused HMD tracking is active, aims
+    Retail fire from the right controller, and makes the flashlight follow
+    head look.
+    Requires -StereoTuning and -TurningProbe.
+
+.PARAMETER AimPathProbe
+    Enables observation-only M5 tracing for controller attack edges, the
+    verified melee collision path, and the existing fire-vector path.
+    Requires -HeadAimProbe and -CoreActionsProbe.
+
+.PARAMETER MeleeAimProbe
+    Redirects the verified animation-driven melee collision transform toward
+    the right controller while preserving Retail's swing curve and timing.
+    Requires -AimPathProbe for the initial live-validation gate.
+
+.PARAMETER PhysicalMeleeProbe
+    Enables controller world-pose, swept weapon endpoint, velocity, and
+    impact-energy telemetry. For the verified fire-axe profile, a qualifying
+    tracking-space swing also requests Retail's normal attack command; it does
+    not directly apply a collision or damage. Requires -AimPathProbe.
+
+.PARAMETER PhysicalMeleeWallProxy
+    Moves Retail's verified melee collision body to the controller-driven
+    weapon endpoint for wall-contact testing. Every native melee impact is
+    blocked, so this gate cannot damage actors. Requires -PhysicalMeleeProbe
+    and cannot be combined with -MeleeAimProbe.
+
+.PARAMETER PhysicalMeleeVisualProxy
+    Temporarily moves the equipped Retail melee model during stereo rendering
+    so its profile-defined grip sits on the OpenXR right-controller grip and
+    its weapon axis follows the controller aim pose. The verified current-
+    weapon/model references are observed continuously, so the model starts in
+    hand without an attack and automatically follows weapon switches. Retail's
+    exact model transform is restored after both eyes. Requires
+    -PhysicalMeleeWallProxy.
+
+.PARAMETER WeaponGripCalibration
+    Arms the Grip tab of the foreground-gated VR tool menu for the equipped
+    weapon model. Both headset eyes update immediately, calibration is retained
+    per equipped weapon for the current run, and the Snapshot row logs exact
+    profile-ready values. A generic controller wireframe marks the OpenXR grip
+    pose and aim direction while the Grip tab is open. F11 retains the legacy
+    keyboard/controller calibration mode. Requires -PhysicalMeleeVisualProxy.
 
 .PARAMETER NoHidFpsFix
     Diagnostic rollback that leaves Condemned's redundant Jupiter EX
@@ -66,11 +117,19 @@ param(
     [switch]$InteractionProbe,
     [switch]$CoreActionsProbe,
     [switch]$HapticsProbe,
+    [switch]$HeadAimProbe,
+    [switch]$AimPathProbe,
+    [switch]$MeleeAimProbe,
+    [switch]$PhysicalMeleeProbe,
+    [switch]$PhysicalMeleeWallProxy,
+    [switch]$PhysicalMeleeVisualProxy,
+    [switch]$WeaponGripCalibration,
     [switch]$NoHidFpsFix,
     [switch]$NoXrFramePacing,
     [switch]$PerformanceProbe,
     [switch]$RecenterProbe,
     [switch]$DesktopWindow,
+    [switch]$NoBackgroundRender,
     [ValidateRange(640, 3840)]
     [int]$DesktopWindowWidth = 1920,
     [ValidateRange(480, 2160)]
@@ -91,6 +150,37 @@ if ($HapticsProbe -and
     -not ($CoreActionsProbe -or $InteractionProbe)) {
     throw '-HapticsProbe requires -CoreActionsProbe or -InteractionProbe.'
 }
+if ($HeadAimProbe -and
+    -not ($StereoTuning -and $TurningProbe)) {
+    throw '-HeadAimProbe requires -StereoTuning and -TurningProbe.'
+}
+if ($AimPathProbe -and
+    -not ($HeadAimProbe -and $CoreActionsProbe)) {
+    throw '-AimPathProbe requires -HeadAimProbe and -CoreActionsProbe.'
+}
+if ($MeleeAimProbe -and -not $AimPathProbe) {
+    throw '-MeleeAimProbe requires -AimPathProbe.'
+}
+if ($PhysicalMeleeProbe -and -not $AimPathProbe) {
+    throw '-PhysicalMeleeProbe requires -AimPathProbe.'
+}
+if ($PhysicalMeleeWallProxy -and -not $PhysicalMeleeProbe) {
+    throw '-PhysicalMeleeWallProxy requires -PhysicalMeleeProbe.'
+}
+if ($PhysicalMeleeWallProxy -and $MeleeAimProbe) {
+    throw '-PhysicalMeleeWallProxy cannot be combined with -MeleeAimProbe.'
+}
+if ($PhysicalMeleeVisualProxy -and -not $PhysicalMeleeWallProxy) {
+    throw '-PhysicalMeleeVisualProxy requires -PhysicalMeleeWallProxy.'
+}
+if ($WeaponGripCalibration -and -not $PhysicalMeleeVisualProxy) {
+    throw '-WeaponGripCalibration requires -PhysicalMeleeVisualProxy.'
+}
+if ($NoBackgroundRender -and -not $DesktopWindow) {
+    throw '-NoBackgroundRender requires -DesktopWindow.'
+}
+$backgroundRenderRequired =
+    [bool]($DesktopWindow -and -not $NoBackgroundRender)
 
 function Read-LiveLog([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or
@@ -296,6 +386,27 @@ if ($CoreActionsProbe) {
 if ($HapticsProbe) {
     $gameArguments += '-condemnedvr-m4-haptics'
 }
+if ($HeadAimProbe) {
+    $gameArguments += '-condemnedvr-m5-head-aim'
+}
+if ($AimPathProbe) {
+    $gameArguments += '-condemnedvr-m5-aim-path-probe'
+}
+if ($MeleeAimProbe) {
+    $gameArguments += '-condemnedvr-m5-controller-melee-aim'
+}
+if ($PhysicalMeleeProbe) {
+    $gameArguments += '-condemnedvr-m5-physical-melee-probe'
+}
+if ($PhysicalMeleeWallProxy) {
+    $gameArguments += '-condemnedvr-m5-physical-melee-wall-proxy'
+}
+if ($PhysicalMeleeVisualProxy) {
+    $gameArguments += '-condemnedvr-m5-physical-melee-visual-proxy'
+}
+if ($WeaponGripCalibration) {
+    $gameArguments += '-condemnedvr-m5-weapon-grip-calibration'
+}
 if ($NoHidFpsFix) {
     $gameArguments += '-condemnedvr-no-hid-fps-fix'
 }
@@ -312,6 +423,9 @@ if ($RecenterProbe) {
     $gameArguments += '-condemnedvr-m4-recenter'
 }
 if ($DesktopWindow) {
+    if ($backgroundRenderRequired) {
+        $gameArguments += '-condemnedvr-background-render'
+    }
     $gameArguments += @(
         '+Windowed', '1',
         '+ScreenWidth',
@@ -373,6 +487,17 @@ try {
                  '"event":"hid_fps_fix_protect_failed"'))) {
             throw 'The guarded Condemned HID/FPS fix was rejected.'
         }
+        if ($backgroundRenderRequired -and
+            ($proxyText.Contains(
+                 '"event":"background_render_fix_unsupported_executable"') -or
+             $proxyText.Contains(
+                 '"event":"background_render_fix_byte_mismatch"') -or
+             $proxyText.Contains(
+                 '"event":"background_render_fix_protect_failed"') -or
+             $proxyText.Contains(
+                 '"event":"background_render_fix_cursor_hook_failed"'))) {
+            throw 'The guarded Condemned background-render fix was rejected.'
+        }
         if ($LocomotionProbe -and
             $loaderText.Contains(
                 '"event":"m4_binding_locomotion_rejected"')) {
@@ -403,6 +528,51 @@ try {
                 '"event":"m4_controller_haptic_failed"')) {
             throw 'The guarded M4 haptic transport failed.'
         }
+        if ($HeadAimProbe -and
+            $loaderText.Contains(
+                '"event":"m5_head_aim_rejected"')) {
+            throw 'The guarded M5 head-aim path was rejected.'
+        }
+        if ($HeadAimProbe -and
+            $loaderText.Contains(
+                '"event":"m5_head_camera_transform_rejected"')) {
+            throw 'The guarded M5 head-camera transform was rejected.'
+        }
+        if ($AimPathProbe -and
+            $loaderText.Contains(
+                '"event":"m5_aim_path_rejected"')) {
+            throw 'The guarded M5 aim-path diagnostic was rejected.'
+        }
+        if ($MeleeAimProbe -and
+            $loaderText.Contains(
+                '"event":"m5_controller_melee_aim_rejected"')) {
+            throw 'The guarded M5 controller-melee path was rejected.'
+        }
+        if ($PhysicalMeleeProbe -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_probe_rejected"')) {
+            throw 'The guarded M5 physical-melee probe was rejected.'
+        }
+        if ($PhysicalMeleeWallProxy -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_wall_proxy_rejected"')) {
+            throw 'The guarded M5 physical-melee wall proxy was rejected.'
+        }
+        if ($PhysicalMeleeVisualProxy -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_visual_proxy_rejected"')) {
+            throw 'The guarded M5 visible melee proxy was rejected.'
+        }
+        if ($PhysicalMeleeVisualProxy -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_visual_proxy_restore_failed"')) {
+            throw 'The visible M5 melee proxy could not restore the Retail model.'
+        }
+        if ($WeaponGripCalibration -and
+            $loaderText.Contains(
+                '"event":"m5_weapon_grip_calibration_rejected"')) {
+            throw 'The guarded M5 weapon-grip calibration mode was rejected.'
+        }
         if ($RecenterProbe -and
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_rejected"')) {
@@ -427,6 +597,11 @@ try {
             $proxyText.Contains('"event":"hid_fps_fix_applied"') -or
             $proxyText.Contains(
                 '"event":"hid_fps_fix_already_applied"')
+        $backgroundRenderReady = -not $backgroundRenderRequired -or
+            $proxyText.Contains(
+                '"event":"background_render_fix_applied"') -or
+            $proxyText.Contains(
+                '"event":"background_render_fix_already_applied"')
         $hostReady =
             $hostText.Contains('"event":"ipc_connected"') -and
             $hostText.Contains('"event":"ipc_frame"') -and
@@ -446,6 +621,29 @@ try {
         $hapticsReady = -not $HapticsProbe -or
             $loaderText.Contains(
                 '"event":"m4_controller_haptics_armed"')
+        $headAimReady = -not $HeadAimProbe -or
+            ($loaderText.Contains(
+                 '"event":"m5_head_aim_armed"') -and
+             $loaderText.Contains(
+                 '"event":"m5_head_camera_transform_armed"'))
+        $aimPathReady = -not $AimPathProbe -or
+            $loaderText.Contains(
+                '"event":"m5_aim_path_probe_armed"')
+        $meleeAimReady = -not $MeleeAimProbe -or
+            $loaderText.Contains(
+                '"event":"m5_controller_melee_aim_armed"')
+        $physicalMeleeReady = -not $PhysicalMeleeProbe -or
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_probe_armed"')
+        $physicalMeleeWallProxyReady = -not $PhysicalMeleeWallProxy -or
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_wall_proxy_armed"')
+        $physicalMeleeVisualProxyReady = -not $PhysicalMeleeVisualProxy -or
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_visual_proxy_armed"')
+        $weaponGripCalibrationReady = -not $WeaponGripCalibration -or
+            $loaderText.Contains(
+                '"event":"m5_weapon_grip_calibration_armed"')
         $recenterReady = -not $RecenterProbe -or
             $loaderText.Contains(
                 '"event":"m4_hmd_recenter_armed"')
@@ -459,13 +657,17 @@ try {
         $inputHooksReady =
             $locomotionReady -and $turningReady -and $menuReady -and
             $interactionReady -and $coreActionsReady -and $hapticsReady -and
+            $headAimReady -and $aimPathReady -and $meleeAimReady -and
+            $physicalMeleeReady -and $physicalMeleeWallProxyReady -and
+            $physicalMeleeVisualProxyReady -and
+            $weaponGripCalibrationReady -and
             $recenterReady
     } until (($bridgeReady -and $hostReady -and $hidFpsFixReady -and
-              $inputHooksReady) -or
+              $backgroundRenderReady -and $inputHooksReady) -or
         (Get-Date) -ge $deadline)
 
     if (-not $bridgeReady -or -not $hostReady -or
-        -not $hidFpsFixReady) {
+        -not $hidFpsFixReady -or -not $backgroundRenderReady) {
         throw 'The mono OpenXR frame path did not become ready within 45 seconds.'
     }
     if (-not $inputHooksReady) {
@@ -506,10 +708,18 @@ try {
             Interaction = [bool]$InteractionProbe
             CoreActions = [bool]$CoreActionsProbe
             Haptics = [bool]$HapticsProbe
+            HeadAim = [bool]$HeadAimProbe
+            AimPath = [bool]$AimPathProbe
+            MeleeAim = [bool]$MeleeAimProbe
+            PhysicalMelee = [bool]$PhysicalMeleeProbe
+            PhysicalMeleeWallProxy = [bool]$PhysicalMeleeWallProxy
+            PhysicalMeleeVisualProxy = [bool]$PhysicalMeleeVisualProxy
+            WeaponGripCalibration = [bool]$WeaponGripCalibration
             Recenter = [bool]$RecenterProbe
         }
         CaptureEnabled = $true
         HidFpsFixEnabled = -not [bool]$NoHidFpsFix
+        BackgroundRenderingEnabled = $backgroundRenderRequired
         XrFramePacingEnabled = -not [bool]$NoXrFramePacing
         PerformanceProbe = [bool]$PerformanceProbe
         OpenXrEnabled = $true
@@ -526,6 +736,16 @@ try {
     Write-Host "Proxy log: $($proxyLog.FullName)"
     Write-Host "Report:    $reportPath"
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
+    if ($WeaponGripCalibration) {
+        Write-Host 'Live weapon-grip calibration is active:' `
+            -ForegroundColor Cyan
+        Write-Host '  Hold BOTH grips: right stick = X/Y; left-stick up/down = Z'
+        Write-Host '  A = position; B = rotation; X = reset; Y = save snapshot'
+        Write-Host '  Left/right stick click = finer/coarser; release a grip = gameplay'
+        Write-Host '  Keyboard fallback: J/L X, K/I Y, U/O Z, T mode, ,/. step, R reset, P save'
+        Write-Host '  Wireframe = grip pose; magenta = grip centre; RGB = local axes; yellow = aim'
+        Write-Host '  F11 pauses/resumes the setup tool.'
+    }
     if ($PerformanceProbe) {
         $watcherScript = Join-Path $PSScriptRoot (
             'watch-condemned-performance.ps1')

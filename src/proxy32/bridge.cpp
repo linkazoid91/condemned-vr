@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <Shellapi.h>
 #include <d3dcompiler.h>
@@ -18,6 +20,7 @@
 #include <MinHook.h>
 #include <wrl/client.h>
 
+#include "condemned_background_render.h"
 #include "fearvr-version.h"
 #include "ipc_names.h"
 #include "protocol_utils.h"
@@ -150,6 +153,10 @@ struct CommandLineConfig {
     bool disableCapture{false};
     // Diagnostic rollback for the three verified Jupiter EX input patches.
     bool disableHidFpsFix{false};
+    // Condemned windowed VR can keep rendering while a desktop chat or
+    // diagnostics window owns the foreground. Gameplay input remains gated
+    // separately on actual foreground ownership.
+    bool backgroundRenderingEnabled{false};
     // Diagnostic rollback for pacing the game from fresh OpenXR requests.
     bool disableXrFramePacing{false};
     // Linear supersampling applied only while the native stereo world is
@@ -216,6 +223,10 @@ CommandLineConfig ReadConfig() noexcept {
                         arguments[index],
                         L"-condemnedvr-no-xr-frame-pacing") == 0)) {
             config.disableXrFramePacing = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-condemnedvr-background-render") == 0) {
+            config.backgroundRenderingEnabled = true;
         } else if (_wcsicmp(
                        arguments[index],
                        L"-fearvr-render-scale") == 0 &&
@@ -351,6 +362,230 @@ HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
         kLastRva - kFirstRva);
     return HidFpsFixResult::Applied;
 }
+
+#if defined(CONDEMNEDVR_PRODUCT)
+enum class BackgroundRenderFixResult {
+    Applied,
+    AlreadyApplied,
+    UnsupportedExecutable,
+    ByteMismatch,
+    ProtectFailed,
+    CursorHookFailed
+};
+
+using SetCursorPosFunction = BOOL(WINAPI*)(int, int);
+SetCursorPosFunction g_originalSetCursorPos = nullptr;
+
+BOOL WINAPI HookBackgroundAwareSetCursorPos(int x, int y) noexcept {
+    DWORD foregroundProcessId = 0;
+    const HWND foreground = GetForegroundWindow();
+    if (foreground != nullptr) {
+        GetWindowThreadProcessId(foreground, &foregroundProcessId);
+    }
+    if (!condemnedvr::ShouldForwardBackgroundCursorWarp(
+            GetCurrentProcessId(), foregroundProcessId)) {
+        return TRUE;
+    }
+    return g_originalSetCursorPos != nullptr
+        ? g_originalSetCursorPos(x, y)
+        : FALSE;
+}
+
+bool ImageRangeIsValid(
+    std::uint32_t rva,
+    std::size_t size,
+    std::uint32_t imageSize) noexcept {
+    return rva < imageSize && size <= imageSize - rva;
+}
+
+IMAGE_THUNK_DATA32* FindExecutableImport(
+    std::uint8_t* base,
+    const IMAGE_NT_HEADERS32* nt,
+    const char* requestedModule,
+    const char* requestedFunction) noexcept {
+    if (base == nullptr || nt == nullptr || requestedModule == nullptr ||
+        requestedFunction == nullptr) {
+        return nullptr;
+    }
+    const std::uint32_t imageSize = nt->OptionalHeader.SizeOfImage;
+    const IMAGE_DATA_DIRECTORY& imports =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (imports.VirtualAddress == 0U ||
+        !ImageRangeIsValid(
+            imports.VirtualAddress,
+            sizeof(IMAGE_IMPORT_DESCRIPTOR), imageSize)) {
+        return nullptr;
+    }
+
+    for (std::uint32_t descriptorRva = imports.VirtualAddress;
+         ImageRangeIsValid(
+             descriptorRva,
+             sizeof(IMAGE_IMPORT_DESCRIPTOR), imageSize);
+         descriptorRva += sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+        const auto* const descriptor =
+            reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
+                base + descriptorRva);
+        if (descriptor->Name == 0U) {
+            return nullptr;
+        }
+        if (!ImageRangeIsValid(descriptor->Name, 1U, imageSize)) {
+            return nullptr;
+        }
+        const char* const module = reinterpret_cast<const char*>(
+            base + descriptor->Name);
+        if (_stricmp(module, requestedModule) != 0) {
+            continue;
+        }
+        if (descriptor->OriginalFirstThunk == 0U ||
+            descriptor->FirstThunk == 0U) {
+            return nullptr;
+        }
+
+        for (std::uint32_t index = 0U;; ++index) {
+            const std::uint32_t thunkOffset =
+                index * static_cast<std::uint32_t>(
+                    sizeof(IMAGE_THUNK_DATA32));
+            const std::uint32_t nameThunkRva =
+                descriptor->OriginalFirstThunk + thunkOffset;
+            const std::uint32_t iatThunkRva =
+                descriptor->FirstThunk + thunkOffset;
+            if (!ImageRangeIsValid(
+                    nameThunkRva, sizeof(IMAGE_THUNK_DATA32), imageSize) ||
+                !ImageRangeIsValid(
+                    iatThunkRva, sizeof(IMAGE_THUNK_DATA32), imageSize)) {
+                return nullptr;
+            }
+            const auto* const nameThunk =
+                reinterpret_cast<const IMAGE_THUNK_DATA32*>(
+                    base + nameThunkRva);
+            if (nameThunk->u1.AddressOfData == 0U) {
+                return nullptr;
+            }
+            if (IMAGE_SNAP_BY_ORDINAL32(nameThunk->u1.Ordinal)) {
+                continue;
+            }
+            const std::uint32_t nameRva = nameThunk->u1.AddressOfData;
+            if (!ImageRangeIsValid(
+                    nameRva, sizeof(IMAGE_IMPORT_BY_NAME), imageSize)) {
+                return nullptr;
+            }
+            const auto* const imported =
+                reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+                    base + nameRva);
+            if (std::strcmp(
+                    reinterpret_cast<const char*>(imported->Name),
+                    requestedFunction) == 0) {
+                return reinterpret_cast<IMAGE_THUNK_DATA32*>(
+                    base + iatThunkRva);
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool InstallBackgroundCursorHook(
+    std::uint8_t* base,
+    const IMAGE_NT_HEADERS32* nt,
+    bool& changed) noexcept {
+    changed = false;
+    static_assert(sizeof(void*) == sizeof(std::uint32_t));
+    IMAGE_THUNK_DATA32* const cursorImport = FindExecutableImport(
+        base, nt, "USER32.dll", "SetCursorPos");
+    if (cursorImport == nullptr) {
+        return false;
+    }
+    const std::uintptr_t current =
+        static_cast<std::uintptr_t>(cursorImport->u1.Function);
+    const std::uintptr_t replacement = reinterpret_cast<std::uintptr_t>(
+        &HookBackgroundAwareSetCursorPos);
+    if (current == replacement) {
+        return g_originalSetCursorPos != nullptr;
+    }
+    if (current == 0U) {
+        return false;
+    }
+
+    g_originalSetCursorPos =
+        reinterpret_cast<SetCursorPosFunction>(current);
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(
+            &cursorImport->u1.Function,
+            sizeof(cursorImport->u1.Function), PAGE_READWRITE,
+            &oldProtection)) {
+        g_originalSetCursorPos = nullptr;
+        return false;
+    }
+    InterlockedExchange(
+        reinterpret_cast<volatile LONG*>(&cursorImport->u1.Function),
+        static_cast<LONG>(static_cast<std::uint32_t>(replacement)));
+    DWORD ignored = 0;
+    VirtualProtect(
+        &cursorImport->u1.Function,
+        sizeof(cursorImport->u1.Function), oldProtection, &ignored);
+    changed = true;
+    return true;
+}
+
+BackgroundRenderFixResult ApplyVerifiedBackgroundRenderFix() noexcept {
+    auto* const base = reinterpret_cast<std::uint8_t*>(
+        GetModuleHandleW(nullptr));
+    if (base == nullptr) {
+        return BackgroundRenderFixResult::UnsupportedExecutable;
+    }
+    const auto* const dos =
+        reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return BackgroundRenderFixResult::UnsupportedExecutable;
+    }
+    const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(
+        base + dos->e_lfanew);
+    constexpr std::size_t kPatchSize =
+        condemnedvr::kBackgroundRenderReplacementBytes.size();
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.TimeDateStamp !=
+            condemnedvr::kBackgroundRenderExecutableTimestamp ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+        nt->OptionalHeader.SizeOfImage <
+            condemnedvr::kBackgroundRenderBranchRva + kPatchSize) {
+        return BackgroundRenderFixResult::UnsupportedExecutable;
+    }
+
+    std::uint8_t* const target =
+        base + condemnedvr::kBackgroundRenderBranchRva;
+    const condemnedvr::BackgroundRenderByteState byteState =
+        condemnedvr::ClassifyBackgroundRenderBytes(target, kPatchSize);
+    if (byteState != condemnedvr::BackgroundRenderByteState::Retail) {
+        if (byteState != condemnedvr::BackgroundRenderByteState::Patched) {
+            return BackgroundRenderFixResult::ByteMismatch;
+        }
+    }
+
+    bool cursorHookChanged = false;
+    if (!InstallBackgroundCursorHook(base, nt, cursorHookChanged)) {
+        return BackgroundRenderFixResult::CursorHookFailed;
+    }
+    if (byteState == condemnedvr::BackgroundRenderByteState::Patched) {
+        return cursorHookChanged
+            ? BackgroundRenderFixResult::Applied
+            : BackgroundRenderFixResult::AlreadyApplied;
+    }
+
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(
+            target, kPatchSize, PAGE_EXECUTE_READWRITE,
+            &oldProtection)) {
+        return BackgroundRenderFixResult::ProtectFailed;
+    }
+    std::memcpy(
+        target,
+        condemnedvr::kBackgroundRenderReplacementBytes.data(),
+        kPatchSize);
+    DWORD ignored = 0;
+    VirtualProtect(target, kPatchSize, oldProtection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), target, kPatchSize);
+    return BackgroundRenderFixResult::Applied;
+}
+#endif
 
 volatile LONG* AtomicState(FearVrSlot& slot) noexcept {
     return reinterpret_cast<volatile LONG*>(&slot.state);
@@ -1141,52 +1376,101 @@ public:
             logger_.Write(
                 "WARN", "hid_fps_fix_disabled",
                 "Jupiter EX HID initialization remains unmodified.");
+        } else {
+            const HidFpsFixResult result = ApplyVerifiedHidFpsFix();
+            switch (result) {
+            case HidFpsFixResult::Applied:
+                logger_.Write(
+                    "INFO", "hid_fps_fix_applied",
+#if defined(CONDEMNEDVR_PRODUCT)
+                    "Verified Condemned 1.0.314.0 ranges 0x82670, 0x826F6 "
+                    "and 0x82780 disabled redundant HID/joystick "
+                    "initialization.");
+#else
+                    "Verified Steam 1.08 ranges 0x84057, 0x840DD and "
+                    "0x84166 disabled redundant HID/joystick "
+                    "initialization.");
+#endif
+                break;
+            case HidFpsFixResult::AlreadyApplied:
+                logger_.Write(
+                    "INFO", "hid_fps_fix_already_applied",
+                    "All three verified Jupiter EX input ranges were already "
+                    "disabled.");
+                break;
+            case HidFpsFixResult::UnsupportedExecutable:
+                logger_.Write(
+                    "WARN", "hid_fps_fix_unsupported_executable",
+#if defined(CONDEMNEDVR_PRODUCT)
+                    "Executable identity is not Condemned 1.0.314.0; no bytes "
+                    "were changed.");
+#else
+                    "Executable timestamp is not Steam F.E.A.R. 1.08; no "
+                    "bytes were changed.");
+#endif
+                break;
+            case HidFpsFixResult::ByteMismatch:
+                logger_.Write(
+                    "ERROR", "hid_fps_fix_byte_mismatch",
+                    "At least one Jupiter EX input range did not match; no "
+                    "bytes were changed.");
+                break;
+            case HidFpsFixResult::ProtectFailed:
+                logger_.Write(
+                    "ERROR", "hid_fps_fix_protect_failed",
+                    "VirtualProtect rejected the verified input ranges; no "
+                    "bytes were changed.");
+                break;
+            }
+        }
+
+#if defined(CONDEMNEDVR_PRODUCT)
+        if (!config_.backgroundRenderingEnabled) {
             return;
         }
-        const HidFpsFixResult result = ApplyVerifiedHidFpsFix();
-        switch (result) {
-        case HidFpsFixResult::Applied:
+        const BackgroundRenderFixResult backgroundResult =
+            ApplyVerifiedBackgroundRenderFix();
+        switch (backgroundResult) {
+        case BackgroundRenderFixResult::Applied:
             logger_.Write(
-                "INFO", "hid_fps_fix_applied",
-#if defined(CONDEMNEDVR_PRODUCT)
-                "Verified Condemned 1.0.314.0 ranges 0x82670, 0x826F6 "
-                "and 0x82780 disabled redundant HID/joystick "
-                "initialization.");
-#else
-                "Verified Steam 1.08 ranges 0x84057, 0x840DD and "
-                "0x84166 disabled redundant HID/joystick initialization.");
-#endif
+                "INFO", "background_render_fix_applied",
+                "Verified Condemned 1.0.314.0 WM_ACTIVATEAPP branch at "
+                "RVA 0x7C5E3 now bypasses renderer shutdown on focus loss; "
+                "foreground input gates remain active and background "
+                "SetCursorPos warps are suppressed.");
             break;
-        case HidFpsFixResult::AlreadyApplied:
+        case BackgroundRenderFixResult::AlreadyApplied:
             logger_.Write(
-                "INFO", "hid_fps_fix_already_applied",
-                "All three verified Jupiter EX input ranges were already "
-                "disabled.");
+                "INFO", "background_render_fix_already_applied",
+                "The verified WM_ACTIVATEAPP background-render branch was "
+                "already patched.");
             break;
-        case HidFpsFixResult::UnsupportedExecutable:
+        case BackgroundRenderFixResult::UnsupportedExecutable:
             logger_.Write(
-                "WARN", "hid_fps_fix_unsupported_executable",
-#if defined(CONDEMNEDVR_PRODUCT)
-                "Executable identity is not Condemned 1.0.314.0; no bytes "
-                "were changed.");
-#else
-                "Executable timestamp is not Steam F.E.A.R. 1.08; no bytes "
-                "were changed.");
-#endif
-            break;
-        case HidFpsFixResult::ByteMismatch:
-            logger_.Write(
-                "ERROR", "hid_fps_fix_byte_mismatch",
-                "At least one Jupiter EX input range did not match; no "
+                "ERROR", "background_render_fix_unsupported_executable",
+                "Executable identity is not Condemned 1.0.314.0; no focus "
                 "bytes were changed.");
             break;
-        case HidFpsFixResult::ProtectFailed:
+        case BackgroundRenderFixResult::ByteMismatch:
             logger_.Write(
-                "ERROR", "hid_fps_fix_protect_failed",
-                "VirtualProtect rejected the verified input ranges; no "
+                "ERROR", "background_render_fix_byte_mismatch",
+                "The verified WM_ACTIVATEAPP branch did not match; no focus "
                 "bytes were changed.");
+            break;
+        case BackgroundRenderFixResult::ProtectFailed:
+            logger_.Write(
+                "ERROR", "background_render_fix_protect_failed",
+                "VirtualProtect rejected the verified WM_ACTIVATEAPP branch; "
+                "no focus bytes were changed.");
+            break;
+        case BackgroundRenderFixResult::CursorHookFailed:
+            logger_.Write(
+                "ERROR", "background_render_fix_cursor_hook_failed",
+                "The executable SetCursorPos import could not be guarded; "
+                "the focus branch was left unchanged.");
             break;
         }
+#endif
     }
 
     void CapturePresent(IDirect3DDevice9* device) noexcept {
@@ -1752,6 +2036,267 @@ public:
         MemoryBarrier();
         InterlockedIncrement64(Atomic64(shared_->hapticSequence));
         return TRUE;
+    }
+
+    BOOL DrawOverlayLines(
+        const FearVrOverlayLineVertex* vertices,
+        std::uint32_t vertexCount) noexcept {
+        constexpr std::uint32_t kMaximumInputVertices = 256;
+        if (vertices == nullptr || vertexCount < 2 ||
+            (vertexCount % 2U) != 0 ||
+            vertexCount > kMaximumInputVertices) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stereoAccepting_ || device_ == nullptr ||
+            !resourcesReady_) {
+            return FALSE;
+        }
+
+        D3DVIEWPORT9 viewport{};
+        HRESULT result = device_->GetViewport(&viewport);
+        if (FAILED(result) || viewport.Width == 0 ||
+            viewport.Height == 0) {
+            return FALSE;
+        }
+        struct DrawVertex {
+            float x;
+            float y;
+            float z;
+            float rhw;
+            D3DCOLOR color;
+        };
+        std::array<DrawVertex, kMaximumInputVertices * 3> drawVertices{};
+        std::uint32_t drawVertexCount = 0;
+        constexpr float kHalfThicknessPixels = 1.5F;
+        const auto ScreenX = [&](float ndc) {
+            return static_cast<float>(viewport.X) +
+                (ndc + 1.0F) * 0.5F *
+                    static_cast<float>(viewport.Width);
+        };
+        const auto ScreenY = [&](float ndc) {
+            return static_cast<float>(viewport.Y) +
+                (1.0F - ndc) * 0.5F *
+                    static_cast<float>(viewport.Height);
+        };
+        const auto Vertex = [](float x, float y, D3DCOLOR color) {
+            return DrawVertex{x, y, 0.0F, 1.0F, color};
+        };
+        for (std::uint32_t index = 0;
+             index < vertexCount; index += 2U) {
+            const FearVrOverlayLineVertex& start = vertices[index];
+            const FearVrOverlayLineVertex& end = vertices[index + 1U];
+            if (!std::isfinite(start.ndcX) ||
+                !std::isfinite(start.ndcY) ||
+                !std::isfinite(end.ndcX) ||
+                !std::isfinite(end.ndcY) ||
+                std::fabs(start.ndcX) > 16.0F ||
+                std::fabs(start.ndcY) > 16.0F ||
+                std::fabs(end.ndcX) > 16.0F ||
+                std::fabs(end.ndcY) > 16.0F) {
+                continue;
+            }
+            const float x0 = ScreenX(start.ndcX);
+            const float y0 = ScreenY(start.ndcY);
+            const float x1 = ScreenX(end.ndcX);
+            const float y1 = ScreenY(end.ndcY);
+            const float deltaX = x1 - x0;
+            const float deltaY = y1 - y0;
+            const float lengthSquared =
+                deltaX * deltaX + deltaY * deltaY;
+            if (!std::isfinite(lengthSquared) ||
+                lengthSquared < 0.0001F) {
+                continue;
+            }
+            const float inverseLength =
+                1.0F / std::sqrt(lengthSquared);
+            const float offsetX =
+                -deltaY * inverseLength * kHalfThicknessPixels;
+            const float offsetY =
+                deltaX * inverseLength * kHalfThicknessPixels;
+            const D3DCOLOR color =
+                static_cast<D3DCOLOR>(start.argb);
+            drawVertices[drawVertexCount++] =
+                Vertex(x0 + offsetX, y0 + offsetY, color);
+            drawVertices[drawVertexCount++] =
+                Vertex(x1 + offsetX, y1 + offsetY, color);
+            drawVertices[drawVertexCount++] =
+                Vertex(x1 - offsetX, y1 - offsetY, color);
+            drawVertices[drawVertexCount++] =
+                Vertex(x0 + offsetX, y0 + offsetY, color);
+            drawVertices[drawVertexCount++] =
+                Vertex(x1 - offsetX, y1 - offsetY, color);
+            drawVertices[drawVertexCount++] =
+                Vertex(x0 - offsetX, y0 - offsetY, color);
+        }
+        if (drawVertexCount == 0) {
+            return FALSE;
+        }
+
+        ComPtr<IDirect3DStateBlock9> savedState;
+        result = device_->CreateStateBlock(
+            D3DSBT_ALL, savedState.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !savedState ||
+            FAILED(savedState->Capture())) {
+            return FALSE;
+        }
+        const HRESULT beginResult = device_->BeginScene();
+        const bool beganScene = SUCCEEDED(beginResult);
+        device_->SetVertexShader(nullptr);
+        device_->SetPixelShader(nullptr);
+        device_->SetTexture(0, nullptr);
+        device_->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        device_->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+        device_->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device_->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device_->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device_->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device_->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        device_->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+        device_->SetRenderState(
+            D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        device_->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device_->SetTextureStageState(
+            0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(
+            0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        device_->SetTextureStageState(
+            0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(
+            0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        result = device_->DrawPrimitiveUP(
+            D3DPT_TRIANGLELIST, drawVertexCount / 3U,
+            drawVertices.data(), sizeof(DrawVertex));
+        if (beganScene) {
+            device_->EndScene();
+        }
+        const HRESULT restoreResult = savedState->Apply();
+        const bool drawn = SUCCEEDED(result) &&
+            SUCCEEDED(restoreResult);
+        if (drawn && !calibrationOverlayActiveLogged_) {
+            calibrationOverlayActiveLogged_ = true;
+            logger_.Write(
+                "INFO", "calibration_controller_overlay_active",
+                "source=game_projected_ndc primitive=thick_lines "
+                "state_restore=d3d9_state_block");
+        } else if (!drawn && !calibrationOverlayFailureLogged_) {
+            calibrationOverlayFailureLogged_ = true;
+            LogHresult("calibration_controller_overlay_failed", result);
+        }
+        return drawn ? TRUE : FALSE;
+    }
+
+    BOOL DrawOverlayTriangles(
+        const FearVrOverlayLineVertex* vertices,
+        std::uint32_t vertexCount) noexcept {
+        constexpr std::uint32_t kMaximumInputVertices = 24576U;
+        if (vertices == nullptr || vertexCount < 3U ||
+            (vertexCount % 3U) != 0U ||
+            vertexCount > kMaximumInputVertices) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stereoAccepting_ || device_ == nullptr ||
+            !resourcesReady_) {
+            return FALSE;
+        }
+
+        D3DVIEWPORT9 viewport{};
+        HRESULT result = device_->GetViewport(&viewport);
+        if (FAILED(result) || viewport.Width == 0 ||
+            viewport.Height == 0) {
+            return FALSE;
+        }
+        struct DrawVertex {
+            float x;
+            float y;
+            float z;
+            float rhw;
+            D3DCOLOR color;
+        };
+        std::vector<DrawVertex> drawVertices;
+        try {
+            drawVertices.reserve(vertexCount);
+        } catch (...) {
+            return FALSE;
+        }
+        const auto ScreenX = [&](float ndc) {
+            return static_cast<float>(viewport.X) +
+                (ndc + 1.0F) * 0.5F *
+                    static_cast<float>(viewport.Width);
+        };
+        const auto ScreenY = [&](float ndc) {
+            return static_cast<float>(viewport.Y) +
+                (1.0F - ndc) * 0.5F *
+                    static_cast<float>(viewport.Height);
+        };
+        for (std::uint32_t index = 0; index < vertexCount; ++index) {
+            const FearVrOverlayLineVertex& source = vertices[index];
+            if (!std::isfinite(source.ndcX) ||
+                !std::isfinite(source.ndcY) ||
+                std::fabs(source.ndcX) > 16.0F ||
+                std::fabs(source.ndcY) > 16.0F) {
+                return FALSE;
+            }
+            drawVertices.push_back({
+                ScreenX(source.ndcX), ScreenY(source.ndcY),
+                0.0F, 1.0F,
+                static_cast<D3DCOLOR>(source.argb)});
+        }
+
+        ComPtr<IDirect3DStateBlock9> savedState;
+        result = device_->CreateStateBlock(
+            D3DSBT_ALL, savedState.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !savedState ||
+            FAILED(savedState->Capture())) {
+            return FALSE;
+        }
+        const HRESULT beginResult = device_->BeginScene();
+        const bool beganScene = SUCCEEDED(beginResult);
+        device_->SetVertexShader(nullptr);
+        device_->SetPixelShader(nullptr);
+        device_->SetTexture(0, nullptr);
+        device_->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        device_->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+        device_->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device_->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device_->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device_->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device_->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        device_->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+        device_->SetRenderState(
+            D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        device_->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device_->SetTextureStageState(
+            0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(
+            0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        device_->SetTextureStageState(
+            0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        device_->SetTextureStageState(
+            0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        result = device_->DrawPrimitiveUP(
+            D3DPT_TRIANGLELIST, vertexCount / 3U,
+            drawVertices.data(), sizeof(DrawVertex));
+        if (beganScene) {
+            device_->EndScene();
+        }
+        const HRESULT restoreResult = savedState->Apply();
+        const bool drawn = SUCCEEDED(result) &&
+            SUCCEEDED(restoreResult);
+        if (drawn && !toolMenuOverlayActiveLogged_) {
+            toolMenuOverlayActiveLogged_ = true;
+            logger_.Write(
+                "INFO", "tool_menu_overlay_active",
+                "source=game_ndc primitive=triangles "
+                "state_restore=d3d9_state_block");
+        } else if (!drawn && !toolMenuOverlayFailureLogged_) {
+            toolMenuOverlayFailureLogged_ = true;
+            LogHresult("tool_menu_overlay_failed", result);
+        }
+        return drawn ? TRUE : FALSE;
     }
 
     void BeginStereoEye(std::uint32_t eye) noexcept {
@@ -3850,6 +4395,10 @@ private:
     bool savedScissorValid_{false};
     bool stereoViewportScaleLogged_{false};
     bool stereoScissorScaleLogged_{false};
+    bool calibrationOverlayActiveLogged_{false};
+    bool calibrationOverlayFailureLogged_{false};
+    bool toolMenuOverlayActiveLogged_{false};
+    bool toolMenuOverlayFailureLogged_{false};
     std::uint32_t stereoRenderTargetEye_{FEARVR_EYE_LEFT};
     bool xrFramePacingLogged_{false};
     bool stereoKeyWasDown_{false};
@@ -4537,6 +5086,18 @@ BOOL GetInputState(FearVrInputState* input) noexcept {
 BOOL SubmitHapticRequest(
     const FearVrHapticRequest* request) noexcept {
     return GetBridge().WriteHapticRequest(request);
+}
+
+BOOL DrawOverlayLines(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) noexcept {
+    return GetBridge().DrawOverlayLines(vertices, vertexCount);
+}
+
+BOOL DrawOverlayTriangles(
+    const FearVrOverlayLineVertex* vertices,
+    std::uint32_t vertexCount) noexcept {
+    return GetBridge().DrawOverlayTriangles(vertices, vertexCount);
 }
 
 void BeginEye(std::uint32_t eye) noexcept {

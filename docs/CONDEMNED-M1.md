@@ -11,9 +11,9 @@ hook.
 cmake -S . -B build\condemned-x86-vs `
   -G "Visual Studio 17 2022" -A Win32 `
   -DCONDEMNEDVR_BUILD_M1_LOADER=ON `
-  -DFEARVR_BUILD_PROXY=OFF `
-  -DFEARVR_BUILD_HOST=OFF `
-  -DFEARVR_BUILD_TESTS=ON
+  -DCONDEMNEDVR_BUILD_M2_BRIDGE=OFF `
+  -DCONDEMNEDVR_BUILD_HOST=OFF `
+  -DCONDEMNEDVR_BUILD_TESTS=ON
 
 cmake --build build\condemned-x86-vs `
   --config RelWithDebInfo --parallel

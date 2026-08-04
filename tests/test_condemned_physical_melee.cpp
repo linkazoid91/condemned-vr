@@ -1,0 +1,589 @@
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+
+#include "condemned_calibration_gizmo.h"
+#include "condemned_physical_melee.h"
+#include "weapon_weight.h"
+
+namespace {
+
+bool Near(float left, float right, float tolerance = 0.001F) {
+    return std::fabs(left - right) <= tolerance;
+}
+
+int Fail(const char* message) {
+    std::fprintf(stderr, "%s\n", message);
+    return 1;
+}
+
+condemnedvr::PhysicalMeleePose Pose(
+    float x, float y, float z,
+    fearvr::TrackingQuaternion rotation = {}) {
+    return {{x, y, z}, rotation};
+}
+
+condemnedvr::PhysicalMeleeRigidTransform Compose(
+    const condemnedvr::PhysicalMeleeRigidTransform& left,
+    const condemnedvr::PhysicalMeleeRigidTransform& right) {
+    return {
+        condemnedvr::PhysicalMeleeAdd(
+            left.positionUnits,
+            fearvr::Rotate(left.rotation, right.positionUnits)),
+        fearvr::Multiply(left.rotation, right.rotation)};
+}
+
+} // namespace
+
+int main() {
+    using namespace condemnedvr;
+
+    PhysicalMeleeProfile profile{};
+    profile.localTipOffsetUnits = {0.0F, 0.0F, 100.0F};
+    profile.massKilograms = 2.0F;
+
+    // The first complete pose establishes history but cannot manufacture a
+    // sweep or impact.
+    PhysicalMeleeKinematicsState state{};
+    auto frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(10.0F, 20.0F, 30.0F), true,
+        1'000'000'000ULL, profile);
+    if (!frame.poseValid || frame.sweepValid || frame.damageQualified ||
+        frame.resetReason != PhysicalMeleeResetReason::FirstPose ||
+        !Near(frame.currentBaseUnits.x, 10.0F) ||
+        !Near(frame.currentTipUnits.z, 130.0F)) {
+        return Fail("first physical-melee pose must only prime history");
+    }
+    const PhysicalMeleeWallProxyTransform firstProxy =
+        ResolvePhysicalMeleeWallProxyTransform(frame, true);
+    if (!firstProxy.active ||
+        !Near(firstProxy.positionUnits.x, frame.currentTipUnits.x) ||
+        !Near(firstProxy.positionUnits.y, frame.currentTipUnits.y) ||
+        !Near(firstProxy.positionUnits.z, frame.currentTipUnits.z) ||
+        !Near(firstProxy.rotation.w, 1.0F)) {
+        return Fail("fresh wall proxy must follow the weapon endpoint");
+    }
+    if (ResolvePhysicalMeleeWallProxyTransform(frame, false).active) {
+        return Fail("stale wall proxy samples must fail closed");
+    }
+    PhysicalMeleeFrame invalidProxyFrame = frame;
+    invalidProxyFrame.currentRotation.w =
+        std::numeric_limits<float>::infinity();
+    if (ResolvePhysicalMeleeWallProxyTransform(
+            invalidProxyFrame, true).active) {
+        return Fail("invalid wall proxy transforms must fail closed");
+    }
+    if (ShouldDispatchPhysicalMeleeNativeImpact(true) ||
+        !ShouldDispatchPhysicalMeleeNativeImpact(false)) {
+        return Fail("wall proxy gate must block every native impact");
+    }
+
+    // Held models use an explicit, reusable grip anchor. Solving the model
+    // transform must place that local anchor exactly on the controller pose;
+    // identity remains the safe fallback for hand-socket-authored assets.
+    constexpr float kHalfSqrt = 0.70710678118F;
+    const PhysicalMeleeRigidTransform desiredGrip{
+        {100.0F, 200.0F, 300.0F},
+        {0.0F, 0.0F, -kHalfSqrt, kHalfSqrt}};
+    const PhysicalMeleeRigidTransform localModelGrip{
+        {2.0F, -3.0F, 8.0F},
+        {kHalfSqrt, 0.0F, 0.0F, kHalfSqrt}};
+    const PhysicalMeleeVisualProxyTransform heldModel =
+        ResolvePhysicalMeleeHeldModelTransform(
+            desiredGrip, localModelGrip.positionUnits,
+            localModelGrip.rotation, true);
+    const PhysicalMeleeRigidTransform resolvedGrip =
+        Compose(heldModel.objectWorld, localModelGrip);
+    if (!heldModel.active ||
+        !Near(resolvedGrip.positionUnits.x, desiredGrip.positionUnits.x) ||
+        !Near(resolvedGrip.positionUnits.y, desiredGrip.positionUnits.y) ||
+        !Near(resolvedGrip.positionUnits.z, desiredGrip.positionUnits.z) ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(resolvedGrip.rotation),
+            fearvr::Normalize(desiredGrip.rotation))) < 0.999F) {
+        return Fail("profile grip anchor must land on the controller pose");
+    }
+    const PhysicalMeleeVisualProxyTransform identityHeldModel =
+        ResolvePhysicalMeleeHeldModelTransform(
+            desiredGrip, {}, {0.0F, 0.0F, 0.0F, 1.0F}, true);
+    if (!identityHeldModel.active ||
+        !Near(identityHeldModel.objectWorld.positionUnits.x,
+              desiredGrip.positionUnits.x) ||
+        !Near(identityHeldModel.objectWorld.positionUnits.y,
+              desiredGrip.positionUnits.y) ||
+        !Near(identityHeldModel.objectWorld.positionUnits.z,
+              desiredGrip.positionUnits.z)) {
+        return Fail("identity grip profiles must put model origin in hand");
+    }
+    if (ResolvePhysicalMeleeHeldModelTransform(
+            desiredGrip, localModelGrip.positionUnits,
+            localModelGrip.rotation, false).active) {
+        return Fail("stale held-model poses must fail closed");
+    }
+
+    // Live setup stores readable local Euler corrections but feeds the shared
+    // held-model solver a normalized quaternion. A 90-degree local X change
+    // must rotate model +Y onto +Z, and wrap-around stays deterministic.
+    PhysicalMeleeGripCalibration calibration{};
+    calibration.basePositionUnits = {2.0F, -3.0F, 8.0F};
+    calibration.positionUnits = calibration.basePositionUnits;
+    calibration.localRotationDegrees = {90.0F, 0.0F, 0.0F};
+    const fearvr::TrackingQuaternion calibratedRotation =
+        ResolvePhysicalMeleeGripCalibrationRotation(calibration);
+    const fearvr::TrackingVector calibratedUp = fearvr::Rotate(
+        calibratedRotation, {0.0F, 1.0F, 0.0F});
+    if (!Near(calibratedUp.x, 0.0F) ||
+        !Near(calibratedUp.y, 0.0F) ||
+        !Near(calibratedUp.z, 1.0F) ||
+        !Near(PhysicalMeleeWrapDegrees(181.0F), -179.0F) ||
+        !Near(PhysicalMeleeWrapDegrees(-181.0F), 179.0F)) {
+        return Fail("live grip calibration axes must be deterministic");
+    }
+    calibration.baseRotation = localModelGrip.rotation;
+    calibration.localRotationDegrees = {};
+    if (std::fabs(fearvr::Dot(
+            ResolvePhysicalMeleeGripCalibrationRotation(calibration),
+            fearvr::Normalize(localModelGrip.rotation))) < 0.999F) {
+        return Fail("zero live correction must preserve profile rotation");
+    }
+
+    // The alignment reference is generated in controller space and projected
+    // through the verified per-eye camera before the bridge draws it. Neutral
+    // +Z must remain screen centre, while world +X projects rightward.
+    const WeaponGripCalibrationGizmo controllerGizmo =
+        BuildWeaponGripCalibrationGizmo(
+            {0.0F, 0.0F, 100.0F}, {}, {});
+    WeaponGripCalibrationGizmoCamera gizmoCamera{};
+    gizmoCamera.rotation = {};
+    gizmoCamera.horizontalFovRadians =
+        3.14159265358979323846F * 0.5F;
+    gizmoCamera.verticalFovRadians =
+        3.14159265358979323846F * 0.5F;
+    float projectedX = 0.0F;
+    float projectedY = 0.0F;
+    if (!controllerGizmo.valid || controllerGizmo.count < 30 ||
+        !ProjectWeaponGripCalibrationPointToNdc(
+            {10.0F, 0.0F, 100.0F}, gizmoCamera,
+            projectedX, projectedY) ||
+        !Near(projectedX, 0.1F) || !Near(projectedY, 0.0F)) {
+        return Fail("controller gizmo must use stereo camera projection");
+    }
+    FearVrOverlayLineVertex projectedGizmo[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t projectedVertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            controllerGizmo, gizmoCamera, projectedGizmo,
+            sizeof(projectedGizmo) / sizeof(projectedGizmo[0]));
+    if (projectedVertexCount < 60 ||
+        (projectedVertexCount % 2) != 0) {
+        return Fail("controller gizmo must produce complete overlay lines");
+    }
+    if (ProjectWeaponGripCalibrationPointToNdc(
+            {0.0F, 0.0F, -10.0F}, gizmoCamera,
+            projectedX, projectedY)) {
+        return Fail("controller gizmo must reject points behind the eye");
+    }
+    const WeaponGripCalibrationGizmo invalidControllerGizmo =
+        BuildWeaponGripCalibrationGizmo(
+            {}, {0.0F, 0.0F, 0.0F, 0.0F}, {});
+    if (invalidControllerGizmo.valid) {
+        return Fail("invalid controller poses must not draw a gizmo");
+    }
+
+    // The diagnostic visible model keeps its measured animated node-to-model
+    // relationship. Moving the solved object must put that node exactly on
+    // the same controller endpoint used by the collision proxy.
+    const PhysicalMeleeRigidTransform sourceObject{
+        {10.0F, 20.0F, 30.0F},
+        {0.0F, kHalfSqrt, 0.0F, kHalfSqrt}};
+    const PhysicalMeleeRigidTransform nodeInObject{
+        {0.0F, 4.0F, 75.0F},
+        {kHalfSqrt, 0.0F, 0.0F, kHalfSqrt}};
+    const PhysicalMeleeRigidTransform sourceNode =
+        Compose(sourceObject, nodeInObject);
+    const PhysicalMeleeRigidTransform desiredNode{
+        {100.0F, 200.0F, 300.0F},
+        {0.0F, 0.0F, -kHalfSqrt, kHalfSqrt}};
+    const PhysicalMeleeVisualProxyTransform visibleProxy =
+        ResolvePhysicalMeleeVisualProxyTransform(
+            sourceObject, sourceNode, desiredNode, true);
+    const PhysicalMeleeRigidTransform resolvedNode =
+        Compose(visibleProxy.objectWorld, nodeInObject);
+    if (!visibleProxy.active ||
+        !Near(resolvedNode.positionUnits.x, desiredNode.positionUnits.x) ||
+        !Near(resolvedNode.positionUnits.y, desiredNode.positionUnits.y) ||
+        !Near(resolvedNode.positionUnits.z, desiredNode.positionUnits.z) ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(resolvedNode.rotation),
+            fearvr::Normalize(desiredNode.rotation))) < 0.999F) {
+        return Fail("visible weapon node must align with collision endpoint");
+    }
+    if (ResolvePhysicalMeleeVisualProxyTransform(
+            sourceObject, sourceNode, desiredNode, false).active) {
+        return Fail("stale visible weapon sources must fail closed");
+    }
+    PhysicalMeleeRigidTransform invalidSource = sourceObject;
+    invalidSource.positionUnits.x =
+        std::numeric_limits<float>::infinity();
+    if (ResolvePhysicalMeleeVisualProxyTransform(
+            invalidSource, sourceNode, desiredNode, true).active) {
+        return Fail("invalid visible weapon transforms must fail closed");
+    }
+
+    // Two world units in 10 ms at 100 units/m is 2 m/s. With a 2 kg
+    // profile, the endpoint carries 4 joules and qualifies.
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(12.0F, 20.0F, 30.0F), true,
+        1'010'000'000ULL, profile);
+    if (!frame.sweepValid || !frame.damageQualified ||
+        !Near(frame.deltaSeconds, 0.01F) ||
+        !Near(frame.sweepDistanceMeters, 0.02F) ||
+        !Near(frame.impactSpeedMetersPerSecond, 2.0F) ||
+        !Near(frame.impactEnergyJoules, 4.0F) ||
+        !Near(frame.tipVelocityUnitsPerSecond.x, 200.0F)) {
+        return Fail("translation must produce deterministic impact kinematics");
+    }
+
+    PhysicalMeleeContactState contactState{};
+    PhysicalMeleeContactQualification contact =
+        QualifyPhysicalMeleeContact(
+            contactState, 0x1234U, frame.currentTipUnits,
+            {1.0F, 0.0F, 0.0F}, frame, 2U, profile);
+    if (!contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::Accepted ||
+        !Near(contact.normalSpeedMetersPerSecond, 2.0F) ||
+        !Near(contact.normalEnergyJoules, 4.0F) ||
+        contactState.armed || !contactState.haveContact) {
+        return Fail("qualified normal impact must latch exactly once");
+    }
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, frame.currentTipUnits,
+        {1.0F, 0.0F, 0.0F}, frame, 2U, profile);
+    if (contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::ContactLatched) {
+        return Fail("latched contact must reject duplicate callbacks");
+    }
+    if (UpdatePhysicalMeleeContactSeparation(
+            contactState,
+            PhysicalMeleeAdd(
+                frame.currentTipUnits, {0.0F, 50.0F, 0.0F}),
+            true, profile) || contactState.armed) {
+        return Fail("tangential wall motion must not re-arm contact");
+    }
+    if (!UpdatePhysicalMeleeContactSeparation(
+            contactState,
+            PhysicalMeleeAdd(
+                frame.currentTipUnits, {13.0F, 0.0F, 0.0F}),
+            true, profile) || !contactState.armed ||
+        contactState.haveContact) {
+        return Fail("normal separation must re-arm physical contact");
+    }
+    PhysicalMeleeFrame tangentialFrame = frame;
+    tangentialFrame.tipVelocityUnitsPerSecond = {
+        0.0F, 200.0F, 0.0F};
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, frame.currentTipUnits,
+        {1.0F, 0.0F, 0.0F}, tangentialFrame, 3U, profile);
+    if (contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::BelowNormalSpeed) {
+        return Fail("tangential speed must not qualify as impact energy");
+    }
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, frame.currentTipUnits,
+        {0.0F, 0.0F, 0.0F}, frame, 3U, profile);
+    if (contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::InvalidContact) {
+        return Fail("invalid contact normals must fail closed");
+    }
+
+    // Slow motion remains a valid collision sweep but does not qualify for
+    // damage.
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(12.5F, 20.0F, 30.0F), true,
+        1'020'000'000ULL, profile);
+    if (!frame.sweepValid || frame.damageQualified ||
+        !Near(frame.impactSpeedMetersPerSecond, 0.5F)) {
+        return Fail("slow weapon motion must not qualify as a strike");
+    }
+
+    // A slash rotating around a stationary grip must be visible at the tip;
+    // a grip-only velocity test would miss it.
+    PhysicalMeleeKinematicsState rotationState{};
+    UpdatePhysicalMeleeKinematics(
+        rotationState, Pose(0.0F, 0.0F, 0.0F), true,
+        2'000'000'000ULL, profile);
+    constexpr float kTenDegreesRadians =
+        10.0F * 3.14159265358979323846F / 180.0F;
+    const fearvr::TrackingQuaternion tenDegreesY{
+        0.0F, std::sin(kTenDegreesRadians * 0.5F), 0.0F,
+        std::cos(kTenDegreesRadians * 0.5F)};
+    frame = UpdatePhysicalMeleeKinematics(
+        rotationState, Pose(0.0F, 0.0F, 0.0F, tenDegreesY), true,
+        2'010'000'000ULL, profile);
+    if (!frame.sweepValid || !frame.damageQualified ||
+        !Near(PhysicalMeleeLength(frame.gripVelocityUnitsPerSecond), 0.0F) ||
+        frame.impactSpeedMetersPerSecond < 17.0F ||
+        !Near(
+            frame.angularVelocityRadiansPerSecond.y,
+            kTenDegreesRadians / 0.01F, 0.01F)) {
+        return Fail("rotational slashes must use endpoint and angular velocity");
+    }
+
+    // The same physical speed is invariant across common runtime frame rates.
+    const auto SpeedAtDelta = [&](std::uint64_t deltaNs) {
+        PhysicalMeleeKinematicsState rateState{};
+        UpdatePhysicalMeleeKinematics(
+            rateState, Pose(0.0F, 0.0F, 0.0F), true,
+            3'000'000'000ULL, profile);
+        const float seconds = static_cast<float>(
+            static_cast<double>(deltaNs) / 1'000'000'000.0);
+        return UpdatePhysicalMeleeKinematics(
+            rateState, Pose(200.0F * seconds, 0.0F, 0.0F), true,
+            3'000'000'000ULL + deltaNs, profile)
+            .impactSpeedMetersPerSecond;
+    };
+    if (!Near(SpeedAtDelta(11'111'111ULL), 2.0F) ||
+        !Near(SpeedAtDelta(13'888'889ULL), 2.0F)) {
+        return Fail("impact speed must not depend on OpenXR refresh rate");
+    }
+
+    // Some runtimes can publish a newly numbered input sample with almost the
+    // same predicted display time. Never divide tiny pose noise by that clock
+    // delta and manufacture an extreme impact velocity.
+    PhysicalMeleeKinematicsState tinyDeltaState{};
+    UpdatePhysicalMeleeKinematics(
+        tinyDeltaState, Pose(0.0F, 0.0F, 0.0F), true,
+        4'000'000'000ULL, profile);
+    frame = UpdatePhysicalMeleeKinematics(
+        tinyDeltaState, Pose(0.01F, 0.0F, 0.0F), true,
+        4'000'000'001ULL, profile);
+    if (frame.sweepValid || frame.damageQualified ||
+        frame.impactSpeedMetersPerSecond != 0.0F ||
+        frame.resetReason !=
+            PhysicalMeleeResetReason::InsufficientSampleInterval) {
+        return Fail("sub-millisecond timestamp deltas must fail closed");
+    }
+
+    // Tracking loss clears history. Reacquisition primes a pose rather than
+    // sweeping through the missing interval.
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(12.5F, 20.0F, 30.0F), false,
+        1'030'000'000ULL, profile);
+    if (frame.poseValid || frame.sweepValid || state.havePose ||
+        frame.resetReason != PhysicalMeleeResetReason::TrackingLost) {
+        return Fail("tracking loss must clear physical-melee history");
+    }
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(1000.0F, 20.0F, 30.0F), true,
+        1'040'000'000ULL, profile);
+    if (!frame.poseValid || frame.sweepValid ||
+        frame.resetReason != PhysicalMeleeResetReason::TrackingReacquired) {
+        return Fail("tracking reacquisition must not create a teleport hit");
+    }
+
+    // Long frame gaps and implausibly large one-frame travel both snap the
+    // history without exposing a damage-capable sweep.
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(1002.0F, 20.0F, 30.0F), true,
+        1'200'000'001ULL, profile);
+    if (frame.sweepValid || frame.damageQualified ||
+        frame.resetReason !=
+            PhysicalMeleeResetReason::ExcessiveSampleGap) {
+        return Fail("long sample gaps must fail closed");
+    }
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(1100.0F, 20.0F, 30.0F), true,
+        1'210'000'001ULL, profile);
+    if (frame.sweepValid || frame.damageQualified ||
+        frame.resetReason != PhysicalMeleeResetReason::ExcessiveTravel) {
+        return Fail("large pose jumps must not become weapon sweeps");
+    }
+
+    PhysicalMeleePose invalidPose = Pose(0.0F, 0.0F, 0.0F);
+    invalidPose.gripPositionUnits.x =
+        std::numeric_limits<float>::infinity();
+    frame = UpdatePhysicalMeleeKinematics(
+        state, invalidPose, true, 1'220'000'001ULL, profile);
+    if (frame.poseValid || state.havePose ||
+        frame.resetReason != PhysicalMeleeResetReason::InvalidPose) {
+        return Fail("non-finite weapon poses must fail closed");
+    }
+    PhysicalMeleeProfile invalidProfile = profile;
+    invalidProfile.massKilograms = 0.0F;
+    frame = UpdatePhysicalMeleeKinematics(
+        state, Pose(0.0F, 0.0F, 0.0F), true,
+        1'230'000'001ULL, invalidProfile);
+    if (frame.poseValid || state.havePose ||
+        frame.resetReason != PhysicalMeleeResetReason::InvalidProfile) {
+        return Fail("invalid weapon profiles must fail closed");
+    }
+    const PhysicalMeleeProfile fallbackProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(999);
+    if (fallbackProfile.id !=
+            PhysicalMeleeProfileId::GenericOneHanded ||
+        !Near(fallbackProfile.modelLocalGripPositionUnits.x, 0.0F) ||
+        !Near(fallbackProfile.handlingWeight, 1.0F)) {
+        return Fail("unknown weapon indices must retain the safe profile");
+    }
+    const PhysicalMeleeProfile axeProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            kCondemnedFireAxeWeaponIndex);
+    if (!PhysicalMeleeProfileIsValid(axeProfile) ||
+        std::strcmp(
+            PhysicalMeleeProfileName(axeProfile.id),
+            "fire_axe") != 0 ||
+        !Near(axeProfile.modelLocalGripPositionUnits.x, -0.117F) ||
+        !Near(axeProfile.modelLocalGripPositionUnits.y, -3.053F) ||
+        !Near(axeProfile.modelLocalGripPositionUnits.z, -6.982F) ||
+        !Near(axeProfile.modelLocalGripRotation.x, -0.052973F) ||
+        !Near(axeProfile.modelLocalGripRotation.y, 0.840891F) ||
+        !Near(axeProfile.modelLocalGripRotation.z, 0.248921F) ||
+        !Near(axeProfile.modelLocalGripRotation.w, 0.477635F) ||
+        !Near(axeProfile.massKilograms, 4.5F) ||
+        !Near(axeProfile.handlingWeight, 4.0F) ||
+        !Near(axeProfile.dampingRatio, 0.55F) ||
+        !axeProfile.swingAttackEnabled ||
+        !Near(
+            axeProfile.swingAttackTriggerSpeedMetersPerSecond,
+            3.00F) ||
+        !Near(
+            axeProfile.swingAttackRearmSpeedMetersPerSecond,
+            0.75F) ||
+        axeProfile.swingAttackPulseMilliseconds != 100U ||
+        axeProfile.swingAttackCooldownMilliseconds != 450U ||
+        axeProfile.positionalFollow >= profile.positionalFollow ||
+        axeProfile.rotationalFollow >= profile.rotationalFollow) {
+        return Fail(
+            "weapon index 17 must resolve the persistent heavy axe profile");
+    }
+
+    // A deliberate weighted sweep emits one short Retail attack pulse. It
+    // must expire even if the weapon remains fast, then observe a slow
+    // release and the cooldown before another swing can attack.
+    PhysicalMeleeSwingAttackState swingAttackState{};
+    PhysicalMeleeFrame swingAttackFrame{};
+    swingAttackFrame.poseValid = true;
+    swingAttackFrame.sweepValid = true;
+    swingAttackFrame.impactSpeedMetersPerSecond = 2.99F;
+    auto swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'000U, true,
+        axeProfile);
+    if (swingAttack.active || swingAttack.triggered ||
+        !swingAttackState.armed) {
+        return Fail("sub-threshold axe movement must not attack");
+    }
+    swingAttackFrame.impactSpeedMetersPerSecond = 3.00F;
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'010U, true,
+        axeProfile);
+    if (!swingAttack.active || !swingAttack.triggered ||
+        swingAttackState.armed ||
+        !PhysicalMeleeSwingAttackPulseIsActive(
+            swingAttackState, 1'109U)) {
+        return Fail("threshold crossing must start one attack pulse");
+    }
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'110U, true,
+        axeProfile);
+    if (swingAttack.active || swingAttack.triggered ||
+        PhysicalMeleeSwingAttackPulseIsActive(
+            swingAttackState, 1'110U)) {
+        return Fail("attack pulse must end after its bounded duration");
+    }
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'300U, true,
+        axeProfile);
+    if (swingAttack.active || swingAttack.triggered) {
+        return Fail("one fast sweep must not repeat while still raised");
+    }
+    swingAttackFrame.impactSpeedMetersPerSecond = 0.75F;
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'310U, true,
+        axeProfile);
+    if (!swingAttack.rearmed || !swingAttackState.armed) {
+        return Fail("slow movement must re-arm the next deliberate swing");
+    }
+    swingAttackFrame.impactSpeedMetersPerSecond = 3.5F;
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'459U, true,
+        axeProfile);
+    if (swingAttack.active || swingAttack.triggered) {
+        return Fail("re-armed movement must still respect attack cooldown");
+    }
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'460U, true,
+        axeProfile);
+    if (!swingAttack.active || !swingAttack.triggered) {
+        return Fail("a new post-cooldown swing must attack exactly once");
+    }
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 1'461U, false,
+        axeProfile);
+    if (swingAttack.active || swingAttack.triggered ||
+        !swingAttackState.armed) {
+        return Fail("background or menu state must cancel swing attacks");
+    }
+    swingAttack = UpdatePhysicalMeleeSwingAttack(
+        swingAttackState, swingAttackFrame, 2'000U, true,
+        fallbackProfile);
+    if (swingAttack.active || swingAttack.triggered) {
+        return Fail("unmeasured weapon profiles must not gesture-attack");
+    }
+    fearvr::WeaponWeightFilterState lightFilter{};
+    fearvr::WeaponWeightFilterState heavyFilter{};
+    fearvr::WeaponWeightPose lightOutput{};
+    fearvr::WeaponWeightPose heavyOutput{};
+    const fearvr::WeaponWeightPose weightStart{
+        {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F, 1.0F}};
+    const fearvr::WeaponWeightPose weightTarget{
+        {0.20F, 0.0F, 0.0F}, {0.0F, 0.0F, 0.0F, 1.0F}};
+    const fearvr::WeaponWeightProfile lightHandling{
+        fallbackProfile.handlingWeight,
+        fallbackProfile.positionalFollow,
+        fallbackProfile.rotationalFollow,
+        fallbackProfile.catchUpStrength,
+        fallbackProfile.dampingRatio};
+    const fearvr::WeaponWeightProfile heavyHandling{
+        axeProfile.handlingWeight,
+        axeProfile.positionalFollow,
+        axeProfile.rotationalFollow,
+        axeProfile.catchUpStrength,
+        axeProfile.dampingRatio};
+    fearvr::UpdateWeaponWeightFilter(
+        lightFilter, weightStart, true, 5'000'000'000ULL,
+        true, lightHandling, lightOutput);
+    fearvr::UpdateWeaponWeightFilter(
+        heavyFilter, weightStart, true, 5'000'000'000ULL,
+        true, heavyHandling, heavyOutput);
+    fearvr::UpdateWeaponWeightFilter(
+        lightFilter, weightTarget, true, 5'011'111'111ULL,
+        true, lightHandling, lightOutput);
+    fearvr::UpdateWeaponWeightFilter(
+        heavyFilter, weightTarget, true, 5'011'111'111ULL,
+        true, heavyHandling, heavyOutput);
+    if (!(heavyOutput.position.x > 0.0F &&
+          heavyOutput.position.x < lightOutput.position.x &&
+          lightOutput.position.x < weightTarget.position.x)) {
+        return Fail(
+            "the axe handling profile must visibly follow more slowly");
+    }
+    PhysicalMeleeProfile invalidHandling = profile;
+    invalidHandling.handlingWeight = 4.1F;
+    if (PhysicalMeleeProfileIsValid(invalidHandling)) {
+        return Fail("out-of-range handling profiles must fail closed");
+    }
+    PhysicalMeleeProfile invalidSwingAttack = profile;
+    invalidSwingAttack.swingAttackRearmSpeedMetersPerSecond =
+        invalidSwingAttack.swingAttackTriggerSpeedMetersPerSecond;
+    if (PhysicalMeleeProfileIsValid(invalidSwingAttack)) {
+        return Fail("invalid swing-attack hysteresis must fail closed");
+    }
+    PhysicalMeleeProfile unknownProfile = profile;
+    unknownProfile.id = static_cast<PhysicalMeleeProfileId>(255U);
+    if (PhysicalMeleeProfileIsValid(unknownProfile)) {
+        return Fail("unknown melee profile identities must fail closed");
+    }
+
+    return 0;
+}

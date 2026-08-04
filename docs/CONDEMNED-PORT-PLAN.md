@@ -186,8 +186,10 @@ entirely with VR controllers.
 ### M5 — Condemned-specific gameplay
 
 1. Discover player-body, hand, weapon, block, shove, and interaction paths.
-2. Implement melee alignment and collision without changing hit timing or
-   damage rules.
+2. Implement controller-driven physical melee: a separately posed weapon
+   proxy, swept collision, velocity/energy-qualified contacts, and native
+   damage/effect dispatch. Do not use Retail attack-animation timing as the
+   final melee authority. See [`CONDEMNED-M5.md`](CONDEMNED-M5.md).
 3. Handle firearms and forensic tools.
 4. Separate HUD from world rendering.
 5. Classify executions, scripted cameras, damage effects, and cutscenes as
@@ -252,8 +254,77 @@ HID/FPS correction and OpenXR-request pacing are also live accepted; see
 near 90 fps with one-frame average image age and was reported substantially
 smoother during motion.
 
+Windowed headset development is also stable without the external ASI loader.
+The repository-owned `-DesktopWindow` path keeps rendering across Alt-Tab,
+suppresses Condemned's cursor-centering while another application owns the
+foreground, and preserves the existing foreground gates on gameplay input.
+The tester accepted smooth background world updates, a freely usable desktop
+cursor, clean focus return, and working recenter on 1 August 2026.
+
 The active M5 work suppresses mouse look only while focused VR tracking is
-fresh, makes the player's aim follow HMD look, and drives the flashlight from
-that same head basis. Complete its focused/unfocused and menu regression,
-then verify physical Escape, desktop menu controls, save/load persistence,
-and a full movie sequence before release packaging.
+fresh and keeps the camera and flashlight on the HMD basis. The taser's
+verified fire-vector path now follows the right controller. Melee tracing has
+identified the Retail collision controller, physics-body update, registered
+collision callback, and native impact dispatcher. A live wall test proved
+that redirecting the animation-derived physics transform changes contact data
+but does not decouple the visible centred weapon animation.
+
+The implementation now follows the physical-combat design in
+[`CONDEMNED-M5.md`](CONDEMNED-M5.md): publish a complete controller world
+pose, build bounded weapon kinematics and swept contacts, validate a wall-only
+physical proxy, expose that proxy with a render-only alignment of the
+continuously observed equipped Retail model, and only then connect qualified actor
+contacts to Retail's native damage/effect dispatch. Native dispatch remains
+blocked while the visible alignment gate is validated. Model acquisition now
+comes from the verified `CClientWeaponMgr` current-weapon/model lifecycle and
+requires no swing. OpenXR grip position, controller aim rotation, and
+profile-owned model-local grip calibration form one reusable held-weapon
+pipeline; the animation-relative melee transform remains temporary diagnostic
+scaffolding only for the wall collision body. An opt-in, foreground-gated live
+setup mode now adjusts model-local position and XYZ rotation in the next stereo
+frame, caches separate alignments for observed equipped weapons during the
+session, and logs exact profile-ready snapshots. A stereo-correct generic
+controller wireframe follows the OpenXR grip pose during setup, with a marked
+grip origin/local basis and a separate aim-pose ray, so profile alignment can be
+judged directly in the headset. Permanent values are still bound only after a
+stable Retail weapon identity has been verified.
+
+Retail weapon index 17 is now tester-verified as the fire axe and owns the
+first persistent weapon record: the captured model-local grip, an 82-unit
+reach, 7-unit radius, 4.5 kg collision mass, and maximum 4.0 handling weight.
+The preliminary bounded damped-spring handling filter gives the render and
+sweep pose visible inertia plus controlled post-movement follow-through while
+preserving raw controller pose for the calibration gizmo. This remains a
+stepping stone to the collision-constrained standalone body required by the
+final physical-combat design.
+
+As a temporary play-test bridge, a deliberate tracking-space fire-axe sweep at
+3.00 m/s now emits one 100 ms Retail attack-command pulse. Measuring before
+Retail's camera transform prevents locomotion and turning from counting as a
+swing. A 0.75 m/s release threshold and 450 ms cooldown prevent a sustained or
+noisy swing from repeating. This lets physical motion initiate the current
+Retail melee sequence without making speed alone a damage event; the
+standalone collision-constrained weapon and qualified native-contact handoff
+remain the M5 authority target.
+
+A stereo-correct tabbed VR tool menu now exposes this threshold and the other
+live melee, weapon-handling, grip-alignment, and display controls without a
+relaunch. It includes Controls and Debug tabs, captures controller input while
+open, and waits for all menu controls to return to neutral after closing. The
+settings are intentionally session-local until live-tested values are promoted
+to stable per-weapon profiles.
+
+The initial full-eye NDC layout was readable but uncomfortable in-headset. The
+panel now defaults to 62% of that size, sits slightly below eye centre, and uses
+the live IPD plus rendered horizontal FOV to create crossed disparity at a
+1.50-metre convergence distance. Size and distance are live Display-tab values,
+with bounded 40-90% and 0.75-3.0 m ranges.
+
+Melee, handling, and grip tuning are now isolated by stable Retail weapon
+index. The menu identifies the equipped weapon, creates a conservative bounded
+session record on first observation, and restores that record after a weapon
+switch or reacquisition. Known records retain their authored defaults; an
+unmapped index cannot inherit the fire axe's enabled swing adapter. The fixed
+64-slot registry performs no allocations in the render/input hooks and is the
+configuration seam for adding pipe, plank, crowbar, firearm, and later
+two-handed records without weapon-specific hook branches.

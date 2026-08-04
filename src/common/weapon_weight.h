@@ -30,6 +30,10 @@ struct WeaponWeightProfile {
     float positionalFollow{18.0F};
     float rotationalFollow{20.0F};
     float catchUpStrength{1.5F};
+    // One is critically damped and cannot overshoot. Values below one retain
+    // controlled momentum after the tracked hand stops; sanitization keeps
+    // the response well away from an undamped spring.
+    float dampingRatio{1.0F};
 };
 
 enum class WeaponWeightResetReason : std::uint8_t {
@@ -201,6 +205,8 @@ inline WeaponWeightProfile SanitizeWeaponWeightProfile(
         ? std::clamp(result.rotationalFollow, 2.0F, 40.0F) : 20.0F;
     result.catchUpStrength = std::isfinite(result.catchUpStrength)
         ? std::clamp(result.catchUpStrength, 0.0F, 4.0F) : 1.5F;
+    result.dampingRatio = std::isfinite(result.dampingRatio)
+        ? std::clamp(result.dampingRatio, 0.35F, 1.0F) : 1.0F;
     return result;
 }
 
@@ -225,6 +231,42 @@ inline void SolveCriticallyDampedComponent(
     const float decay = std::exp(-omega * deltaSeconds);
     error = (error + j * deltaSeconds) * decay;
     velocity = (velocity - j * omega * deltaSeconds) * decay;
+}
+
+inline void SolveDampedSpringComponent(
+    float& error, float& velocity, float omega,
+    float dampingRatio, float deltaSeconds) noexcept {
+    if (dampingRatio >= 0.999F) {
+        SolveCriticallyDampedComponent(
+            error, velocity, omega, deltaSeconds);
+        return;
+    }
+
+    const float ratio = std::clamp(dampingRatio, 0.35F, 0.999F);
+    const float decayRate = ratio * omega;
+    const float dampedFrequency = omega *
+        std::sqrt((std::max)(0.0F, 1.0F - ratio * ratio));
+    if (!std::isfinite(dampedFrequency) ||
+        dampedFrequency <= 1.0e-5F) {
+        SolveCriticallyDampedComponent(
+            error, velocity, omega, deltaSeconds);
+        return;
+    }
+
+    const float angle = dampedFrequency * deltaSeconds;
+    const float sine = std::sin(angle);
+    const float cosine = std::cos(angle);
+    const float decay = std::exp(-decayRate * deltaSeconds);
+    const float coefficientA = error;
+    const float coefficientB =
+        (velocity + decayRate * error) / dampedFrequency;
+    const float oscillation =
+        coefficientA * cosine + coefficientB * sine;
+    const float oscillationVelocity = dampedFrequency *
+        (-coefficientA * sine + coefficientB * cosine);
+    error = decay * oscillation;
+    velocity = decay *
+        (oscillationVelocity - decayRate * oscillation);
 }
 
 inline void ClearWeaponWeightFilter(
@@ -357,26 +399,26 @@ inline bool UpdateWeaponWeightFilter(
             profile.catchUpStrength);
 
     WeaponWeightVector solvedPositionError = positionError;
-    SolveCriticallyDampedComponent(
+    SolveDampedSpringComponent(
         solvedPositionError.x, state.linearVelocity.x,
-        positionOmega, deltaSeconds);
-    SolveCriticallyDampedComponent(
+        positionOmega, profile.dampingRatio, deltaSeconds);
+    SolveDampedSpringComponent(
         solvedPositionError.y, state.linearVelocity.y,
-        positionOmega, deltaSeconds);
-    SolveCriticallyDampedComponent(
+        positionOmega, profile.dampingRatio, deltaSeconds);
+    SolveDampedSpringComponent(
         solvedPositionError.z, state.linearVelocity.z,
-        positionOmega, deltaSeconds);
+        positionOmega, profile.dampingRatio, deltaSeconds);
 
     WeaponWeightVector solvedRotationError = rotationError;
-    SolveCriticallyDampedComponent(
+    SolveDampedSpringComponent(
         solvedRotationError.x, state.angularVelocity.x,
-        rotationOmega, deltaSeconds);
-    SolveCriticallyDampedComponent(
+        rotationOmega, profile.dampingRatio, deltaSeconds);
+    SolveDampedSpringComponent(
         solvedRotationError.y, state.angularVelocity.y,
-        rotationOmega, deltaSeconds);
-    SolveCriticallyDampedComponent(
+        rotationOmega, profile.dampingRatio, deltaSeconds);
+    SolveDampedSpringComponent(
         solvedRotationError.z, state.angularVelocity.z,
-        rotationOmega, deltaSeconds);
+        rotationOmega, profile.dampingRatio, deltaSeconds);
 
     state.position = target.position + solvedPositionError;
     state.orientation = Normalize(Multiply(
