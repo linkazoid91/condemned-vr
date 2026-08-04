@@ -1,792 +1,93 @@
-# TESTING.md — Test- und Verifikationsplan
+# Test and verification plan
 
-Grundlage: ANWEISUNG.md §14 (Tests) und die Gates aus §13.
+## Automated gate
 
-## 1. Automatisierte Tests
-
-Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
-
-- [x] Protokollgrößen und -Offsets in **x86 und x64** (`static_assert` +
-      Laufzeit-Roundtrip)
-- [x] Ablehnung ungültiger Magic / Version / Größe
-- [x] Quaternion-Normalisierung und Achsenabbildung
-      (`head_tracking_math`: OpenXR→LithTech für Yaw und Pitch;
-      `input_state`: unnormierte und degenerierte Quaternionen)
-- [x] Pose relativ zum Recenter-Ursprung und Yaw-only-Recenter bei geneigtem
-      beziehungsweise gesenktem Kopf (`head_tracking_math`)
-- [x] FOV-Winkel → gemeinsame symmetrische Projektion (`stereo_math`);
-      echte Projektionsmatrizen baut LithTech selbst aus dem gesetzten FOV
-- [x] Ringpuffer-Paarung und Generationen
-- [x] OpenXR-State-Machine als testbare Logik **ohne** Headset
-- [x] EXE-Hashprüfung — `tools/verify-install.ps1`, read-only, kein CTest-Ziel
-- [x] Stage-Pfad bleibt unter der Projektwurzel
-- [x] Retail-Hash vor/nach M2-Vorbereitung und Startversuch
-- [x] semantische Controllerabbildung inklusive Lehnen
-      (`input_state`, `controller_mapping`)
-
-## 2. Live-Testmatrix
-
-Stand 25.07.2026. „synthetisch" heißt: über `tools\test-m2-bridge.ps1` oder
-einen Unit-Test nachgewiesen, nicht im laufenden Retail-Spiel.
-
-| Achse | Varianten | Stand |
-|---|---|---|
-| SteamVR | aus / an | **erfüllt** — ohne Runtime klare Diagnose, Exitcode 10 (§6) |
-| Headset | aktiv / Standby / Trackingverlust | **erfüllt** — Standby §6, vollständiger Controller-Trackingverlust §10 |
-| Startreihenfolge | Host vor Spiel / Host nach Spiel | **erfüllt** — der Launcher startet den Host zuerst; späte Hooks §7 |
-| Host-Abbruch | während des Spiels beendet | **synthetisch** — Producer lief fail-open weiter (§7) |
-| Fenster | Fenstermodus / Vollbild | **offen** im Retail-Spiel |
-| Alt-Tab | dreimal | **offen** im Retail-Spiel |
-| Auflösung | Wechsel / D3D9 Reset | **teilweise** — echte Device-Resets in §8 überlebt, gezielter Auflösungswechsel offen |
-| Spielzustände | Hauptmenü, neues Spiel, Save/Load, Tod/Respawn | **teilweise** — Menü, neues Spiel und Ladezustände bestätigt; Save/Load und Tod/Respawn nicht gezielt geprüft |
-| Effekte | Slow-Mo, viele Partikel | **erfüllt** — Slow-Mo protokolliert (§13), Partikel im Spielverlauf |
-| Szenen | Leiter, Lean, Knockdown, erste Zwischensequenz | **teilweise** — Lean bestätigt (§13), Zwischensequenz über Komfortbildschirm (§9); Leiter und Knockdown offen |
-| Dauer | mind. ein 15-Minuten-Lauf | **akzeptiert** — 11½ min mit ≥24.900 Stereo-Frames, vom Benutzer als bestanden gewertet (§8) |
-| Build | Debug **und** RelWithDebInfo | **teilweise** — alle Läufe in RelWithDebInfo; Debug nicht live geprüft |
-
-Die offenen Punkte sind allesamt Regressionstests am laufenden Spiel und
-brauchen Headset und Benutzer; sie blockieren keinen Codepfad.
-
-## 3. Pro Live-Test zu erfassen (§14)
-
-Alle Kennzahlen stehen in den JSON-Logs eines Laufs und werden mit einem
-Aufruf zusammengefasst:
+Prepare the pinned dependencies, build both architectures and run all tests:
 
 ```powershell
-pwsh -File tools\collect-perf-report.ps1            # jüngster Lauf
-pwsh -File tools\collect-perf-report.ps1 -Run m5-fear-20260725-000655
-pwsh -File tools\collect-perf-report.ps1 -AsJson
+powershell -ExecutionPolicy Bypass -File tools\prepare-dependencies.ps1
+powershell -ExecutionPolicy Bypass -File tools\build-all.ps1
 ```
 
-| Kennzahl | Quelle |
-|---|---|
-| Host-/Proxy-/GameClient-Version | `host_start`, `proxy_start` (mit Git-Hash) |
-| EXE-Hash | `stage\<milestone>-deployment.json`, Feld `runtimeSha256` |
-| GPU und Adapter-LUIDs | `d3d11_adapter` |
-| OpenXR-Runtime-Name/-Version | `runtime` |
-| Swapchainformat und -größe | `swapchains`, dazu `shared_resources` im Proxy |
-| Game-FPS und XR-Displayrate | `perf_frame`: `game_fps`, `xr_fps` |
-| dropped frames | `ring_full`: `dropped` (Proxy, kumuliert) |
-| reused frames | `perf_frame`: `reused` |
-| Renderzeit links/rechts | `perf_frame`: `render_left_*`, `render_right_*` |
-| Host-Copyzeit | `perf_frame`: `copy_avg_us`, `copy_max_us` |
-| Handle-Anzahl Anfang/Ende | `host_start` und `host_stop`, Feld `handles` |
-
-`perf_frame` fasst je 300 eingereichte Frames zu einer Zeile zusammen und
-setzt die Zähler danach zurück. Ein Frame gilt als *reused*, wenn seit der
-letzten Einreichung kein neues Spielbild importiert wurde — das ist regulär,
-sobald die XR-Displayrate über der Spiel-FPS liegt.
-
-Der Bericht bildet Game-FPS, Renderzeiten und Copyzeit **nur über Fenster mit
-Stereobild**. Menü, Ladebildschirm und Komfortmodus rendern lediglich das
-linke Auge als Mono-Quad; würde man sie mitteln, sänken die Werte für das
-rechte Auge und die Game-FPS künstlich.
-
-Läufe **vor** dem 25.07.2026 enthalten noch keine `perf_frame`-Zeilen; der
-Bericht weist das ausdrücklich aus, statt Nullen zu melden.
-
-Logs: `logs/<milestone>-fear-YYYYMMDD-HHMMSS/` mit je einem Host- und
-Proxylog.
-
-## 4. Gate-Checklisten (§13)
-
-- **M0:** keine Retail-Datei geändert; Stock-Quellbuild verhält sich in Menü und
-  erstem Abschnitt wie Retail.
-- **M1:** Headset zeigt beide Augen; Standby/Session-Neustart ohne Crash; ohne
-  Runtime verständliche Diagnose.
-- **M2:** kein per-Frame-CPU-Readback; Alt-Tab/Auflösung/Reset/Host-Abbruch/
-  Spielende hängen nicht; Framefarben/-zähler beweisen frische Slots.
-- **M3:** korrekte Parallaxe nah/fern; L/R nicht vertauscht; keine doppelte
-  Simulationsgeschwindigkeit; Save/Load/Slow-Mo/Partikel/KI/Audio zeitlich
-  korrekt; 15 min ohne Deadlock/Leck.
-- **M4:** Blickrichtung korrekt; kein künstliches Rollen; Trackingverlust ohne
-  Kamerasprung.
-- **M5:** kein Stuck Input nach Fokusverlust; Controller trenn-/verbindbar; keine
-  „6DoF-Waffe"-Behauptung ohne Richtungsnachweis.
-- **M6:** Deinstallation entfernt nur Mod-Dateien; Retail unverändert; frische
-  Stage allein aus Repo + legaler Kopie + Public Tools + Abhängigkeiten erzeugbar.
-
-## 5. Ausführung
-
-```bash
-# Automatisierte Tests (sobald Toolchain + Build vorhanden)
-ctest --test-dir build/x64 -C RelWithDebInfo --output-on-failure
-ctest --test-dir build/x86 -C RelWithDebInfo --output-on-failure
-
-# Umgebungs-/Retail-Integritätsprüfung (jederzeit, read-only)
-pwsh -File tools/verify-install.ps1
-```
-
-## 6. M1-Live-Test vom 2026-07-24
-
-Bestanden:
-
-- fehlende Runtime künstlich über `XR_RUNTIME_JSON` geprüft: klare Diagnose
-  und Exitcode `10`;
-- `--validate-only`: SteamVR/OpenXR 2.16.7, Quest 3, exakte Adapter-LUID und
-  zwei `1624x1736`-Swapchains erfolgreich;
-- `--max-frames 120`: 120 echte Stereo-Frames, links rot/rechts blau, danach
-  sauberer STOPPING-/EXITING-Lebenszyklus;
-- x64 und x86 mit `/W4 /WX`; je zwei CTest-Tests bestanden.
-
-Manuell bestanden:
-
-- Benutzerbestätigung: linkes Auge rot, rechtes Auge blau;
-- Absetzen und Wiederaufsetzen: `FOCUSED → VISIBLE → FOCUSED`, Testbild danach
-  wieder sichtbar;
-- Steam-Link-Unterbrechung und Wiederverbindung: Headset/Controller wurden
-  reaktiviert, der Host renderte ohne Absturz weiter;
-- längerer Testlauf mit rund 20.400 Frames, danach `host_stop`.
-
-Noch offen:
-
-- einen echten `XR_SESSION_LOSS_PENDING`-Wechsel provozieren und die
-  automatische Session-Neuerstellung zusätzlich zum Unit-Test live
-  bestätigen. Steam Link hielt beim Verbindungsabbruch dieselbe OpenXR-Session
-  am Leben; der normale SteamVR-`-shutdown`-Befehl wurde bei aktiver Anwendung
-  nicht ausgeführt.
-
-## 7. M2-Live-Tests vom 2026-07-24
-
-Automatisiert bestanden:
-
-- x86-D3D9-Producer und x64-D3D11/OpenXR-Host über benannte IPC-Objekte;
-- exakte NVIDIA-Adapter-LUID `0x0:C91C` auf beiden Seiten;
-- GPU-direkte D3D9Ex-Shared-Textures mit drei Slots je Auge, ohne
-  CPU-Readback;
-- klassischer D3D9-Kompatibilitätstest über den explizit markierten
-  CPU-D3D9Ex-Pfad;
-- frische Paare für Frame/Generation 1 und 300;
-- Minimieren/Wiederherstellen sowie D3D9-Reset von 960×540 auf 800×450;
-- normaler Producer-/Host-Abschluss;
-- erzwungener Host-Abbruch: Producer lief fail-open bis Frame 600 weiter;
-- separater Test für IAT-Hook und späte `Present`-/`Reset`-Detours an einem
-  bereits erzeugten realen D3D9-Gerät.
-
-Zusätzlich geprüft:
-
-- Auslaufen des Game-Heartbeats beendet den Host kontrolliert auch aus
-  `XR_SESSION_STATE_SYNCHRONIZED`;
-- der Host erkennt das echte Spielende anhand des Prozesshandles und beendet
-  sich nicht fälschlich während Pause, Ladezustand oder Fokusverlust;
-- x86/x64-`RelWithDebInfo`, Protokoll-, Session-State- und Hook-Tests
-  bestehen.
-
-Realer F.E.A.R.-Lauf bestanden:
-
-- `tools\launch-m2-fear.ps1` verifizierte `GameClient.dll`, `GameOrig.dll`
-  und `fearvr-d3d9.dll` im laufenden x86-Prozess;
-- späte Hooks und Adapter-LUID-Abgleich bestanden;
-- 1024×768-Spielbilder wurden laufend vom Host importiert;
-- Benutzerbestätigung: F.E.A.R.-Menü in beiden Augen sichtbar, Maus und
-  Tastatur reagieren normal;
-- nach Schließen des SteamVR-Desktop-Overlays blieb das Spielbild sichtbar.
-
-Relevante Logs:
-
-```text
-logs\m2-20260724-121708
-logs\m2-20260724-121736
-logs\m2-20260724-131526
-logs\m2-20260724-133323
-logs\m2-fear-20260724-133432
-```
-
-Bewertung des M2-Gates:
-
-- Ringpuffer, frische Frames, Reset und Ausfallverhalten sind nachgewiesen.
-- Der GPU-direkte D3D9Ex-Test erfüllt „kein per-Frame-CPU-Readback“.
-- Das echte klassische D3D9-Spiel benötigt derzeit den Diagnoseflag
-  `FEARVR_BF_CPU_FALLBACK` und erfüllt diese Produktionsinvariante noch
-  **nicht**.
-- Alt-Tab und ein echter Auflösungswechsel im realen Spiel bleiben als
-  längerer Regressionstest offen; die entsprechenden synthetischen Tests
-  bestehen.
-- M2 wird als funktionaler Monobrücken-Techniknachweis angenommen, nicht als
-  spielbarer oder komfortabler VR-Stand.
-
-## 8. M3-Live-Test vom 2026-07-24
-
-Automatisiert bestanden:
-
-- x86- und x64-`RelWithDebInfo` mit `/W4 /WX`;
-- Protokoll-, OpenXR-Session-State- und Stereo-Math-Tests, jeweils 3/3;
-- isolierter Stereo-Transport mit getrennten Augenbildern;
-- symmetrisches FOV und IPD-Grenzfälle im Unit-Test;
-- Kamera-Restore und SEH-geschützter Mono-Rückfallpfad.
-
-Realer F.E.A.R.-Lauf `logs\m3-fear-20260724-162315`:
-
-- Retail-PlayerCamera-Alias Slot 17 wurde nach Laufzeit-Signaturprüfung
-  aktiviert und über den originalen Slot 19 zweimal gerendert;
-- rund 11½ Minuten Laufzeit und mindestens 24.900 vollständige Stereo-Frames
-  ohne `stereo_render_exception`;
-- mehrere echte Auflösungs-/Device-Resets wurden überlebt;
-- F8 deaktiviert und reaktiviert den Hook ohne Absturz;
-- Benutzerbestätigung: Ego-Steuerung funktioniert und die Welt erscheint
-  korrekt in 3D; der weitere Spieltest lief fehlerfrei;
-- Spiel und Host beendeten sich kontrolliert.
-
-Finaler Smoke-Test `logs\m3-fear-20260724-163558`:
-
-- bereinigte, bytegleich ins M3-Stage kopierte `GameClient.dll`;
-- Retail-Laufzeitsignatur akzeptiert, kein `stereo_hook_layout_mismatch`;
-- mehrfaches F8 installierte und entfernte Slot 17 jeweils kontrolliert;
-- temporäre VTable-Byteausgabe ist entfernt;
-- Spiel beendet, Host durch Game-Heartbeat beendet und OpenXR-Zustände
-  `STOPPING → IDLE → EXITING` sauber durchlaufen.
-
-In M4 geschlossene M3-Grenze:
-
-- HUD und Menüs werden nach dem Welt-Render gezeichnet. M4 übernimmt die
-  HUD-Differenz identisch in beide Augen und zeigt Menüs beziehungsweise große
-  Vollbildänderungen als raumfestes, lesbares OpenXR-Panel.
-
-Verbleibende Detailregressionen:
-
-- ~~Lean und Slow-Mo getrennt protokollieren~~ — in M5 geschlossen, siehe §13;
-- ~~physisch vollständigen Trackingverlust provozieren~~ — in M5 nachgeholt,
-  siehe §10.
-
-Das 15-Minuten-Stabilitätsgate wurde vom Benutzer am 24.07.2026 auf Basis des
-fehlerfreien 11½-Minuten-Laufs mit mindestens 24.900 Stereo-Frames als
-bestanden akzeptiert.
-
-## 9. M4-Abnahme vom 2026-07-24
-
-Automatisiert bestanden:
-
-- `head_tracking_math` in x86 und x64;
-- OpenXR→LithTech-Achsen- und Quaternionabbildung;
-- neutrale Recenter-Pose, Yaw-only-Verhalten für Pitch und Roll, IPD nach
-  Recenter und ungültige Pose;
-- Translation standardmäßig aus und bei opt-in auf 25 cm begrenzt;
-- insgesamt je 5/5 CTest-Tests in x86 und x64, einschließlich
-  `stereo_hud_math`.
-
-Live-Läufe:
-
-- `logs\m4-fear-20260724-164546`: Links/Rechts, Hoch/Runter und Rollrichtung
-  korrekt; F9-Recenter erfolgreich; Tracking subjektiv noch leicht träge.
-- `logs\m4-fear-20260724-165149`: Bildpose über `frameId` zugeordnet,
-  gemessener Abstand zwei OpenXR-Frames; mit korrekter Timewarp-Pose ist das
-  Tracking laut Benutzer „deutlich besser“, F9 funktioniert weiterhin.
-- `logs\m4-fear-20260724-165538`: opt-in Translation aktiv, Bildpose nur einen
-  Frame alt; seitliche und Vor-/Rückbewegung sowie Rückkehr zur Neutralposition
-  laut Benutzer korrekt und stabil.
-- `logs\m4-fear-20260724-170417`: Menübild als 2,4 × 1,8 m großer
-  OpenXR-Quad-Layer zwei Meter vor dem Benutzer verankert; Hauptmenü lesbar und
-  bleibt bei Kopfbewegung im Raum stehen.
-- `logs\m4-fear-20260724-170754`: wiederholte Übergänge zwischen festem
-  Menüpanel und Stereo-Spielansicht laut Benutzer funktionsfähig.
-- `logs\m4-fear-20260724-172137`: normales HUD als 1-%-Delta in beide Augen
-  übernommen; ESC-Menü mit 82-%-Delta automatisch als festes Panel gezeigt.
-- `logs\m4-fear-20260724-173150`: angehobene und horizontal eingerückte
-  HUD-Anordnung laut Benutzer gut. SteamVR blendete trotz
-  `autoShowGameTheater=false` verzögert sein Desktop-Theater ein.
-- `logs\m4-fear-20260724-173706`: automatischer Theater-Wächter aktiv; er
-  identifizierte die tatsächlich sichtbare Fläche als
-  `valve.steam.desktopgame.21090`.
-- `logs\m4-fear-20260724-174632`: korrigierter Wächter erkannte die verzögert
-  erzeugte F.E.A.R.-Theaterfläche nach rund 3,5 Sekunden, führte
-  `disable_theater_mode` und `hidedashboard` aus und protokollierte
-  `delayed_theater_hidden`. Der Benutzer bestätigte anschließend „top, passt“.
-
-M4-Gate:
-
-- Kopfbewegungen links/rechts/oben/unten und Rollrichtung korrekt;
-- F9-Recenter und bildsynchrone Timewarp-Pose bestätigt;
-- kein künstliches Rollen beim normalen Lauf gemeldet;
-- bei mehr als 250 ms ohne neue Pose Wechsel auf Mono und Recenter bei
-  Wiederkehr; ungültige Posen sind automatisiert getestet;
-- Haupt-/Pausemenü, Stereo-HUD, Übergänge und Theater-Unterdrückung bestätigt;
-- Benutzerabnahme: M4 darf abgeschlossen werden.
-
-Komfortfunktionen:
-
-- Head-Bob ist standardmäßig aus. `HeadBob=1` in `fearvr.ini` stellt nur die
-  Kamera-Amplituden wieder her; die Waffen-Amplituden bleiben für stabiles
-  Zielen auf null. `-NoHeadBob` erzwingt beide aus;
-- F10 erzwingt einen raumfesten Komfortbildschirm und zentriert beim Rückweg
-  neu;
-- Zustände ohne vollständiges Stereo-Weltbild wechseln automatisch auf das
-  raumfeste Panel.
-
-Bekannte Grenzen nach M4:
-
-- Translation vor allgemeiner Aktivierung mit Weltkollision absichern;
-- Trackingverlust wurde im M4-Retailpfad nicht noch einmal physisch provoziert;
-- der Stereo-HUD-Mischer benötigt im klassischen D3D9-Kompatibilitätspfad ein
-  zusätzliches CPU-Readback und muss vor dem finalen M6-Pfad GPU-seitig oder
-  als nativer UI-Layer ersetzt werden.
-
-## 10. M5-Diagnosestart vom 2026-07-24
-
-Automatisiert bestanden:
-
-- Protokoll v3 ist in x86 und x64 layoutidentisch;
-- `FearVrInputState` und `FearVrHapticRequest` besitzen feste POD-Größen;
-- Fokusverlust neutralisiert Sticks, Trigger, Grip und alle Tasten;
-- Deadzone, nicht-endliche Werte und Achsenbegrenzung sind getestet;
-- x86 und x64 bauen mit `/W4 /WX`, jeweils 6/6 CTest-Tests grün.
-
-Erster Lauf `logs\m5-fear-20260724-181253`:
-
-- alle fünf vorgeschlagenen Interaction Profiles wurden von SteamVR
-  akzeptiert;
-- Quest-Controllerzustände und rechte Primärtaste erreichten den Host;
-- ein erster Client-Hook verwendete irrtümlich Slot 14 und wurde vor jeder
-  Spielbelegung verworfen.
-
-Korrigierter Lauf `logs\m5-fear-20260724-181508`:
-
-- beide Quest-Controller aktiv (`active_hands=0x3`);
-- `IClientShell.Default` Version 5 gefunden;
-- der aus dem öffentlichen Header belegte `Update`-Slot 20 wird aufgerufen;
-- Controllerzustände erreichen damit den x86-Retail-Client;
-- Fokuswechsel veröffentlichte einen vollständigen neutralen Zustand.
-
-Benutzerabnahme am 24.07.2026:
-
-- Controller-Recenter über rechten Stick-Klick funktioniert;
-- der Haptik-Probeimpuls über die rechte Primärtaste funktioniert;
-- die übrigen ausgeführten Diagnosepunkte wurden als passend bestätigt;
-- ein zunächst ausgelassener vollständiger Trackingverlust wurde anschließend
-  im selben laufenden Test nachgeholt: um 20:32:15 meldete der Host
-  `active_hands=0x0`, 229 ms später wieder `active_hands=0x3`;
-- beide Controller wurden damit ohne Neustart wieder erkannt.
-
-Die semantische Spielbelegung wurde anschließend nachgereicht und vom Benutzer
-im Spiel bestätigt: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
-Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü. Die linke
-System-/Menütaste ist nicht nutzbar, weil SteamVR sie für das eigene
-Systemmenü abfängt.
-
-## 11. Native VR-Einstellungen im ESC-Menü
-
-Automatisiert und im Retail-Lauf `logs\m5-fear-20260724-222748` bestätigt:
-
-- x86- und x64-Build erfolgreich; jeweils 7/7 CTest-Tests grün;
-- neue Bridge-Exporte für Translation, Stereo-HUD, Komfortmodus und Recenter
-  vorhanden;
-- Byte-Signaturen von `CMenuSystem::Init`, `OnCommand`, `OnFocus`,
-  `CBaseMenu::AddControl` und `CLTGUIListCtrl` gegen Retail 1.08 geprüft;
-- `vr_settings_menu_hooks_installed` bestätigt alle drei Menü-Hooks;
-- `vr_settings_menu_built` bestätigt den Eintrag `VR SETTINGS` direkt
-  hinter `Optionen`;
-- das Spiel blieb nach Aufbau der erweiterten Menüliste stabil und nahm
-  Controllerbefehle weiter an;
-- Änderungen werden sofort angewendet und in
-  `stage\userdata-m5\fearvr.ini` persistiert.
-
-Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
-nativen Rahmens läuft: Stereo rendering, Stereo HUD, Turn speed, Red aim guide,
-Controller vibration, Controls, Ladder climbing, Melee, Show arms, Recenter
-view, Reset VR defaults, BACK. HMD-Translation, Head-Bob, Komfortbildschirm
-und die vier einzelnen Nahkampfaktionen bleiben ohne eigenen Menüeintrag in
-`fearvr.ini` einstellbar. Ein zweistufiges Menü wurde verworfen; die
-Beschriftungen sind durchgehend englisch. Bedienung: Stick navigiert, A oder
-Trigger bestätigt, B geht zurück. Details: `docs/OPENXR-INPUT.md`.
-
-## 12. Arme schaltbar, Hände, Torso und Beine sichtbar
-
-Die Retail-Modellabfrage im Lauf `logs\m5-fear-20260724-231900` ergab:
-
-- Modell `chars\models\player.Model00p` mit **4 Pieces** und 61 Nodes;
-- nur zwei Materialien, `player_new.Mat00` und `player_head.Mat00`;
-- `GetNumPieces` und `GetPiece(index, …)` liefern `LT_OK`, aber
-  `GetPieceName` liefert für alle vier Pieces `LT_NOTFOUND` (61).
-
-Die erste Piece-Kalibrierung war damit zu grob: Piece #1 ist `Body_Group` und
-enthält nicht nur Arme, sondern auch Torso und Beine. `HiddenBodyPieces=2`
-konnte deshalb Kicks und Körper ebenfalls ausblenden.
-
-Die endgültige Stage-Erzeugung liest stattdessen das lokale Retail-Modell und
-die Textur. Eine validierte Mesh-Verzeichnis-Suche findet 4546 Vertices und
-6216 Dreiecke. Eine Zusammenhangsanalyse wählt genau sechs Arm-Komponenten
-(links/rechts, je drei LODs), rasterisiert deren UV-Dreiecke und setzt nach
-einer 2-Pixel-Erweiterung 48.190 DXT3-Alpha-Pixel transparent. Eine getrennte
-Hand-/Handgelenkmaske muss überlappungsfrei bleiben; andernfalls bricht das
-Stage-Skript ab.
-
-Benutzerabnahme am 27.07.2026:
-
-- `Show arms: OFF` blendet nur Ober- und Unterarme aus;
-- Hände, Torso und Beine bleiben sichtbar, einschließlich Kick-Animationen;
-- `Show arms: ON` stellt die Retail-Arme sofort wieder her;
-- erneutes Ausschalten funktioniert ohne Neustart;
-- `ShowArms=0` wurde in `stage\userdata-m5\fearvr.ini` persistiert.
-
-F11 und `HiddenBodyPieces` bleiben reine Entwicklerdiagnosen; der alte Wert
-`2` wird beim Laden auf `0` migriert.
-
-## 13. Lehnen über die Neigung der linken Hand
-
-Automatisiert abgedeckt in `tests/test_input_state.cpp` und
-`tests/test_controller_mapping.cpp`:
-
-- Rolllage-Extraktion gegen Sollwinkel von -80° bis +80°;
-- unnormierte Quaternionen liefern denselben Winkel;
-- degenerierte Quaternion ergibt 0;
-- Schwelle: ~24° löst aus, ~17° nicht;
-- ohne gültige linke Aim-Pose löst sich das Lehnen, statt hängen zu bleiben.
-
-`test_controller_mapping` prüft ausschließlich über `assert` und wurde bis
-dahin unter RelWithDebInfo wegen `NDEBUG` wirkungslos übersetzt. Das Ziel baut
-jetzt mit `/UNDEBUG`; die Kommandozeilenwarnung `D9025` ist beabsichtigt.
-
-Benutzerabnahme am 25.07.2026: Das Lehnen im Spiel passt.
-
-Lean und Slow-Mo werden getrennt protokolliert. `vr_lean_left_engaged`,
-`vr_lean_right_engaged` und `vr_slowmo_engaged` melden die laufende Nummer,
-die Lean-Ereignisse zusätzlich die gemessene Rolllage; die zugehörigen
-`*_released`-Ereignisse melden die Haltedauer. Damit ist die letzte offene
-Detailregression aus der Live-Testmatrix geschlossen.
-
-Der Lauf `logs\m5-fear-20260724-235013` deckte dabei zwei echte Grenzfälle
-auf: Rolllagen von 177,3°, 136,3° und −169,3° lösten ein volles Lehnen aus.
-Ursache war eine steil nach unten zeigende Aim-Pose, deren Rolllage numerisch
-bedeutungslos ist. Obergrenze und Levelness-Prüfung fangen das jetzt ab.
-
-## 14. VR-Menü: Sprünge bei der Auswahl
-
-Benutzermeldung am 25.07.2026: Das Auswählen des nächsten Eintrags war nicht
-immer korrekt und sprang.
-
-Ursache im Public-Tools-Quelltext nachgewiesen:
-`CLTGUIListCtrl::SetSelection` summiert beim Herunterscrollen rückwärts die
-`GetBaseHeight()` aller Controls, ohne `IsVisible()` zu prüfen, während
-`CalculatePositions()` unsichtbare Controls überspringt. Da jeder Umschalter
-ein verstecktes Geschwister-Control besitzt, wird `m_nFirstShown` falsch
-gesetzt.
-
-Nicht die Ursache und deshalb verworfen: ein zusätzliches `Enable(false)` auf
-versteckten Controls. `CLTGUICtrl::IsEnabled()` ist bereits als
-`m_bEnabled && IsVisible()` definiert, die Navigation überspringt unsichtbare
-Einträge also ohnehin. Ein Enable/Disable-Paar hätte beim Wiedereinblenden
-zusätzlich statische Controls auswählbar gemacht.
-
-Behoben, indem der Listenanfang festgehalten wird, solange die VR-Seite aktiv
-ist — in jedem Client-Update, weil Tastatur, Maus und Controller alle direkt
-über `NextSelection` navigieren. Der Schreibzugriff erfolgt nur, wenn der Wert
-tatsächlich abweicht.
-
-Ebenfalls entfernt: die toten Controls `MORE SETTINGS >` und
-`< BASIC SETTINGS` samt Seitenzustand. Sie wurden noch erzeugt und nur
-versteckt, belegten aber weiterhin Listenindizes.
-
-Benutzerabnahme am 25.07.2026: Die Auswahl läuft sauber und springt nicht mehr.
-
-## 15. M5-Abnahme vom 2026-07-25
-
-Automatisiert bestanden:
-
-- x86 und x64 bauen mit `/W4 /WX`;
-- je 7/7 CTest-Tests grün: `protocol`, `xr_session_state`, `stereo_math`,
-  `head_tracking_math`, `stereo_hud_math`, `input_state`, `controller_mapping`.
-
-Im Spiel bestätigt:
-
-- vollständige semantische Controllerbelegung (§10);
-- natives VR-Menü im ESC-Menü, Auswahl sauber (§11, §14);
-- Arme schaltbar; Hände, Torso, Beine und Waffe sichtbar (§12);
-- Lehnen über die Neigung der linken Hand, Richtung und Schwelle passend (§13).
-
-M5-Gate:
-
-- kein Stuck Input nach Fokusverlust — automatisiert getestet und im Lauf
-  bestätigt;
-- Controller trenn- und wieder verbindbar — vollständiger Trackingverlust in
-  §10 nachgewiesen;
-- die Behauptung „Motion-Controlled Aiming“ ist über den roten Zielstrahl und
-  die bestätigte Übereinstimmung von Waffen- und Projektilrichtung belegt
-  (AD-013). Eine allgemeine „6DoF-Waffe“ wird weiterhin nicht behauptet.
-
-Bewusst zurückgestellt:
-
-- Der gelegentliche Sprung der Waffe beim Treppensteigen ist nicht abschließend
-  geklärt. Der Benutzer hat den Punkt am 25.07.2026 ausdrücklich zurückgestellt;
-  er ist kein M5-Blocker.
-
-Unverändert aus M4 übernommene Grenzen:
-
-- Translation bleibt ohne Weltkollision opt-in;
-- der Stereo-HUD-Mischer benötigt im klassischen D3D9-Pfad weiterhin ein
-  CPU-Readback und muss vor M6 ersetzt werden.
-
-## 16. M6 — Verpackung, Deinstallation und Regression
-
-### Ein-Schritt-Build
-
-`tools\build-all.ps1` prüft die gepinnten Abhängigkeiten, konfiguriert und
-baut x86 und x64, führt beide CTest-Suiten aus und schreibt
-`stage\build-manifest.json`. Verifiziert am 25.07.2026: beide Architekturen
-mit `/W4 /WX`, je 7/7 Tests grün.
-
-Die Artefakte sind **prozessreproduzierbar, nicht bitgleich**. Im
-Kontrollversuch wurde `build\x86` zweimal gelöscht und auf demselben Commit
-neu gebaut; `GameClient.dll` und `fearvr-d3d9.dll` hatten danach jeweils
-unterschiedliche SHA-256-Summen, weil MSVC Zeitstempel und PDB-GUIDs
-einbettet. Das Manifest hält deshalb den Git-Commit fest und markiert einen
-unsauberen Arbeitsbaum ausdrücklich (AD-017).
-
-### Deinstallation
-
-`tools\uninstall-fearvr.ps1` ist ohne `-Apply` ein reiner Trockenlauf.
-
-Außerhalb der Projektwurzel schreibt der Mod genau einen Wert:
-`steamvr.autoShowGameTheater`. Beide Rückstellzweige wurden gegen eine Kopie
-der echten Konfiguration getestet:
-
-- Schlüssel war ursprünglich **nicht vorhanden** → die eingefügte Zeile wird
-  entfernt, die Datei parst danach weiterhin als JSON;
-- Schlüssel war ursprünglich **vorhanden** → der ursprüngliche Wert wird
-  wiederhergestellt (Testsicherung mit `true`, Ergebnis `true`).
-
-Zurückgesetzt wird gezielt dieser eine Schlüssel. Die ganze Sicherung
-zurückzukopieren würde alle SteamVR-Einstellungen verwerfen, die der Benutzer
-seither geändert hat.
-
-### M6-Gate, nachgewiesen am 25.07.2026
-
-- **Deinstallation entfernt nur Projekt-/Moddateien.** Lauf mit
-  `-Scope ProjectOnly -KeepLogs -Apply`: `stage\m0-stock-module-backup`,
-  `stage\m2-game` bis `stage\m5-game`, alle Stage-Manifeste und `build\`
-  entfernt; die Public-Tools-Stockmodule wurden vorher aus dem Backup
-  zurückgestellt.
-- **Spielstände bleiben erhalten.** `stage\userdata-*` enthält Saves, Profile
-  und Screenshots — das sind Benutzerdaten, keine Moddateien. Alle zehn
-  `userdata-*`-Verzeichnisse blieben unangetastet, `fearvr.ini` inklusive
-  `fearvr.ini` ebenfalls. Entfernt wird das nur mit
-  `-IncludeUserData`.
-- **Retail unverändert.** Der SHA-256 der `FEAR.exe` wird vor und nach jedem
-  Lauf geprüft; eine Steam-Dateiprüfung ist nicht nötig.
-- **Frische Stage allein aus Repo erzeugbar.** Direkt nach der Deinstallation:
-  `build-all.ps1` baute beide Architekturen neu (je 7/7 Tests grün),
-  `prepare-m5-stage.ps1` erzeugte `stage\m5-game` neu. Die einzigen
-  Voraussetzungen waren das Repo, die legal installierte F.E.A.R.-Kopie, die
-  lokalen Public Tools und die gepinnten Abhängigkeiten.
-
-### Gemessene Performancezahlen, Lauf `m5-fear-20260725-004241`
-
-RTX 3050 Laptop, SteamVR/OpenXR 2.16.7, Quest 3, Swapchains 2×2064x2208
-(Format 29), Shared-Texture 1024x768 B8G8R8A8 über `path=cpu_d3d9ex`.
-Laufzeit 1,1 min, 20 Messfenster, davon 11 mit Stereobild. Die Spielzahlen
-sind ausschließlich über die Stereofenster gebildet; Menü- und Ladefenster
-rendern nur das linke Auge und würden die Mittelwerte verfälschen.
-
-| Kennzahl | Wert |
-|---|---|
-| XR-Displayrate | Ø 88,8 fps, max 90,1 — stabil auf der 90-Hz-Rate |
-| Game-FPS (Stereo) | Ø 49,7, Spanne 15,6–72,3 |
-| Renderzeit links | Ø 147,5 µs, max 162 µs |
-| Renderzeit rechts | Ø 81,3 µs, max 98 µs |
-| Host-Copyzeit | Ø 293,7 µs, max 316 µs (Einzelspitzen bis 2439 µs beim Laden) |
-| eingereichte XR-Frames | 6000 |
-| konsumierte Spielbilder | 2400 |
-| dropped (Ring voll) | 1 |
-| reused | 2871 |
-| Handles eingeschwungen | 486–518 |
-
-Einordnung:
-
-- Die 2871 reused frames sind **kein Fehler**: Der Host läuft mit 90 Hz, das
-  Spiel liefert rund 50 Bilder pro Sekunde. Die Differenz muss zwangsläufig
-  aus wiederholt eingereichten Bildern bestehen. Das Verhältnis passt zu den
-  gemessenen Raten.
-- Genau ein verworfener Frame über den ganzen Lauf. Der Drei-Slot-Ring läuft
-  also praktisch nie voll.
-- Die Host-Copyzeit von rund 0,3 ms liegt deutlich unter dem 11-ms-Budget
-  eines 90-Hz-Frames. Der teure Anteil des `cpu_d3d9ex`-Pfads sitzt auf der
-  x86-Seite im Spielprozess, nicht im Host.
-- Die Handle-Anzahl bleibt über den ganzen Lauf zwischen 486 und 518, ohne
-  Trend. Kein Handle-Leck. Der Wert aus `host_start` (70) ist als Referenz
-  ungeeignet, weil er vor der OpenXR-/D3D-Initialisierung entsteht.
-- Die linke Renderzeit liegt rund 66 µs über der rechten. Das linke Auge wird
-  zuerst gerendert und trägt den Zustandswechsel der Pipeline; in Mono-Phasen
-  ist ohnehin nur das linke Auge aktiv.
-
-Damit ist die Kennzahlenpflicht aus §14 erfüllt.
-
-### Jupiter-EX-HID-FPS-Fehler, nachgewiesen am 30.07.2026
-
-Ausgangspunkt war ein reproduzierbarer Einbruch nach dem Laden und nach
-Pause/Fortsetzen. Die Untersuchung trennte Stereo, Client-Hooks, Bridge und
-Engine schrittweise. Entscheidend war ein Diagnosepfad, der Proxy, OpenXR-Host
-und Client-Hooks geladen lässt, in `CapturePresent` aber vor jedem
-`StretchRect`, Readback und D3D9Ex-Upload aussteigt und nur die rohe
-`Present`-Rate protokolliert.
-
-| Lauf | Aktive Arbeit | Beobachtung |
-|---|---|---|
-| `fearvr-20260730-135208` | Mono, alter doppelter Mono-Readback | rund 77 → 39 fps |
-| `fearvr-20260730-135809` | Mono, ein Readback und zwei Uploads | rund 77 → 51 fps; Transfermaximum 3,8–4,4 ms |
-| `fearvr-20260730-140042` | zusätzlich Client-Update-Arbeit aus | 113 → 65 fps; Client-Hooks nicht Ursache |
-| `fearvr-20260730-140414` | Capture und D3D9Ex-Upload ganz aus | rohe Presents 96,7 → 62,8 fps; Bridge nicht Ursache |
-| `fearvr-20260730-141304` | Capture aus, verifizierter HID-Fix an | rohe Presents stabil rund 564–594 fps |
-| `fearvr-20260730-141437` | echter Mono-Capturepfad, HID-Fix an | Gameplay stabil rund 147–172 fps; Pause rund 173–180 fps |
-
-Der Fehler lag damit **vor `Present` in Jupiter EX**, nicht im
-Classic-D3D9-zu-D3D9Ex-Transport. Auf dem Testsystem waren 54 aktive
-HID-Class-Geräte sichtbar. EchoPatch dokumentiert denselben Fehler als
-Initialisierung aller HID-Geräte als Controller. Seine vollständige
-`dinput8.dll` bleibt mit dieser Mod unvereinbar (siehe `ECHOPATCH.md`);
-übernommen wurde nur die eng begrenzte Enginekorrektur:
-
-- Steam-F.E.A.R.-1.08-Zeitstempel `0x44EF6AE6` verlangen;
-- die drei laufenden Bytefolgen bei RVA `0x84057`, `0x840DD` und `0x84166`
-  vollständig prüfen;
-- nur bei dreifacher Übereinstimmung alle drei Bereiche NOPen;
-- bei unbekannter EXE oder einem einzigen Bytefehler nichts schreiben und
-  den Grund protokollieren.
-
-`hid_fps_fix_applied` erschien vor Renderer- und Clientinitialisierung.
-`FEAR.exe` auf Platte blieb unverändert; gepatcht wird ausschließlich die
-verifizierte Speicherabbildung des laufenden Prozesses. Ein erfolgreicher
-D3D9-Reset im Lauf `141437` bestätigte außerdem, dass die asynchrone
-CPU/D3D9Ex-Bridge den Fokus-/Moduswechsel weiterhin übersteht.
-
-### OpenXR-Frame-Pacing und Capture-Alter, geprüft am 31.07.2026
-
-Der VDXR-FPS-Zähler misst die Einreichungsrate des OpenXR-Hosts, nicht die
-Anzahl neuer FEAR-Bilder. Für die Untersuchung wurden deshalb zwei getrennte
-IDs protokolliert: `generation` bezeichnet ein wirklich neu importiertes
-Texturpaar, `frameId` den OpenXR-Auftrag samt vorhergesagter Pose. Aus deren
-Differenz zum aktuellen Hostauftrag entstehen
-`image_age_avg_frames` und `image_age_max_frames`.
-
-| Lauf/Stand | XR/Game | echte Wiederverwendung | Bildalter |
-|---|---|---|---|
-| `fearvr-20260731-063123`, vor Pacing | XR meist 90, Capture 96–119 fps | 33–87/300 laut altem, frameId-basiertem Zähler | erster Treffer 7 Frames |
-| `fearvr-20260731-064723`, nur Auftragstakt | XR 90, Game 81–89 fps | 3–15/300 | stabil 4–5 Frames |
-| `fearvr-20260731-065041`, Transfer im Wartefenster | XR 89,4–90,1, Game 89,1–90,1 fps | typischerweise 0–3/300 | Durchschnitt 1, meist maximal 1–2 Frames |
-
-Im finalen Messfenster des letzten Laufs:
-
-- `xr_frame_pacing`: maximal 16 ms gewartet; im stabilen frühen Intervall
-  keine Timeouts, später vereinzelte begrenzte Timeouts bei
-  Runtime-/EndFrame-Einbrüchen;
-- `cpu_capture_pipeline`: nach der Startphase keine neuen Queue-, Stale- oder
-  Slot-Drops;
-- Host-Copyzeit rund 59–61 µs im Mittel;
-- eigener Host-CPU-Maximalwert rund 380–438 µs;
-- keine Pose-Fallbacks und kein Fehlerereignis.
-
-Damit folgt FEAR nicht einem hart codierten 90-fps-Limit, sondern automatisch
-dem Takt der aktiven OpenXR-Runtime. Das gleiche Verfahren funktioniert
-dadurch auch bei 72, 80 oder 120 Hz. Ein verlorener Host kann FEAR nicht
-festhalten: Jeder Wait endet spätestens nach 20 ms. Der Diagnose-Rollback
-lautet `tools\play.ps1 -NoXrFramePacing`.
-
-### Off-screen render-scale probe
-
-Launch:
+The x86 build additionally tests module identity, loader fail-closed behavior
+and bridge product guards. Both architectures run the shared protocol, pose,
+stereo, input, render-scale, weapon-weight, physical-melee, tool-menu and
+background-render tests.
+
+Before a public push or package, also run:
 
 ```powershell
-tools\play.ps1 -Runtime vdxr -RenderScale 150
+powershell -ExecutionPolicy Bypass -File tools\audit-publication.ps1 -RequireClean
 ```
 
-Before launching, restore the Retail mode to a valid value such as
-1280×1024. Expected proxy events:
+## Retail integrity gate
 
-- `render_scale_config` with `requested_percent=150`;
-- `render_scale_ready` with `source=1280x1024 target=1920x1536`;
-- `shared_resources` with the same target size and `render_scale=150%`;
-- no `render_scale_*_failed` events.
+`tools/verify-condemned-m0.ps1` reads the local Steam manifest and critical
+files, records hashes and PE identity, and performs no writes. Local staging
+scripts copy verified inputs only below `stage/`; they never overwrite the
+retail installation.
 
-Menus and videos must remain flat and fully usable. The larger eye target is
-activated only during 3D gameplay. Compare the same scene at 100, 125, and
-150 percent while recording `perf_frame`, `cpu_capture_pipeline`, image age,
-and perceived texture/edge clarity. A larger transported image alone is not
-proof: distant geometry edges and fine textures must visibly contain more
-detail.
+Unknown executable/client hashes, signatures or expected bytes must prevent
+the relevant write-enabled gate from activating. A diagnostic should state
+the failed identity rather than continuing with an approximate offset.
 
-First technical run, `fearvr-20260731-072431`, at 150 percent:
+## Live regression matrix
 
-- The Retail source remained 1280×1024; both stereo targets and imported host
-  textures were 1920×1536.
-- Jupiter's active target used 4× MSAA and resolved successfully into the
-  single-sample capture texture.
-- There were no `render_scale_*_failed`, restore, stereo fallback, or render
-  exception events.
-- Visual inspection found that the scene occupied only the top-left
-  1280×1024 region of the 1920×1536 eye image, leaving the lower-right region
-  empty. Jupiter reset the viewport and scissor rectangle to its cached
-  Retail dimensions inside `RenderCamera`, after the bridge selected the
-  larger target.
-- VDXR remained near 90 Hz; new game images were usually 64–75 fps during
-  stereo gameplay with an image age of two request frames.
-- GPU-to-CPU/D3D9Ex transfer maxima were usually 10–13 ms.
+Run live tests only against the verified `1.0.314.0` Steam build.
 
-Correction run `fearvr-20260731-073412` scales D3D9 `SetViewport` and
-`SetScissorRect` calls only while render-target 0 is the active supersampled
-eye surface. The log proves the exact transformation:
-
-- viewport `0,0 1280x1024` → `0,0 1920x1536`;
-- scissor `0,0-1280,1024` → `0,0-1920,1536`;
-- menus, other render targets, and the D3D9Ex transfer device are excluded;
-- no viewport/scissor restore failures, stereo fallback, or render exception
-  occurred during the technical run.
-- Headset inspection confirmed that the corrected scene fills the complete
-  eye image; the previous empty lower-right region is gone.
-
-This proves the technical separation between the Retail and stereo
-resolutions and fixes the incomplete top-left rendering. At this stage,
-however, 150 percent remains too expensive for the Classic D3D9 CPU path to
-sustain 90 new game images per second. After visual confirmation, the next
-A/B value is 125 percent.
-
-### Runtime-Unabhängigkeit, geprüft am 25.07.2026
-
-| Prüfung | Ergebnis |
+| Area | Required observation |
 |---|---|
-| `--validate-only` unter VDXR | `VirtualDesktopXR 1.0.10`, `Meta Quest 3`, Adapter-LUID `0x0:D57B`, Swapchains 2×`2688x2880`, Exitcode 0 |
-| `--validate-only` unter SteamVR | `SteamVR/OpenXR 2.16.7`, Swapchains 2×`2064x2208` |
-| Spielstart `-Runtime vdxr` | `logs\m5-fear-20260725-005345`: Runtime VDXR, Bridge verbunden, `ipc_frame` importiert |
-| SteamVR-Schritte unter VDXR | unterbleiben — keine `steamvr-theater-guard.log`, `steamvr.vrsettings` unverändert |
+| Stock fallback | Game launches and plays normally without the OpenXR host |
+| Stereo | Both eyes show distinct, fuseable views with correct polarity and no edge gaps |
+| Tracking | Yaw, pitch and roll are responsive; tracking loss produces no camera jump |
+| Frame pacing | Fast head/controller motion does not expose queued stale frames or double images |
+| Menu | Pause menu appears in the headset, closes normally and resumes stereo |
+| Controls | Move, turn, interact, core actions, menu and recenter produce one bounded game action |
+| Focus | Alt-Tab releases desktop mouse confinement while headset rendering continues in window mode |
+| Haptics | Only confirmed actions pulse; amplitude/duration remain bounded |
+| Device reset | Resolution/window changes and return from desktop do not lose the bridge or session |
+| Save lifecycle | Load, death/respawn and level transition invalidate stale object pointers safely |
+| Exit | Game and host terminate without a hang or persistent system-wide runtime change |
 
-VDXR liefert mit `2688x2880` je Auge eine deutlich höhere Swapchain-Auflösung
-als SteamVR. Das Spielbild bleibt davon unberührt: Es kommt weiterhin als
-1024x768-Textur über die Bridge und wird im Host hochskaliert.
+## M5 physical-melee gates
 
-Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
-Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert
-(AD-018).
+Physical melee is intentionally incremental. Validate each gate separately:
 
-## 17. Weitergebbares Paket, geprüft am 25.07.2026
+1. Fresh controller world pose and finite kinematics.
+2. Wall-only collision proxy with native actor damage blocked.
+3. Visible weapon proxy aligned through the per-weapon grip profile.
+4. Weighted follow behavior with safe resets after tracking loss, weapon
+   changes, recentering and long frame gaps.
+5. Swing adapter only for explicitly mapped weapons; unmapped weapons remain
+   disabled.
+6. Later native damage handoff only after contact position, normal, speed,
+   energy and de-duplication are independently proven.
 
-`tools\make-release.ps1` erzeugt unter `dist\` Ordner und ZIP (rund 1,7 MB,
-ZIP 0,52 MB). Enthalten sind nur eigene Binaries, Skripte und Doku.
+The detailed design, current fire-axe values and in-headset calibration
+controls are in [`CONDEMNED-M5.md`](CONDEMNED-M5.md).
 
-| Prüfung | Ergebnis |
-|---|---|
-| Lizenzgegenprobe im Paketskript | bricht bei proprietärem Dateinamen **und** bei dem bekannten Hash des Public-Tools-Moduls ab |
-| `install.ps1` ohne Parameter | findet Retail über die Steam-Bibliotheken, verifiziert Version und SHA-256 |
-| Public-Tools-Erkennung | über den Hash des unveränderten VC7.1-`GameClient.dll` |
-| Paketintegrität | `install.ps1` prüft jede Datei gegen `release-manifest.json` |
-| Installation | 7 Module gestaged, Desktop-Verknüpfung erzeugt, Retail unverändert |
-| Start aus der Installation | Bridge verbunden, `ipc_frame` importiert, VDXR aktiv |
-| Deinstallation | entfernt alles außer `userdata`; Retail unverändert |
+## Evidence collection
 
-### Fehlschlag beim ersten Paketstand
+Each launch creates a session-specific log directory. Preserve, at minimum:
 
-Standardziel war `%LOCALAPPDATA%\FearVR`. Dort brach das Spiel mit
-„Failed to initialize client - unable to load game resources" ab. Im Prozess
-waren nur 48 statt 152 Module geladen, es entstand kein Proxy-Log, und der
-Host zeigte mangels Bildern seinen roten Ersatzbildschirm.
+- executable and stock-client identity results;
+- enabled/disabled feature gates and rollback switches;
+- OpenXR runtime name, refresh rate and session transitions;
+- game FPS, XR submit FPS, image reuse, image/request age and queue/slot drops;
+- left/right render, bridge transfer and host copy timing;
+- hook/signature failures, tracking loss and focus transitions; and
+- physical-melee profile identity, pose validity, sweep speed and accepted
+  impact reason.
 
-Eingegrenzt wurde es durch Kreuztests mit byteweise identischen Dateien: Nur
-der **Ort der Archivkonfiguration** entscheidet, das Modulverzeichnis darf
-unter `%LOCALAPPDATA%` liegen. Details und Messtabelle in AD-020.
+Use `tools/collect-condemned-performance.ps1` for a completed run or
+`tools/watch-condemned-performance.ps1` during a performance-probe launch.
+Logs may contain local paths and runtime diagnostics; inspect them before
+sharing publicly.
 
-Behoben durch Standardziel `%USERPROFILE%\FearVR` und eine Sperre in
-`install.ps1` gegen Ziele unterhalb von `%LOCALAPPDATA%`.
+## Acceptance history
 
-### Offen
-
-- Ein Lauf über volle 15 Minuten **mit** Instrumentierung. Der Messlauf war
-  1,1 min lang; das Dauergate selbst wurde bereits in §8 auf Basis des
-  11½-Minuten-Laufs abgenommen.
-- Die in §2 als offen markierten Live-Regressionen (Fenstermodus/Vollbild,
-  Alt-Tab, gezielter Auflösungswechsel, Save/Load, Tod/Respawn, Leiter,
-  Knockdown, Debug-Build).
+Milestone-specific live evidence is retained in `CONDEMNED-M0.md` through
+`CONDEMNED-M5.md`. Frame-pacing and HID performance evidence is in
+[`CONDEMNED-PERFORMANCE.md`](CONDEMNED-PERFORMANCE.md). Those records explain
+what was actually observed; they are not substitutes for running the current
+automated suite after a code change.

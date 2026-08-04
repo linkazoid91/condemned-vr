@@ -1,8 +1,4 @@
-# === F.E.A.R. VR — Ignorierregeln (siehe ANWEISUNG.md §10) ===
-# Niemals: Retail-Dateien, Public-Tools-Basisquellen, kompilierte
-# proprietäre Tools oder extrahierte Assets committen.
-
-# Lokale, nicht versionierte Arbeitsverzeichnisse
+# Local dependencies, builds, stages, logs, packages and runtime state.
 /vendor-local/
 /build/
 /stage/
@@ -10,13 +6,19 @@
 /dist/
 /local-runtime/
 
-# Spiel-/Binärartefakte
+# Game files and compiled artifacts must never be committed.
 *.Arch00
+*.arch00
+*.rez
+*.fxd
+*.dtx
+*.ltb
+*.bik
 *.exe
 *.dll
 *.pdb
 
-# Weitere Build-/Zwischenartefakte
+# Build and intermediate artifacts.
 *.obj
 *.lib
 *.exp
@@ -29,7 +31,7 @@
 CMakeCache.txt
 CMakeFiles/
 
-# Editor / OS / Tooling (maschinenlokal)
+# Editor, OS and machine-local tooling.
 .vs/
 .idea/
 Thumbs.db
@@ -37,10 +39,5 @@ Desktop.ini
 .claude/settings.local.json
 /.reasonix/
 
-# === Gezielte Ausnahmen ===
-# Leere Struktur-Ordner bleiben durch .gitkeep erhalten.
+# Empty structural directories may be retained explicitly.
 !.gitkeep
-# Selbst erzeugte kleine Testprogramme dürfen bei Bedarf hier
-# explizit freigeschaltet werden (Whitelist statt pauschalem -f).
-# Beispiel:
-# !/tests/fixtures/known-good-mini.bin

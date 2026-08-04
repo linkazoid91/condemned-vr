@@ -1,16 +1,9 @@
-# src/common/math/
+# Shared math
 
-Zentrale, konfigurierbare Mathe- und Konversionsroutinen (ANWEISUNG.md §7),
-gemeinsam von Host (x64) und GameClient/Proxy (x86) genutzt.
+Coordinate conversion, pose composition, stereo projection and weapon
+kinematics live in small header-only units under `src/common/`. They compile
+for both the x86 game-side modules and x64 OpenXR host and must not depend on
+engine-owned pointers or an active headset.
 
-Geplant (ab M3/M4), jeweils mit Unit-Tests in `tests/`:
-
-- Achsenabbildung OpenXR ↔ LithTech (eine einzige Definitionsstelle);
-- Quaternion-Normalisierung und -Konvertierung;
-- Pose-Komposition und Pose relativ zum Recenter-Ursprung;
-- Trennung von Körper-Yaw und Head-Yaw;
-- IPD aus den beiden `xrLocateViews`-Posen;
-- FOV-Winkel → Projektionsmatrix (symmetrisch, später asymmetrisch);
-- begrenzte lokale Translation.
-
-Header-only (DirectXMath aus dem Windows SDK). Noch leer (M0).
+Every conversion has one authoritative implementation and corresponding
+headset-free tests. See `docs/COORDINATE-SYSTEM.md`.

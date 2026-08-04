@@ -1,12 +1,12 @@
-# Reproduzierbare Zeilenenden (ANWEISUNG.md §11).
+# Reproducible line endings.
 * text=auto eol=lf
 
-# Windows-Skripte behalten CRLF im Working Tree.
+# Windows scripts use CRLF in the working tree.
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
-# Binärdateien (falls je gezielt whitelisted) nicht anfassen.
+# Binary files are never line-ending normalized if deliberately whitelisted.
 *.png binary
 *.exe binary
 *.dll binary

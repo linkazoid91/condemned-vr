@@ -7,7 +7,7 @@
 #include "protocol.h"
 #include "protocol_utils.h"
 
-// --- Feste Größen & Offsets: kompilezeit geprüft (identisch x86/x64) ---------
+// Fixed sizes and offsets: compile-time checked for identical x86/x64 layout.
 static_assert(sizeof(FearVrPose) == 28, "FearVrPose");
 static_assert(sizeof(FearVrFov) == 16, "FearVrFov");
 static_assert(sizeof(FearVrEyeView) == 44, "FearVrEyeView");
@@ -50,7 +50,7 @@ static int g_failed = 0;
         }                                                                      \
     } while (0)
 
-// Simuliert die Empfängerprüfung: lehnt falsche Magic/Version/Größe ab.
+// Simulate receiver validation of incorrect magic, version and size.
 static bool AcceptHeader(const FearVrSharedHeader& h) {
     return fearvr::IsProtocolHeaderValid(h);
 }
@@ -67,7 +67,7 @@ int main(void) {
     CHECK(fearvr::NormalizeFovScalePercent(140) == 140);
     CHECK(fearvr::NormalizeFovScalePercent(160) == 150);
 
-    // --- Ungültige Varianten werden abgelehnt (Laufzeitwerte) ---
+    // Invalid runtime variants are rejected.
     { FearVrSharedHeader b = h; b.magic ^= 0xFFu;      CHECK(!AcceptHeader(b)); }
     { FearVrSharedHeader b = h; b.version += 1;         CHECK(!AcceptHeader(b)); }
     { FearVrSharedHeader b = h; b.headerSize += 1;      CHECK(!AcceptHeader(b)); }

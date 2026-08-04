@@ -1,54 +1,66 @@
-# THIRD_PARTY_NOTICES.md
+# Third-party notices
 
-Dieses Projekt bindet Fremdkomponenten ein. Jede Abhängigkeit wird auf einen
-festen **Commit oder Tag** festgeschrieben (ANWEISUNG.md §4, §11) und hier
-dokumentiert. Es werden **keine** Retail-Dateien, proprietäre SDK-Quellen oder
-extrahierten Assets mitgeliefert.
+This project uses or derives from the components below. Dependencies are
+pinned to a commit or tag and are downloaded only during explicit local setup.
+No dependency is downloaded while the game is running.
 
-> Die M1-OpenXR-Abhängigkeiten werden durch
-> `tools/prepare-dependencies.ps1` exakt geprüft. Der Build arbeitet nur mit
-> diesen lokalen Checkouts; das Spiel lädt keine Abhängigkeit aus dem Netz.
+## Source lineage
 
-## Geplante / eingebundene Abhängigkeiten
+| Component | Use | Source and pin | License |
+|---|---|---|---|
+| F.E.A.R. VR | OpenXR host, D3D9 transport, IPC, math, diagnostics and build foundation | [DR-89/fear-vr](https://github.com/DR-89/fear-vr), baseline [`24a6e22f`](https://github.com/DR-89/fear-vr/commit/24a6e22f20a02e64aa0955738f1050357b265400) | MIT |
 
-| Komponente | Verwendung | Bezug | Lizenz | Pin (Commit/Tag) |
+The original F.E.A.R. VR copyright and permission notice are retained in
+[`LICENSE`](LICENSE), and more detailed provenance is recorded in
+[`ATTRIBUTION.md`](ATTRIBUTION.md).
+
+## Build dependencies
+
+| Component | Use | Source | License | Pin |
 |---|---|---|---|---|
-| Khronos OpenXR-SDK | x64-Host: Header/statischer Loader | https://github.com/KhronosGroup/OpenXR-SDK | Apache-2.0 | `release-1.1.59`, Commit `e5df31de6c15b4900aee3092273194e51282000d` |
-| Khronos OpenXR-SDK-Source (`hello_xr` als Referenz) | Host-Lebenszyklus-Vorlage, nicht mitgebaut | https://github.com/KhronosGroup/OpenXR-SDK-Source | Apache-2.0 | `release-1.1.59`, Commit `04e92820192a6eec490e5eb8ffbd8211bafb0551` |
-| MinHook | x86-Late-Hooks für ein bereits erzeugtes D3D9-Gerät | https://github.com/TsudaKageyu/minhook | BSD-2-Clause | `v1.3.4`, Commit `c3fcafdc10146beb5919319d0683e44e3c30d537` |
-| DirectXMath | Mathe (Posen, Projektion) | Teil des Windows 10/11 SDK | MIT | via Windows SDK |
+| Khronos OpenXR-SDK | x64 host headers and static loader | [KhronosGroup/OpenXR-SDK](https://github.com/KhronosGroup/OpenXR-SDK) | Apache-2.0 | `release-1.1.59`, `e5df31de6c15b4900aee3092273194e51282000d` |
+| Khronos OpenXR-SDK-Source | `hello_xr` lifecycle reference only; not built | [KhronosGroup/OpenXR-SDK-Source](https://github.com/KhronosGroup/OpenXR-SDK-Source) | Apache-2.0 | `release-1.1.59`, `04e92820192a6eec490e5eb8ffbd8211bafb0551` |
+| MinHook | Guarded x86 hooks | [TsudaKageyu/minhook](https://github.com/TsudaKageyu/minhook) | BSD-2-Clause | `v1.3.4`, `c3fcafdc10146beb5919319d0683e44e3c30d537` |
+| DirectXMath | Pose and projection math | Windows 10/11 SDK | MIT | Supplied by the installed Windows SDK |
 
-## Offizielle F.E.A.R.-Bestandteile (NICHT in diesem Repo)
+`tools/prepare-dependencies.ps1` verifies the exact repository origins and
+commit IDs. Local dependency checkouts live under ignored `vendor-local/` and
+are never included in a release package.
 
-Die folgenden Bestandteile werden **lokal** vom Benutzer bereitgestellt und
-liegen **nicht** im Repository:
+## Reference-only projects
 
-- **F.E.A.R. 1.08 Retail** (`FEAR.exe`, Archive, DLLs) — proprietär,
-  Monolith Productions / WB Games. Nur lokal, legal erworben.
-- **F.E.A.R. Public Tools 1.08** (`fear_publictools_108.exe`) — offizielle
-  SDK-/Client-Quellen. Eigene Lizenzbedingungen des Herstellers; werden nach
-  `vendor-local/` installiert und nicht committet.
+- [EchoPatch](https://github.com/Wemino/EchoPatch), GPL-3.0: its description
+  of the Jupiter EX redundant HID initialization defect informed the
+  investigation. Condemned VR independently verifies and patches the live
+  Condemned byte ranges. EchoPatch source and binaries are not copied, built,
+  linked or distributed here.
+- [FEAR-MORE](https://github.com/SendoTarget/FEAR-MORE): historical build and
+  staging reference for the upstream F.E.A.R. VR project. No FEAR-MORE code or
+  binaries are incorporated into the Condemned targets.
 
-## Sekundäre Referenz (nur zur Orientierung, nicht übernommen)
+## Proprietary game components excluded from this repository
 
-- **FEAR-MORE** — https://github.com/SendoTarget/FEAR-MORE — demonstriert einen
-  VS-2022/v141-x86-Build der offiziellen F.E.A.R.-1.08-Clientmodule sowie eine
-  Retail-schonende Stagingstrategie. **Komponentenspezifische Lizenzgrenzen
-  (MIT / GPL / proprietär)** beachten. Es wird **weder Code noch Binärdatei**
-  ohne konkrete Lizenzprüfung übernommen.
-- **EchoPatch** — https://github.com/Wemino/EchoPatch — die Beschreibung des
-  redundanten Jupiter-EX-HID-Initialisierungsfehlers und die drei
-  Steam-1.08-Zielbereiche wurden gegen Commit
-  `b4a7074e4cbb2fb6bb238809f7cf26424f1f5961` und anschließend gegen die
-  laufenden Originalbytes verifiziert. EchoPatch-Code und -Binärdateien
-  werden nicht mitgebaut oder ausgeliefert; die GPL-3.0-Komponente selbst
-  bleibt eine reine Referenz.
+The user supplies a legally acquired installation locally. The development
+stage may copy verified files into ignored project-local directories, but
+these files must never be committed or packaged:
 
-## Regeln (ANWEISUNG.md §4, §10, §11)
+- `Condemned.exe`, `GameClient.dll`, `GameServer.dll`, archives, databases,
+  models, textures, audio, video and other *Condemned: Criminal Origins*
+  content;
+- F.E.A.R. executables, DLLs, archives, Public Tools source or binaries, and
+  extracted assets; and
+- third-party ASI loaders, widescreen-fix binaries or other mods unless their
+  redistribution terms have been reviewed and their inclusion explicitly
+  documented.
 
-- Jede Abhängigkeit auf Tag/Commit festschreiben, `FetchContent` nur mit
-  festem Pin, kein Download zur Laufzeit des Spiels.
-- Patches gegen das offizielle SDK minimal halten; vor jeder Veröffentlichung
-  prüfen, ob die SDK-Lizenz das Verteilen des konkreten Diffs erlaubt.
-  Sichere Alternative: lokales Transformationsskript auf benutzerbereitgestellte
-  SDK-Quelle (`patches/`, `game-source-overlay/`).
+The repository's staging scripts read and verify local game files; they do
+not modify the retail installation. Any future distributable must contain
+only project-authored binaries and notices, then locate the user's existing
+game installation at install time.
+
+## Release rule
+
+Run `tools/audit-publication.ps1` and manually inspect the release archive
+before publishing. If a dependency or asset is added later, record its exact
+source, version, license and redistribution basis here before it enters a
+release.
