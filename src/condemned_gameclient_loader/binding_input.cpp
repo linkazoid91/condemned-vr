@@ -305,12 +305,90 @@ volatile LONG g_physicalMeleeVisualProxyEnabled = 0;
 volatile LONG g_physicalMeleeWallProxyAppliedLogged = 0;
 volatile LONG g_physicalMeleeContactAccepted = 0;
 volatile LONG g_physicalMeleeContactRearmed = 0;
+std::uintptr_t g_physicalMeleePlayerWeaponModelObject = 0;
+void* g_physicalMeleePlayerCollisionController = nullptr;
+thread_local bool g_physicalMeleePlayerCollisionUpdate = false;
 volatile LONG g_weaponCatalogProbeState = 0;
 unsigned char* g_gameClientBase = nullptr;
 MenuToggleLatch g_menuToggleLatch;
 MenuNavigationState g_menuNavigationState;
 
 int ReadRetailGameState(void* interfaceManager) noexcept;
+
+struct MeleeCollisionRecordSnapshot {
+    std::uintptr_t sourceObject{0};
+    std::uintptr_t sourceNode{0};
+    std::uintptr_t collisionObject{0};
+    unsigned int attackIndex{0};
+    unsigned int collisionFinished{0};
+    bool readable{false};
+};
+
+MeleeCollisionRecordSnapshot ReadMeleeCollisionRecord(
+    void* record) noexcept {
+    MeleeCollisionRecordSnapshot snapshot{};
+    if (record == nullptr) {
+        return snapshot;
+    }
+    __try {
+        auto* const bytes = static_cast<unsigned char*>(record);
+        std::memcpy(
+            &snapshot.sourceObject, bytes + 0x38,
+            sizeof(snapshot.sourceObject));
+        std::memcpy(
+            &snapshot.sourceNode, bytes + 0x3C,
+            sizeof(snapshot.sourceNode));
+        std::memcpy(
+            &snapshot.collisionObject, bytes + 0x40,
+            sizeof(snapshot.collisionObject));
+        snapshot.attackIndex = bytes[0x10];
+        snapshot.collisionFinished = bytes[0x58];
+        snapshot.readable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snapshot = {};
+    }
+    return snapshot;
+}
+
+void PublishPhysicalMeleePlayerWeaponModel(
+    void* modelObject) noexcept {
+    const auto value = reinterpret_cast<std::uintptr_t>(modelObject);
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    if (value != g_physicalMeleePlayerWeaponModelObject) {
+        g_physicalMeleePlayerWeaponModelObject = value;
+        g_physicalMeleePlayerCollisionController = nullptr;
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+}
+
+bool MarkPhysicalMeleeCollisionControllerOwnership(
+    void* controller,
+    std::uintptr_t sourceObject) noexcept {
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    const bool playerOwned =
+        PhysicalMeleeCollisionBelongsToEquippedWeapon(
+            sourceObject,
+            g_physicalMeleePlayerWeaponModelObject);
+    if (playerOwned) {
+        g_physicalMeleePlayerCollisionController = controller;
+    }
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    return playerOwned;
+}
+
+bool PhysicalMeleeImpactControllerIsPlayerOwned(
+    void* controller) noexcept {
+    if (g_physicalMeleePlayerCollisionUpdate) {
+        return true;
+    }
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    const bool playerOwned =
+        g_physicalMeleePlayerWeaponModelObject != 0U &&
+        controller != nullptr &&
+        controller == g_physicalMeleePlayerCollisionController;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    return playerOwned;
+}
 
 bool CommandLineContains(const wchar_t* option) noexcept {
     const wchar_t* const commandLine = GetCommandLineW();
@@ -981,9 +1059,15 @@ void UpdateEquippedWeaponVisualSource() noexcept {
     }
     const bool visualProxyEnabled = InterlockedCompareExchange(
         &g_physicalMeleeVisualProxyEnabled, 0, 0) != 0;
+    const bool ownershipRequired = visualProxyEnabled ||
+        InterlockedCompareExchange(
+            &g_physicalMeleeWallProxyEnabled, 0, 0) != 0 ||
+        InterlockedCompareExchange(
+            &g_controllerMeleeAimEnabled, 0, 0) != 0;
     if (g_interfaceManager != nullptr &&
         ReadRetailGameState(g_interfaceManager) !=
             kCondemnedGameStatePlaying) {
+        PublishPhysicalMeleePlayerWeaponModel(nullptr);
         SelectPhysicalMeleeProfileForWeaponIndex(-1);
         if (visualProxyEnabled) {
             InvalidatePhysicalMeleeVisualProxySource();
@@ -1018,7 +1102,7 @@ void UpdateEquippedWeaponVisualSource() noexcept {
                 &currentWeapon, currentWeaponReference,
                 sizeof(currentWeapon));
         }
-        if (visualProxyEnabled && currentWeapon != nullptr) {
+        if (ownershipRequired && currentWeapon != nullptr) {
             modelObjectReference =
                 reinterpret_cast<void* const*>(
                     static_cast<unsigned char*>(currentWeapon) +
@@ -1031,7 +1115,7 @@ void UpdateEquippedWeaponVisualSource() noexcept {
             currentWeaponIndex != -1 &&
             currentWeaponReference != nullptr &&
             currentWeapon != nullptr;
-        if (visualProxyEnabled) {
+        if (ownershipRequired) {
             readable = readable &&
                 modelObjectReference != nullptr &&
                 modelObject != nullptr;
@@ -1040,6 +1124,7 @@ void UpdateEquippedWeaponVisualSource() noexcept {
         readable = false;
     }
     if (!readable) {
+        PublishPhysicalMeleePlayerWeaponModel(nullptr);
         SelectPhysicalMeleeProfileForWeaponIndex(-1);
         if (visualProxyEnabled) {
             InvalidatePhysicalMeleeVisualProxySource();
@@ -1048,6 +1133,8 @@ void UpdateEquippedWeaponVisualSource() noexcept {
     }
 
     SelectPhysicalMeleeProfileForWeaponIndex(currentWeaponIndex);
+    PublishPhysicalMeleePlayerWeaponModel(
+        ownershipRequired ? modelObject : nullptr);
     if (!visualProxyEnabled) {
         return;
     }
@@ -1647,34 +1734,27 @@ void __fastcall HookMeleeUpdateCollision(
     void* ignoredEdx,
     void* record) {
     (void)ignoredEdx;
-    g_originalMeleeUpdateCollision(controller, record);
+    MeleeCollisionRecordSnapshot snapshot =
+        ReadMeleeCollisionRecord(record);
+    const bool playerOwned = snapshot.readable &&
+        MarkPhysicalMeleeCollisionControllerOwnership(
+            controller, snapshot.sourceObject);
+    const bool previousPlayerCollisionUpdate =
+        g_physicalMeleePlayerCollisionUpdate;
+    g_physicalMeleePlayerCollisionUpdate = playerOwned;
+    __try {
+        g_originalMeleeUpdateCollision(controller, record);
+    } __finally {
+        g_physicalMeleePlayerCollisionUpdate =
+            previousPlayerCollisionUpdate;
+    }
     if (InterlockedCompareExchange(
             &g_aimPathProbeEnabled, 0, 0) == 0 ||
         g_log == nullptr || record == nullptr) {
         return;
     }
-
-    std::uintptr_t sourceObject = 0;
-    std::uintptr_t sourceNode = 0;
-    std::uintptr_t collisionObject = 0;
-    unsigned int attackIndex = 0;
-    unsigned int collisionFinished = 0;
-    bool readable = false;
-    __try {
-        auto* const bytes = static_cast<unsigned char*>(record);
-        std::memcpy(
-            &sourceObject, bytes + 0x38, sizeof(sourceObject));
-        std::memcpy(&sourceNode, bytes + 0x3C, sizeof(sourceNode));
-        std::memcpy(
-            &collisionObject, bytes + 0x40,
-            sizeof(collisionObject));
-        attackIndex = bytes[0x10];
-        collisionFinished = bytes[0x58];
-        readable = true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        readable = false;
-    }
-    if (!readable || collisionObject == 0) {
+    snapshot = ReadMeleeCollisionRecord(record);
+    if (!snapshot.readable || snapshot.collisionObject == 0) {
         return;
     }
 
@@ -1702,14 +1782,16 @@ void __fastcall HookMeleeUpdateCollision(
         "call=%ld slot=%d controller=%p record=%p attack_index=%u "
         "source_object=0x%08lX source_node=0x%08lX "
         "collision_object=0x%08lX collision_finished=%u "
+        "player_owned=%u "
         "controller_aim_valid=%u "
         "controller_forward=(%.4f,%.4f,%.4f) "
         "gameorig_stack_rvas=%s behavior=pass_through",
-        call, slot, controller, record, attackIndex,
-        static_cast<unsigned long>(sourceObject),
-        static_cast<unsigned long>(sourceNode),
-        static_cast<unsigned long>(collisionObject),
-        collisionFinished,
+        call, slot, controller, record, snapshot.attackIndex,
+        static_cast<unsigned long>(snapshot.sourceObject),
+        static_cast<unsigned long>(snapshot.sourceNode),
+        static_cast<unsigned long>(snapshot.collisionObject),
+        snapshot.collisionFinished,
+        playerOwned ? 1U : 0U,
         controllerAim ? 1U : 0U,
         controllerForward.x, controllerForward.y,
         controllerForward.z, stack);
@@ -1760,8 +1842,10 @@ void* __fastcall HookBuildRigidTransform(
     bool physicalWallProxyApplied = false;
     std::uint64_t physicalSampleId = 0;
     const bool physicalWallProxyRequested =
-        InterlockedCompareExchange(
-            &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
+        ShouldApplyPhysicalMeleePlayerOverride(
+            InterlockedCompareExchange(
+                &g_physicalMeleeWallProxyEnabled, 0, 0) != 0,
+            g_physicalMeleePlayerCollisionUpdate);
     if (physicalWallProxyRequested) {
         PhysicalMeleeFrame frame{};
         if (CopyLatestPhysicalMeleeFrame(frame, physicalSampleId)) {
@@ -1783,6 +1867,7 @@ void* __fastcall HookBuildRigidTransform(
     }
     bool meleeAimApplied = false;
     if (!physicalWallProxyRequested &&
+        g_physicalMeleePlayerCollisionUpdate &&
         InterlockedCompareExchange(
             &g_controllerMeleeAimEnabled, 0, 0) != 0) {
         float pivot[3]{};
@@ -1907,6 +1992,17 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
             argument4, argument5, argument6, argument7,
             argument8, argument9);
     }
+    const bool playerOwnedCollision =
+        PhysicalMeleeImpactControllerIsPlayerOwned(
+            impactController);
+    if (!playerOwnedCollision) {
+        // Enemy and unrecognised Retail melee must remain completely
+        // untouched by the local player's physical-proxy safety gate.
+        return g_originalMeleeImpactDispatch(
+            impactController, argument1, argument2, argument3,
+            argument4, argument5, argument6, argument7,
+            argument8, argument9);
+    }
 
     VectorAbi contactPosition{};
     VectorAbi contactNormal{};
@@ -1937,7 +2033,8 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
     }
     const bool nativeImpactForwarded =
         ShouldDispatchPhysicalMeleeNativeImpact(
-            physicalWallProxyEnabled);
+            physicalWallProxyEnabled,
+            playerOwnedCollision);
     const std::uintptr_t result = nativeImpactForwarded
         ? g_originalMeleeImpactDispatch(
               impactController, argument1, argument2, argument3,
@@ -2067,6 +2164,7 @@ int PublishMenuRenderState() noexcept {
         &g_lastPublishedRetailGameState, publishedState);
     if (previous == kCondemnedGameStatePlaying &&
         publishedState != kCondemnedGameStatePlaying) {
+        PublishPhysicalMeleePlayerWeaponModel(nullptr);
         InvalidatePhysicalMeleeVisualProxySource();
     }
     if (previous == publishedState) {
@@ -3132,6 +3230,8 @@ bool InstallHeadAimHooks(
     g_physicalMeleeSwingSampleId = 0;
     g_physicalMeleeSwingSampleTick = 0;
     g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
+    g_physicalMeleePlayerWeaponModelObject = 0U;
+    g_physicalMeleePlayerCollisionController = nullptr;
     ReleaseSRWLockExclusive(&g_physicalMeleeLock);
     InterlockedExchange(&g_physicalMeleeSampleCalls, 0);
     InterlockedExchange(&g_physicalMeleeDamageQualified, 0);

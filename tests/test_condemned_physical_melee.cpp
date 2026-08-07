@@ -95,9 +95,26 @@ int main() {
             invalidProxyFrame, true).active) {
         return Fail("invalid wall proxy transforms must fail closed");
     }
-    if (ShouldDispatchPhysicalMeleeNativeImpact(true) ||
-        !ShouldDispatchPhysicalMeleeNativeImpact(false)) {
-        return Fail("wall proxy gate must block every native impact");
+    if (!PhysicalMeleeCollisionBelongsToEquippedWeapon(
+            0x1234U, 0x1234U) ||
+        PhysicalMeleeCollisionBelongsToEquippedWeapon(
+            0U, 0x1234U) ||
+        PhysicalMeleeCollisionBelongsToEquippedWeapon(
+            0x1234U, 0x5678U)) {
+        return Fail(
+            "physical-melee ownership must require the equipped weapon model");
+    }
+    if (!ShouldApplyPhysicalMeleePlayerOverride(true, true) ||
+        ShouldApplyPhysicalMeleePlayerOverride(true, false) ||
+        ShouldApplyPhysicalMeleePlayerOverride(false, true)) {
+        return Fail(
+            "physical-melee overrides must be limited to player collisions");
+    }
+    if (ShouldDispatchPhysicalMeleeNativeImpact(true, true) ||
+        !ShouldDispatchPhysicalMeleeNativeImpact(true, false) ||
+        !ShouldDispatchPhysicalMeleeNativeImpact(false, true)) {
+        return Fail(
+            "wall proxy gate must preserve non-player native impacts");
     }
 
     // Held models use an explicit, reusable grip anchor. Solving the model

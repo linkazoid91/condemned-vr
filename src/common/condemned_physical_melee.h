@@ -1072,9 +1072,28 @@ ResolvePhysicalMeleeWallProxyTransform(
     return result;
 }
 
+inline bool PhysicalMeleeCollisionBelongsToEquippedWeapon(
+    std::uintptr_t sourceObject,
+    std::uintptr_t equippedWeaponModelObject) noexcept {
+    return sourceObject != 0U &&
+        equippedWeaponModelObject != 0U &&
+        sourceObject == equippedWeaponModelObject;
+}
+
+inline bool ShouldApplyPhysicalMeleePlayerOverride(
+    bool overrideEnabled,
+    bool playerOwnedCollision) noexcept {
+    return overrideEnabled && playerOwnedCollision;
+}
+
 inline bool ShouldDispatchPhysicalMeleeNativeImpact(
-    bool wallProxyEnabled) noexcept {
-    return !wallProxyEnabled;
+    bool wallProxyEnabled,
+    bool playerOwnedCollision) noexcept {
+    // The physical proxy may suppress the local player's native impact until
+    // contact qualification is enabled, but it must never suppress Retail
+    // melee owned by enemies or another unrecognised controller.
+    return !ShouldApplyPhysicalMeleePlayerOverride(
+        wallProxyEnabled, playerOwnedCollision);
 }
 
 inline void ResetPhysicalMeleeContactState(
