@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 #include "arm_ik.h"
 #include "condemned_physical_melee.h"
@@ -18,6 +19,7 @@ enum class ToolMenuTab : std::uint8_t {
     Melee,
     Weapon,
     Grip,
+    Collider,
     TwoHand,
     HandIk,
     LeftHandIk,
@@ -36,6 +38,8 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
         return "WEAPON";
     case ToolMenuTab::Grip:
         return "GRIP";
+    case ToolMenuTab::Collider:
+        return "COLLIDER";
     case ToolMenuTab::TwoHand:
         return "2-HAND";
     case ToolMenuTab::HandIk:
@@ -58,11 +62,13 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
 inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
     switch (tab) {
     case ToolMenuTab::Melee:
-        return 6U;
+        return 4U;
     case ToolMenuTab::Weapon:
         return 7U;
     case ToolMenuTab::Grip:
         return 9U;
+    case ToolMenuTab::Collider:
+        return 10U;
     case ToolMenuTab::TwoHand:
         return 8U;
     case ToolMenuTab::HandIk:
@@ -157,6 +163,9 @@ inline ToolMenuTransition UpdateToolMenuState(
 }
 
 struct ToolMenuMeleeSettings {
+    bool requireSwingForContactDamage{true};
+    float hitSpeedMetersPerSecond{1.25F};
+    float contactRearmDistanceMeters{0.12F};
     bool swingAttackEnabled{false};
     float swingTriggerSpeedMetersPerSecond{3.00F};
     float swingRearmSpeedMetersPerSecond{0.75F};
@@ -169,6 +178,202 @@ struct ToolMenuMeleeSettings {
     float catchUpStrength{1.50F};
     float dampingRatio{1.0F};
 };
+
+// Per-weapon swept capsule expressed in the weighted controller's local
+// space. The explicit reverse toggle makes a 180-degree correction possible
+// in one headset action without losing editable rotation or length.
+struct ToolMenuColliderSettings {
+    fearvr::TrackingVector positionOffsetUnits{};
+    fearvr::TrackingVector rotationOffsetDegrees{};
+    float lengthUnits{75.0F};
+    float radiusUnits{4.0F};
+    bool reversed{false};
+};
+
+constexpr float kToolMenuColliderMaximumOffsetUnits = 200.0F;
+constexpr float kToolMenuColliderMaximumLengthUnits = 250.0F;
+constexpr float kToolMenuColliderMaximumRadiusUnits = 25.0F;
+
+inline bool ToolMenuColliderSettingsAreValid(
+    const ToolMenuColliderSettings& settings) noexcept {
+    return fearvr::IsFinite(settings.positionOffsetUnits) &&
+        fearvr::IsFinite(settings.rotationOffsetDegrees) &&
+        std::fabs(settings.positionOffsetUnits.x) <=
+            kToolMenuColliderMaximumOffsetUnits &&
+        std::fabs(settings.positionOffsetUnits.y) <=
+            kToolMenuColliderMaximumOffsetUnits &&
+        std::fabs(settings.positionOffsetUnits.z) <=
+            kToolMenuColliderMaximumOffsetUnits &&
+        settings.rotationOffsetDegrees.x >= -180.0F &&
+        settings.rotationOffsetDegrees.x <= 180.0F &&
+        settings.rotationOffsetDegrees.y >= -180.0F &&
+        settings.rotationOffsetDegrees.y <= 180.0F &&
+        settings.rotationOffsetDegrees.z >= -180.0F &&
+        settings.rotationOffsetDegrees.z <= 180.0F &&
+        std::isfinite(settings.lengthUnits) &&
+        settings.lengthUnits >= 5.0F &&
+        settings.lengthUnits <= kToolMenuColliderMaximumLengthUnits &&
+        std::isfinite(settings.radiusUnits) &&
+        settings.radiusUnits >= 0.5F &&
+        settings.radiusUnits <= kToolMenuColliderMaximumRadiusUnits;
+}
+
+constexpr std::uint32_t kLiveColliderAlignmentCommandVersion = 1U;
+
+struct LiveColliderAlignmentCommand {
+    std::uint32_t version{0U};
+    std::uint64_t revision{0U};
+    std::uint32_t processId{0U};
+    std::int32_t weaponIndex{-1};
+    ToolMenuColliderSettings settings{};
+};
+
+enum class LiveColliderAlignmentCommandParseResult : std::uint8_t {
+    Ok,
+    Missing,
+    Malformed,
+    InvalidValue
+};
+
+inline const char* LiveColliderAlignmentCommandParseResultName(
+    LiveColliderAlignmentCommandParseResult result) noexcept {
+    switch (result) {
+    case LiveColliderAlignmentCommandParseResult::Ok:
+        return "ok";
+    case LiveColliderAlignmentCommandParseResult::Missing:
+        return "missing";
+    case LiveColliderAlignmentCommandParseResult::Malformed:
+        return "malformed";
+    case LiveColliderAlignmentCommandParseResult::InvalidValue:
+        return "invalid_value";
+    default:
+        return "unknown";
+    }
+}
+
+// A deliberately rigid one-line format keeps the developer command channel
+// dependency-free and fail-closed. The launcher supplies a unique per-run
+// path, while process ID, weapon index and revision prevent stale application.
+inline LiveColliderAlignmentCommandParseResult
+ParseLiveColliderAlignmentCommand(
+    const char* text,
+    LiveColliderAlignmentCommand& command) noexcept {
+    command = {};
+    if (text == nullptr || text[0] == '\0') {
+        return LiveColliderAlignmentCommandParseResult::Missing;
+    }
+    unsigned int version = 0U;
+    unsigned long long revision = 0ULL;
+    unsigned int processId = 0U;
+    int weaponIndex = -1;
+    float positionX = 0.0F;
+    float positionY = 0.0F;
+    float positionZ = 0.0F;
+    float rotationX = 0.0F;
+    float rotationY = 0.0F;
+    float rotationZ = 0.0F;
+    float length = 0.0F;
+    float radius = 0.0F;
+    unsigned int reversed = 0U;
+    int consumed = 0;
+#if defined(_MSC_VER)
+    const int parsed = ::sscanf_s(
+#else
+    const int parsed = std::sscanf(
+#endif
+        text,
+        "version=%u revision=%llu process_id=%u weapon_index=%d "
+        "position_x=%f position_y=%f position_z=%f "
+        "rotation_x=%f rotation_y=%f rotation_z=%f "
+        "length=%f radius=%f reversed=%u %n",
+        &version, &revision, &processId, &weaponIndex,
+        &positionX, &positionY, &positionZ,
+        &rotationX, &rotationY, &rotationZ,
+        &length, &radius, &reversed, &consumed);
+    if (parsed != 13 || consumed <= 0) {
+        return LiveColliderAlignmentCommandParseResult::Malformed;
+    }
+    for (const char* remaining = text + consumed;
+         *remaining != '\0'; ++remaining) {
+        if (*remaining != ' ' && *remaining != '\t' &&
+            *remaining != '\r' && *remaining != '\n') {
+            return LiveColliderAlignmentCommandParseResult::Malformed;
+        }
+    }
+    command.version = static_cast<std::uint32_t>(version);
+    command.revision = static_cast<std::uint64_t>(revision);
+    command.processId = static_cast<std::uint32_t>(processId);
+    command.weaponIndex = static_cast<std::int32_t>(weaponIndex);
+    command.settings.positionOffsetUnits =
+        {positionX, positionY, positionZ};
+    command.settings.rotationOffsetDegrees =
+        {rotationX, rotationY, rotationZ};
+    command.settings.lengthUnits = length;
+    command.settings.radiusUnits = radius;
+    command.settings.reversed = reversed != 0U;
+    if (command.version != kLiveColliderAlignmentCommandVersion ||
+        command.revision == 0U || command.processId == 0U ||
+        command.weaponIndex < 0 || reversed > 1U ||
+        !ToolMenuColliderSettingsAreValid(command.settings)) {
+        command = {};
+        return LiveColliderAlignmentCommandParseResult::InvalidValue;
+    }
+    return LiveColliderAlignmentCommandParseResult::Ok;
+}
+
+inline bool LiveColliderAlignmentCommandMatchesTarget(
+    const LiveColliderAlignmentCommand& command,
+    std::uint32_t processId,
+    std::int32_t weaponIndex) noexcept {
+    return processId != 0U && weaponIndex >= 0 &&
+        command.processId == processId &&
+        command.weaponIndex == weaponIndex;
+}
+
+inline ToolMenuColliderSettings ToolMenuColliderSettingsFromProfile(
+    const PhysicalMeleeProfile& profile) noexcept {
+    ToolMenuColliderSettings settings{};
+    if (!PhysicalMeleeProfileIsValid(profile)) {
+        return settings;
+    }
+    settings.positionOffsetUnits = profile.localBaseOffsetUnits;
+    const fearvr::TrackingVector delta = PhysicalMeleeSubtract(
+        profile.localTipOffsetUnits, profile.localBaseOffsetUnits);
+    settings.lengthUnits = PhysicalMeleeLength(delta);
+    settings.radiusUnits = profile.radiusUnits;
+    if (std::isfinite(settings.lengthUnits) &&
+        settings.lengthUnits >= 5.0F) {
+        const fearvr::TrackingVector direction = PhysicalMeleeScale(
+            delta, 1.0F / settings.lengthUnits);
+        constexpr float kRadiansToDegrees =
+            180.0F / 3.14159265358979323846F;
+        settings.rotationOffsetDegrees.x =
+            -std::asin(std::clamp(direction.y, -1.0F, 1.0F)) *
+            kRadiansToDegrees;
+        settings.rotationOffsetDegrees.y =
+            std::atan2(direction.x, direction.z) * kRadiansToDegrees;
+    }
+    return settings;
+}
+
+inline void ApplyToolMenuColliderSettings(
+    const ToolMenuColliderSettings& settings,
+    PhysicalMeleeProfile& profile) noexcept {
+    if (!PhysicalMeleeProfileIsValid(profile) ||
+        !ToolMenuColliderSettingsAreValid(settings)) {
+        return;
+    }
+    profile.localBaseOffsetUnits = settings.positionOffsetUnits;
+    const float signedLength =
+        settings.reversed ? -settings.lengthUnits : settings.lengthUnits;
+    profile.localTipOffsetUnits = PhysicalMeleeAdd(
+        settings.positionOffsetUnits,
+        fearvr::Rotate(
+            PhysicalMeleeLocalRotationFromDegrees(
+                settings.rotationOffsetDegrees),
+            {0.0F, 0.0F, signedLength}));
+    profile.radiusUnits = settings.radiusUnits;
+}
 
 // Per-weapon correction applied to the dominant-hand socket target after the
 // weighted VR weapon pose has been resolved. Position is expressed in the
@@ -252,7 +457,13 @@ inline PhysicalMeleeRigidTransform ResolveToolMenuLeftHandIkTarget(
 
 inline bool ToolMenuMeleeSettingsAreValid(
     const ToolMenuMeleeSettings& settings) noexcept {
-    return std::isfinite(settings.swingTriggerSpeedMetersPerSecond) &&
+    return std::isfinite(settings.hitSpeedMetersPerSecond) &&
+        settings.hitSpeedMetersPerSecond >= 0.25F &&
+        settings.hitSpeedMetersPerSecond <= 10.0F &&
+        std::isfinite(settings.contactRearmDistanceMeters) &&
+        settings.contactRearmDistanceMeters >= 0.02F &&
+        settings.contactRearmDistanceMeters <= 1.0F &&
+        std::isfinite(settings.swingTriggerSpeedMetersPerSecond) &&
         settings.swingTriggerSpeedMetersPerSecond >= 0.50F &&
         settings.swingTriggerSpeedMetersPerSecond <= 10.0F &&
         std::isfinite(settings.swingRearmSpeedMetersPerSecond) &&
@@ -316,6 +527,12 @@ inline ToolMenuMeleeSettings ToolMenuMeleeSettingsFromProfile(
     if (!PhysicalMeleeProfileIsValid(profile)) {
         return settings;
     }
+    settings.requireSwingForContactDamage =
+        profile.requireSwingForContactDamage;
+    settings.hitSpeedMetersPerSecond =
+        profile.minimumImpactSpeedMetersPerSecond;
+    settings.contactRearmDistanceMeters =
+        profile.contactRearmSeparationMeters;
     settings.swingAttackEnabled = profile.swingAttackEnabled &&
         ToolMenuProfileSupportsSwingAttack(profile.id);
     settings.swingTriggerSpeedMetersPerSecond =
@@ -342,6 +559,12 @@ inline void ApplyToolMenuMeleeSettings(
         !ToolMenuMeleeSettingsAreValid(settings)) {
         return;
     }
+    profile.requireSwingForContactDamage =
+        settings.requireSwingForContactDamage;
+    profile.minimumImpactSpeedMetersPerSecond =
+        settings.hitSpeedMetersPerSecond;
+    profile.contactRearmSeparationMeters =
+        settings.contactRearmDistanceMeters;
     profile.swingAttackEnabled = settings.swingAttackEnabled &&
         ToolMenuProfileSupportsSwingAttack(profile.id);
     profile.swingAttackTriggerSpeedMetersPerSecond =
@@ -369,10 +592,12 @@ struct ToolMenuWeaponSettingsSlot {
     PhysicalMeleeProfileId profileId{
         PhysicalMeleeProfileId::GenericOneHanded};
     ToolMenuMeleeSettings settings{};
+    ToolMenuColliderSettings colliderSettings{};
     ToolMenuRightHandIkSettings rightHandIkSettings{};
     std::uint64_t lastUsed{0U};
     bool occupied{false};
     bool persistentLoadAttempted{false};
+    bool colliderPersistentLoadAttempted{false};
     bool rightHandIkPersistentLoadAttempted{false};
 };
 
@@ -411,8 +636,11 @@ inline ToolMenuWeaponSettingsSlot* ResolveToolMenuWeaponSettingsSlot(
         if (slot->profileId != baseProfile.id) {
             slot->profileId = baseProfile.id;
             slot->settings = ToolMenuMeleeSettingsFromProfile(baseProfile);
+            slot->colliderSettings =
+                ToolMenuColliderSettingsFromProfile(baseProfile);
             slot->rightHandIkSettings = {};
             slot->persistentLoadAttempted = false;
+            slot->colliderPersistentLoadAttempted = false;
             slot->rightHandIkPersistentLoadAttempted = false;
         }
         slot->lastUsed = ++registry.useSequence;
@@ -437,14 +665,21 @@ inline ToolMenuWeaponSettingsSlot* ResolveToolMenuWeaponSettingsSlot(
     replacement->weaponIndex = weaponIndex;
     replacement->profileId = baseProfile.id;
     replacement->settings = ToolMenuMeleeSettingsFromProfile(baseProfile);
+    replacement->colliderSettings =
+        ToolMenuColliderSettingsFromProfile(baseProfile);
     replacement->lastUsed = ++registry.useSequence;
     replacement->occupied = true;
     return replacement;
 }
 
 struct ToolMenuMeleeTelemetry {
+    float contactSpeedMetersPerSecond{0.0F};
+    float contactReleaseSpeedMetersPerSecond{0.0F};
     float swingSpeedMetersPerSecond{0.0F};
     std::uint32_t triggerCount{0U};
+    std::uint32_t contactCallbackCount{0U};
+    std::uint32_t damageDispatchCount{0U};
+    std::uint32_t contactReleaseSampleCount{0U};
     std::int32_t weaponIndex{-1};
     char weaponName[kRetailWeaponNameCapacity]{};
     char weaponAnimationProperty[
@@ -453,9 +688,16 @@ struct ToolMenuMeleeTelemetry {
         RetailWeaponPoseFamily::Unknown};
     bool weaponNameResolved{false};
     bool weaponAnimationPropertyResolved{false};
+    bool contactTrackingFresh{false};
+    bool contactFastEnough{false};
+    bool contactLatched{false};
+    bool contactRearmTravelReady{false};
     bool trackingFresh{false};
     bool wallProxyEnabled{false};
     bool visualProxyEnabled{false};
+    bool contactDamageEnabled{false};
+    bool colliderDebugEnabled{false};
+    bool collisionBodyLive{false};
     bool twoHandedEnabled{false};
     bool secondaryGripAttached{false};
     float secondaryGripDistanceMeters{0.0F};

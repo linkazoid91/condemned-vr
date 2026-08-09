@@ -46,6 +46,9 @@ int main() {
 
     ToolMenuMeleeSettings expected{};
     expected.swingAttackEnabled = false;
+    expected.requireSwingForContactDamage = false;
+    expected.hitSpeedMetersPerSecond = 2.75F;
+    expected.contactRearmDistanceMeters = 0.22F;
     expected.swingTriggerSpeedMetersPerSecond = 4.25F;
     expected.swingRearmSpeedMetersPerSecond = 1.0F;
     expected.swingPulseMilliseconds = 130U;
@@ -67,6 +70,9 @@ int main() {
             32, PhysicalMeleeProfileId::Pipe, loaded) !=
             WeaponSettingsStoreResult::Ok ||
         loaded.swingAttackEnabled ||
+        loaded.requireSwingForContactDamage ||
+        !Near(loaded.hitSpeedMetersPerSecond, 2.75F) ||
+        !Near(loaded.contactRearmDistanceMeters, 0.22F) ||
         !Near(loaded.swingTriggerSpeedMetersPerSecond, 4.25F) ||
         loaded.swingPulseMilliseconds != 130U ||
         !Near(loaded.handlingWeight, 2.75F) ||
@@ -77,6 +83,108 @@ int main() {
             32, PhysicalMeleeProfileId::Plank, loaded) !=
         WeaponSettingsStoreResult::ProfileMismatch) {
         return Fail("a changed profile identity must reject stale settings");
+    }
+
+    if (!WritePrivateProfileStringW(
+            L"weapon_17", L"settings",
+            L"1,3,1,3,0.75,100,450,4.5,4,10,8,0.8,0.55", path)) {
+        return Fail("legacy weapon settings fixture must be writable");
+    }
+    ToolMenuMeleeSettings legacy{};
+    if (LoadWeaponToolSettings(
+            17, PhysicalMeleeProfileId::FireAxe, legacy) !=
+            WeaponSettingsStoreResult::Ok ||
+        !legacy.swingAttackEnabled ||
+        !legacy.requireSwingForContactDamage ||
+        !Near(legacy.hitSpeedMetersPerSecond, 1.25F) ||
+        !Near(legacy.contactRearmDistanceMeters, 0.12F) ||
+        !Near(legacy.massKilograms, 4.5F)) {
+        return Fail(
+            "version-one settings must load with safe hit defaults");
+    }
+
+
+    ToolMenuColliderSettings expectedCollider{};
+    expectedCollider.positionOffsetUnits = {1.0F, -2.0F, 3.0F};
+    expectedCollider.rotationOffsetDegrees = {10.0F, -20.0F, 30.0F};
+    expectedCollider.lengthUnits = 84.5F;
+    expectedCollider.radiusUnits = 5.5F;
+    expectedCollider.reversed = true;
+    if (SaveWeaponColliderSettings(
+            32, PhysicalMeleeProfileId::Pipe, expectedCollider) !=
+        WeaponSettingsStoreResult::Ok) {
+        return Fail("valid collider settings must save");
+    }
+    ToolMenuColliderSettings loadedCollider{};
+    if (LoadWeaponColliderSettings(
+            32, PhysicalMeleeProfileId::Pipe, loadedCollider) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedCollider.positionOffsetUnits.x, 1.0F) ||
+        !Near(loadedCollider.positionOffsetUnits.y, -2.0F) ||
+        !Near(loadedCollider.positionOffsetUnits.z, 3.0F) ||
+        !Near(loadedCollider.rotationOffsetDegrees.x, 10.0F) ||
+        !Near(loadedCollider.rotationOffsetDegrees.y, -20.0F) ||
+        !Near(loadedCollider.rotationOffsetDegrees.z, 30.0F) ||
+        !Near(loadedCollider.lengthUnits, 84.5F) ||
+        !Near(loadedCollider.radiusUnits, 5.5F) ||
+        !loadedCollider.reversed) {
+        return Fail("collider settings must round-trip exactly");
+    }
+    if (LoadWeaponColliderSettings(
+            32, PhysicalMeleeProfileId::Plank, loadedCollider) !=
+        WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "collider settings must reject a changed profile identity");
+    }
+
+    WeaponGripSettings expectedGrip{};
+    expectedGrip.positionUnits = {2.0F, 2.5F, -4.0F};
+    expectedGrip.localRotationDegrees = {-25.0F, 10.0F, -5.0F};
+    expectedGrip.secondaryGripOffsetUnits = {0.0F, 46.0F, 3.0F};
+    expectedGrip.secondaryGripGrabRadiusMeters = 0.18F;
+    expectedGrip.secondaryGripEnabled = true;
+    if (SaveWeaponGripSettings(
+            32, PhysicalMeleeProfileId::Pipe, expectedGrip) !=
+        WeaponSettingsStoreResult::Ok) {
+        return Fail("valid grip settings must save");
+    }
+    WeaponGripSettings loadedGrip{};
+    if (LoadWeaponGripSettings(
+            32, PhysicalMeleeProfileId::Pipe, loadedGrip) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedGrip.positionUnits.x, 2.0F) ||
+        !Near(loadedGrip.positionUnits.y, 2.5F) ||
+        !Near(loadedGrip.positionUnits.z, -4.0F) ||
+        !Near(loadedGrip.localRotationDegrees.x, -25.0F) ||
+        !Near(loadedGrip.localRotationDegrees.y, 10.0F) ||
+        !Near(loadedGrip.localRotationDegrees.z, -5.0F) ||
+        !Near(loadedGrip.secondaryGripOffsetUnits.y, 46.0F) ||
+        !Near(loadedGrip.secondaryGripOffsetUnits.z, 3.0F) ||
+        !Near(loadedGrip.secondaryGripGrabRadiusMeters, 0.18F) ||
+        !loadedGrip.secondaryGripEnabled) {
+        return Fail("grip settings must round-trip exactly");
+    }
+    if (LoadWeaponGripSettings(
+            32, PhysicalMeleeProfileId::Plank, loadedGrip) !=
+        WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "grip settings must reject a changed profile identity");
+    }
+    expectedGrip.positionUnits.x = 300.01F;
+    if (SaveWeaponGripSettings(
+            32, PhysicalMeleeProfileId::Pipe, expectedGrip) !=
+        WeaponSettingsStoreResult::InvalidArgument) {
+        return Fail("out-of-range grip settings must not save");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_11", L"grip",
+            L"1,1,0,0,0,0,0,0,2,0,45,0,0.15", path)) {
+        return Fail("invalid grip settings fixture must be writable");
+    }
+    if (LoadWeaponGripSettings(
+            11, PhysicalMeleeProfileId::Plank, loadedGrip) !=
+        WeaponSettingsStoreResult::ParseFailed) {
+        return Fail("invalid grip settings must fail closed");
     }
 
     ToolMenuRightHandIkSettings expectedHandIk{};

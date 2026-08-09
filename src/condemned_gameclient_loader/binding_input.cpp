@@ -74,10 +74,14 @@ using MeleeEnableCollisionsFunction = std::uintptr_t(__thiscall*)(
 using MeleeUpdateCollisionFunction = void(__thiscall*)(void*, void*);
 using BuildRigidTransformFunction = void*(__thiscall*)(
     void*, const VectorAbi*, const QuaternionAbi*);
+using DatabaseFloatReaderFunction = float(__thiscall*)(
+    void*, const void*, std::uint32_t, float);
 using MeleeImpactDispatchFunction = std::uintptr_t(__thiscall*)(
     void*, std::uintptr_t, std::uintptr_t, std::uintptr_t,
     std::uintptr_t, std::uintptr_t, std::uintptr_t,
     std::uintptr_t, std::uintptr_t, std::uintptr_t);
+using ResetMeleeTargetReferenceFunction =
+    void(__thiscall*)(void*);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
 using ClientShellUpdateFunction = void(__thiscall*)(void*);
 using ClientShellKeyUpFunction = void(__thiscall*)(void*, int);
@@ -94,13 +98,31 @@ constexpr std::uintptr_t kMeleeUpdateCollisionRva = 0x0001FC00U;
 constexpr std::uintptr_t kBuildRigidTransformRva = 0x0000F690U;
 constexpr std::uintptr_t kMeleeBuildRigidTransformReturnRva =
     0x0001FCDEU;
+constexpr std::uintptr_t kMeleeNativeLengthUpReadReturnRva =
+    0x0002000DU;
+constexpr std::uintptr_t kMeleeNativeLengthDownReadReturnRva =
+    0x00020033U;
+constexpr std::uintptr_t kMeleeNativeRadiusReadReturnRva =
+    0x00020059U;
+constexpr std::uintptr_t kMasterDatabaseGlobalRva = 0x00172EB8U;
+constexpr std::size_t kMasterDatabaseFloatReaderSlot = 0x80U;
+constexpr std::uintptr_t kMeleeLengthUpPropertyNameRva = 0x0013A684U;
+constexpr std::uintptr_t kMeleeLengthDownPropertyNameRva = 0x0013A678U;
+constexpr std::uintptr_t kMeleeRadiusPropertyNameRva = 0x0013A670U;
+constexpr std::size_t kMeleeLengthUpPropertyPushOffset = 0x2F5U;
+constexpr std::size_t kMeleeLengthDownPropertyPushOffset = 0x31DU;
+constexpr std::size_t kMeleeRadiusPropertyPushOffset = 0x343U;
 constexpr std::uintptr_t kMeleeImpactDispatchRva = 0x0001F270U;
 constexpr std::uintptr_t kMeleeImpactDispatchReturnRva =
     0x0001FBC8U;
 constexpr std::uintptr_t kMeleeCollisionCallbackRva = 0x0001F830U;
 constexpr std::uintptr_t kMeleeImpactDispatchCallRva = 0x0001FBC3U;
+constexpr std::uintptr_t kMeleeTargetReferenceVectorPushRva = 0x000155C0U;
+constexpr std::uintptr_t kMeleeTargetReferenceVectorPushCallRva = 0x0001FB87U;
 constexpr std::uintptr_t kMeleeCollisionLimitTextRva = 0x0013A6B8U;
 constexpr std::uintptr_t kMeleeClientGlobalRva = 0x00168EECU;
+constexpr std::uintptr_t kResetMeleeTargetReferenceRva = 0x00102B80U;
+constexpr double kContinuousMeleeCollisionExpiration = 1.0e300;
 // Verified local-player weapon lifecycle. CClientWeaponMgr::GetCurrentWeapon
 // at +0x2F910 returns m_pCurrentWeapon (+0x0C) only when its index (+0x08)
 // is valid. CClientWeapon::SetWeaponTransform at +0x255F0 reads the primary
@@ -170,6 +192,22 @@ constexpr unsigned char kMeleeEnableCollisionsPrefix[] = {
     0x81, 0xEC, 0x6C, 0x01, 0x00, 0x00, 0xA1};
 constexpr unsigned char kMeleeEnableCollisionsBodyPrefix[] = {
     0x8B, 0x50, 0x10, 0x53, 0x55, 0x8B, 0xE9};
+constexpr unsigned char kMeleeNativeFloatReadCall[] = {
+    0xFF, 0x93, 0x80, 0x00, 0x00, 0x00};
+constexpr unsigned char kMeleeNativeLengthUpStore[] = {
+    0xD9, 0x5C, 0x24, 0x24};
+constexpr unsigned char kMeleeNativeLengthDownStore[] = {
+    0xD9, 0x5C, 0x24, 0x1C};
+constexpr unsigned char kMeleeNativeRadiusStore[] = {
+    0xD9, 0x5C, 0x24, 0x14};
+constexpr unsigned char kMasterDatabaseFloatReaderBody[] = {
+    0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x74, 0x23,
+    0x80, 0x78, 0x0A, 0x02, 0x75, 0x1D, 0x0F, 0xB7,
+    0x50, 0x08, 0x8B, 0x4C, 0x24, 0x08, 0x3B, 0xCA,
+    0x73, 0x11, 0x8B, 0x40, 0x0C, 0x8B, 0x0C, 0x88,
+    0x89, 0x4C, 0x24, 0x04, 0xD9, 0x44, 0x24, 0x04,
+    0xC2, 0x0C, 0x00, 0xD9, 0x44, 0x24, 0x0C, 0xC2,
+    0x0C, 0x00};
 constexpr unsigned char kMeleeCollisionLimitTextReferencePrefix[] = {
     0x8B, 0x94, 0x24, 0x88, 0x01, 0x00, 0x00, 0x52, 0x68};
 constexpr unsigned char kMeleeUpdateCollisionPrefix[] = {
@@ -192,6 +230,21 @@ constexpr unsigned char kMeleeImpactDispatchCallsitePrefix[] = {
     0x8B, 0x46, 0x24, 0x8B, 0x56, 0x38, 0x50, 0x33,
     0xC9, 0x8A, 0x4E, 0x28, 0x57, 0x8D, 0x44, 0x24,
     0x44, 0x51, 0x52};
+constexpr unsigned char kMeleeTargetReferenceVectorSetup[] = {
+    0x8D, 0x54, 0x24, 0x2C, 0x8D, 0x7E, 0x48, 0x52, 0x8B, 0xCF};
+constexpr unsigned char kMeleeTargetReferenceVectorPushPrefix[] = {
+    0x56, 0x8B, 0xF1, 0x8B, 0x56, 0x04, 0x85, 0xD2,
+    0x75, 0x04, 0x33, 0xC9, 0xEB, 0x08, 0x8B, 0x4E,
+    0x08, 0x2B, 0xCA, 0xC1, 0xF9, 0x04, 0x85, 0xD2,
+    0x74, 0x31, 0x8B, 0x46, 0x0C, 0x2B, 0xC2, 0xC1,
+    0xF8, 0x04};
+constexpr unsigned char kResetMeleeTargetReferenceBody[] = {
+    0x8B, 0x51, 0x04, 0x8D, 0x41, 0x04, 0x56, 0x8B,
+    0x70, 0x04, 0x89, 0x72, 0x04, 0x8B, 0x30, 0x8B,
+    0x50, 0x04, 0x89, 0x32, 0x89, 0x40, 0x04, 0x89,
+    0x00, 0xC7, 0x41, 0x0C, 0x00, 0x00, 0x00, 0x00,
+    0x5E, 0xC3};
+
 constexpr unsigned char kGetCurrentWeaponBody[] = {
     0x83, 0x79, 0x08, 0xFF, 0x75, 0x03, 0x33,
     0xC0, 0xC3, 0x8B, 0x41, 0x0C, 0xC3};
@@ -237,6 +290,8 @@ MeleeEnableCollisionsFunction g_originalMeleeEnableCollisions = nullptr;
 MeleeUpdateCollisionFunction g_originalMeleeUpdateCollision = nullptr;
 BuildRigidTransformFunction g_originalBuildRigidTransform = nullptr;
 MeleeImpactDispatchFunction g_originalMeleeImpactDispatch = nullptr;
+DatabaseFloatReaderFunction g_originalMasterDatabaseFloatReader = nullptr;
+ResetMeleeTargetReferenceFunction g_resetMeleeTargetReference = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
 SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 SetMenuActiveFunction g_setMenuActive = nullptr;
@@ -251,6 +306,7 @@ void* g_meleeEnableCollisionsHookTarget = nullptr;
 void* g_meleeUpdateCollisionHookTarget = nullptr;
 void* g_buildRigidTransformHookTarget = nullptr;
 void* g_meleeImpactDispatchHookTarget = nullptr;
+void* g_masterDatabaseFloatReaderHookTarget = nullptr;
 void* g_menuHookTarget = nullptr;
 void* g_clientShell = nullptr;
 void* g_interfaceManager = nullptr;
@@ -301,13 +357,28 @@ volatile LONG g_physicalMeleeSampleCalls = 0;
 volatile LONG g_physicalMeleeDamageQualified = 0;
 volatile LONG g_physicalMeleeSwingAttackTriggered = 0;
 volatile LONG g_physicalMeleeWallProxyEnabled = 0;
+volatile LONG g_physicalMeleeColliderDebugEnabled = 0;
 volatile LONG g_physicalMeleeVisualProxyEnabled = 0;
+volatile LONG g_physicalMeleeContactDamageEnabled = 0;
+volatile LONG g_physicalMeleeDamageDispatched = 0;
+volatile LONG g_physicalMeleeContinuousCollisionHeld = 0;
+volatile LONG g_physicalMeleeContinuousCollisionReleased = 0;
+volatile LONG g_physicalMeleeRetailLatchReleased = 0;
+volatile LONG g_physicalMeleeRetailLatchReleaseFailedLogged = 0;
 volatile LONG g_physicalMeleeWallProxyAppliedLogged = 0;
 volatile LONG g_physicalMeleeContactAccepted = 0;
 volatile LONG g_physicalMeleeContactRearmed = 0;
+volatile LONG g_physicalMeleeContactInvalidSampleHeld = 0;
+volatile LONG g_physicalMeleeNativeCapsuleOverrides = 0;
 std::uintptr_t g_physicalMeleePlayerWeaponModelObject = 0;
+std::uintptr_t g_physicalMeleePlayerCollisionObject = 0;
+ULONGLONG g_physicalMeleePlayerCollisionTick = 0;
 void* g_physicalMeleePlayerCollisionController = nullptr;
 thread_local bool g_physicalMeleePlayerCollisionUpdate = false;
+thread_local PhysicalMeleeNativeCapsuleShape
+    g_physicalMeleeNativeCapsuleOverride{};
+thread_local std::uint32_t g_physicalMeleeNativeCapsuleReadMask = 0U;
+thread_local void* g_physicalMeleeActiveCollisionRecord = nullptr;
 volatile LONG g_weaponCatalogProbeState = 0;
 unsigned char* g_gameClientBase = nullptr;
 MenuToggleLatch g_menuToggleLatch;
@@ -319,6 +390,7 @@ struct MeleeCollisionRecordSnapshot {
     std::uintptr_t sourceObject{0};
     std::uintptr_t sourceNode{0};
     std::uintptr_t collisionObject{0};
+    double expirationTime{0.0};
     unsigned int attackIndex{0};
     unsigned int collisionFinished{0};
     bool readable{false};
@@ -341,6 +413,9 @@ MeleeCollisionRecordSnapshot ReadMeleeCollisionRecord(
         std::memcpy(
             &snapshot.collisionObject, bytes + 0x40,
             sizeof(snapshot.collisionObject));
+        std::memcpy(
+            &snapshot.expirationTime, bytes + 0x18,
+            sizeof(snapshot.expirationTime));
         snapshot.attackIndex = bytes[0x10];
         snapshot.collisionFinished = bytes[0x58];
         snapshot.readable = true;
@@ -350,6 +425,161 @@ MeleeCollisionRecordSnapshot ReadMeleeCollisionRecord(
     return snapshot;
 }
 
+bool SetPhysicalMeleeCollisionLifetime(
+    void* record,
+    bool maintainContinuously) noexcept {
+    if (record == nullptr) {
+        return false;
+    }
+    bool transitioned = false;
+    __try {
+        auto* const bytes = static_cast<unsigned char*>(record);
+        double expiration = 0.0;
+        std::memcpy(
+            &expiration, bytes + 0x18, sizeof(expiration));
+        const bool wasContinuous =
+            expiration == kContinuousMeleeCollisionExpiration;
+        if (maintainContinuously) {
+            std::memcpy(
+                bytes + 0x18, &kContinuousMeleeCollisionExpiration,
+                sizeof(kContinuousMeleeCollisionExpiration));
+            bytes[0x58] = 0U;
+            transitioned = !wasContinuous;
+        } else if (wasContinuous) {
+            // Retail's next collision update owns teardown of the physics
+            // body, listener, and retained target references.
+            bytes[0x58] = 1U;
+            transitioned = true;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (transitioned) {
+        InterlockedIncrement(
+            maintainContinuously
+                ? &g_physicalMeleeContinuousCollisionHeld
+                : &g_physicalMeleeContinuousCollisionReleased);
+    }
+    return transitioned;
+}
+
+struct RetailMeleeTargetReferenceVectorRelease {
+    std::uintptr_t beginBefore{0U};
+    std::uintptr_t endBefore{0U};
+    std::uintptr_t capacityBefore{0U};
+    std::uintptr_t endAfter{0U};
+    std::uintptr_t firstTargetBefore{0U};
+    std::size_t referencesBefore{0U};
+    std::size_t referencesCleared{0U};
+    const char* state{"not_attempted"};
+    bool ok{false};
+};
+
+RetailMeleeTargetReferenceVectorRelease
+ReleaseRetailMeleeTargetReferenceVector(
+    void* impactController,
+    std::uintptr_t targetReferenceVector) noexcept {
+    RetailMeleeTargetReferenceVectorRelease result{};
+    if (impactController == nullptr) {
+        result.state = "missing_controller";
+        return result;
+    }
+    if (g_resetMeleeTargetReference == nullptr) {
+        result.state = "missing_reset_function";
+        return result;
+    }
+    if (targetReferenceVector == 0U) {
+        result.state = "missing_target_vector";
+        return result;
+    }
+    const std::uintptr_t controllerAddress =
+        reinterpret_cast<std::uintptr_t>(impactController);
+    const bool verifiedSlot =
+        targetReferenceVector == controllerAddress + 0x60U ||
+        targetReferenceVector == controllerAddress + 0xC0U;
+    if (!verifiedSlot) {
+        result.state = "invalid_slot";
+        return result;
+    }
+    __try {
+        auto* const vectorBytes =
+            reinterpret_cast<unsigned char*>(targetReferenceVector);
+        std::memcpy(
+            &result.beginBefore, vectorBytes + 0x04,
+            sizeof(result.beginBefore));
+        std::memcpy(
+            &result.endBefore, vectorBytes + 0x08,
+            sizeof(result.endBefore));
+        std::memcpy(
+            &result.capacityBefore, vectorBytes + 0x0C,
+            sizeof(result.capacityBefore));
+        const RetailMeleeTargetReferenceVectorSpan span =
+            ResolveRetailMeleeTargetReferenceVectorSpan(
+                result.beginBefore, result.endBefore,
+                result.capacityBefore);
+        if (!span.valid) {
+            result.state = "invalid_vector";
+            return result;
+        }
+        result.referencesBefore = span.count;
+        if (span.count == 0U) {
+            result.endAfter = span.end;
+            result.state = "empty";
+            result.ok = true;
+            return result;
+        }
+
+        constexpr std::uintptr_t kTargetReferenceSize = 16U;
+        constexpr std::uintptr_t kTargetOffset = 0x0CU;
+        for (std::size_t index = 0U; index < span.count; ++index) {
+            const std::uintptr_t targetReference =
+                span.begin + index * kTargetReferenceSize;
+            std::uintptr_t targetBefore = 0U;
+            std::memcpy(
+                &targetBefore,
+                reinterpret_cast<const unsigned char*>(targetReference) +
+                    kTargetOffset,
+                sizeof(targetBefore));
+            if (index == 0U) {
+                result.firstTargetBefore = targetBefore;
+            }
+            if (targetBefore == 0U) {
+                continue;
+            }
+            g_resetMeleeTargetReference(
+                reinterpret_cast<void*>(targetReference));
+            std::uintptr_t targetAfter = 0U;
+            std::memcpy(
+                &targetAfter,
+                reinterpret_cast<const unsigned char*>(targetReference) +
+                    kTargetOffset,
+                sizeof(targetAfter));
+            if (targetAfter != 0U) {
+                result.state = "target_still_set";
+                return result;
+            }
+            ++result.referencesCleared;
+        }
+
+        std::memcpy(
+            vectorBytes + 0x08, &span.begin, sizeof(span.begin));
+        std::memcpy(
+            &result.endAfter, vectorBytes + 0x08,
+            sizeof(result.endAfter));
+        if (result.endAfter != span.begin) {
+            result.state = "end_not_rewound";
+            return result;
+        }
+        InterlockedIncrement(&g_physicalMeleeRetailLatchReleased);
+        result.state = "cleared";
+        result.ok = true;
+        return result;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        result.state = "exception";
+        return result;
+    }
+}
+
 void PublishPhysicalMeleePlayerWeaponModel(
     void* modelObject) noexcept {
     const auto value = reinterpret_cast<std::uintptr_t>(modelObject);
@@ -357,9 +587,36 @@ void PublishPhysicalMeleePlayerWeaponModel(
     if (value != g_physicalMeleePlayerWeaponModelObject) {
         g_physicalMeleePlayerWeaponModelObject = value;
         g_physicalMeleePlayerCollisionController = nullptr;
+        g_physicalMeleePlayerCollisionObject = 0U;
+        g_physicalMeleePlayerCollisionTick = 0U;
     }
     ReleaseSRWLockExclusive(&g_physicalMeleeLock);
 }
+
+void PublishPhysicalMeleePlayerCollisionObject(
+    bool playerOwned,
+    std::uintptr_t collisionObject) noexcept {
+    if (!playerOwned) {
+        return;
+    }
+    std::uintptr_t previousCollisionObject = 0U;
+    AcquireSRWLockExclusive(&g_physicalMeleeLock);
+    previousCollisionObject = g_physicalMeleePlayerCollisionObject;
+    g_physicalMeleePlayerCollisionObject = collisionObject;
+    g_physicalMeleePlayerCollisionTick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    if (previousCollisionObject != collisionObject && g_log != nullptr) {
+        char detail[192]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "seeded=%u collision_object=0x%08lX previous_object=0x%08lX",
+            collisionObject != 0U ? 1U : 0U,
+            static_cast<unsigned long>(collisionObject),
+            static_cast<unsigned long>(previousCollisionObject));
+        g_log("m5_weapon_test_collider_state", detail);
+    }
+}
+
 
 bool MarkPhysicalMeleeCollisionControllerOwnership(
     void* controller,
@@ -389,6 +646,33 @@ bool PhysicalMeleeImpactControllerIsPlayerOwned(
     ReleaseSRWLockShared(&g_physicalMeleeLock);
     return playerOwned;
 }
+
+bool PhysicalMeleeEnableCollisionsIsPlayerOwned(
+    std::uintptr_t ownerObject) noexcept {
+    if (ownerObject == 0U || g_gameClientBase == nullptr) {
+        return false;
+    }
+    __try {
+        std::uintptr_t client = 0U;
+        std::memcpy(
+            &client,
+            g_gameClientBase + kMeleeClientGlobalRva,
+            sizeof(client));
+        if (client == 0U) {
+            return false;
+        }
+        std::uintptr_t playerObject = 0U;
+        std::memcpy(
+            &playerObject,
+            reinterpret_cast<const unsigned char*>(client) + 0x10U,
+            sizeof(playerObject));
+        return PhysicalMeleeCollisionBelongsToEquippedWeapon(
+            ownerObject, playerObject);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 
 bool CommandLineContains(const wchar_t* option) noexcept {
     const wchar_t* const commandLine = GetCommandLineW();
@@ -642,10 +926,10 @@ const char* PhysicalMeleeContactReasonName(
         return "invalid_contact";
     case PhysicalMeleeContactReason::InvalidFrame:
         return "invalid_frame";
-    case PhysicalMeleeContactReason::BelowNormalSpeed:
-        return "below_normal_speed";
-    case PhysicalMeleeContactReason::BelowNormalEnergy:
-        return "below_normal_energy";
+    case PhysicalMeleeContactReason::OutsideConfiguredCollider:
+        return "outside_configured_collider";
+    case PhysicalMeleeContactReason::SwingNotQualified:
+        return "swing_not_qualified";
     case PhysicalMeleeContactReason::ContactLatched:
         return "contact_latched";
     default:
@@ -667,6 +951,61 @@ bool CopyLatestPhysicalMeleeFrame(
     ReleaseSRWLockShared(&g_physicalMeleeLock);
     return available && ProcessOwnsForegroundWindow();
 }
+
+bool PhysicalMeleeContactDamageContextActive() noexcept {
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeContactDamageEnabled, 0, 0) == 0 ||
+        VrToolMenuIsOpen() ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        return false;
+    }
+    PhysicalMeleeFrame frame{};
+    std::uint64_t sampleId = 0U;
+    if (!CopyLatestPhysicalMeleeFrame(frame, sampleId)) {
+        return false;
+    }
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    const bool pipeEquipped =
+        g_physicalMeleeProfileWeaponIndex ==
+            kCondemnedPipeLeverWeaponIndex &&
+        g_physicalMeleeProfile.id ==
+            PhysicalMeleeProfileId::Pipe;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    return pipeEquipped;
+}
+
+bool CapturePhysicalMeleeNativeCapsuleOverride(
+    std::uintptr_t ownerObject,
+    PhysicalMeleeNativeCapsuleShape& shape) noexcept {
+    shape = {};
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeContactDamageEnabled, 0, 0) == 0 ||
+        !PhysicalMeleeEnableCollisionsIsPlayerOwned(ownerObject) ||
+        VrToolMenuIsOpen() ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        return false;
+    }
+    PhysicalMeleeFrame frame{};
+    std::uint64_t sampleId = 0U;
+    if (!CopyLatestPhysicalMeleeFrame(frame, sampleId)) {
+        return false;
+    }
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    const bool pipeEquipped =
+        g_physicalMeleeProfileWeaponIndex ==
+            kCondemnedPipeLeverWeaponIndex &&
+        g_physicalMeleeProfile.id ==
+            PhysicalMeleeProfileId::Pipe;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    if (!pipeEquipped) {
+        return false;
+    }
+    shape = ResolvePhysicalMeleeNativeCapsuleShape(frame, true);
+    return shape.valid;
+}
+
 
 bool ReadPhysicalMeleeSwingAttackActive(
     bool inputEligible) noexcept {
@@ -698,8 +1037,8 @@ bool ReadPhysicalMeleeSwingAttackActive(
 
 bool EvaluatePhysicalMeleeContact(
     std::uintptr_t targetId,
-    const VectorAbi& contactPosition,
-    const VectorAbi& contactNormal,
+    bool contactPositionValid,
+    const fearvr::TrackingVector& contactPositionUnits,
     PhysicalMeleeFrame& frame,
     std::uint64_t& sampleId,
     PhysicalMeleeContactQualification& qualification) noexcept {
@@ -713,12 +1052,16 @@ bool EvaluatePhysicalMeleeContact(
         now - g_physicalMeleeSampleTick <=
             kInputFreshnessMilliseconds;
     if (available) {
-        qualification = QualifyPhysicalMeleeContact(
-            g_physicalMeleeContactState,
-            targetId,
-            {contactPosition.x, contactPosition.y, contactPosition.z},
-            {contactNormal.x, contactNormal.y, contactNormal.z},
-            frame, sampleId, g_physicalMeleeProfile);
+        const PhysicalMeleeContactDistance distance =
+            contactPositionValid
+                ? MeasurePhysicalMeleeContactDistance(
+                      frame, contactPositionUnits,
+                      g_physicalMeleeProfile.unitsPerMeter)
+                : PhysicalMeleeContactDistance{};
+        qualification = QualifyPhysicalMeleeContactAtDistance(
+            g_physicalMeleeContactState, targetId, frame, sampleId,
+            distance, g_physicalMeleeProfile,
+            g_physicalMeleeProfile.requireSwingForContactDamage);
     } else {
         qualification = {};
         qualification.reason = PhysicalMeleeContactReason::InvalidFrame;
@@ -785,7 +1128,7 @@ void UpdatePhysicalMeleeProbe() noexcept {
     PhysicalMeleeProfile sampledProfile{};
     bool newSample = false;
     bool newSwingSample = false;
-    bool contactRearmed = false;
+    PhysicalMeleeContactRearmUpdate contactRearm{};
     const ULONGLONG now = GetTickCount64();
     const bool swingAttackContext = ProcessOwnsForegroundWindow() &&
         !VrToolMenuIsOpen() &&
@@ -797,11 +1140,15 @@ void UpdatePhysicalMeleeProbe() noexcept {
     ReleaseSRWLockShared(&g_physicalMeleeLock);
     const ToolMenuMeleeSettings toolSettings =
         ReadVrToolMenuMeleeSettings(toolSettingsWeaponIndex);
+    const ToolMenuColliderSettings colliderSettings =
+        ReadVrToolMenuColliderSettings(toolSettingsWeaponIndex);
     AcquireSRWLockExclusive(&g_physicalMeleeLock);
     if (toolSettingsWeaponIndex ==
         g_physicalMeleeProfileWeaponIndex) {
         ApplyToolMenuMeleeSettings(
             toolSettings, g_physicalMeleeProfile);
+        ApplyToolMenuColliderSettings(
+            colliderSettings, g_physicalMeleeProfile);
     }
     if (sampleId != g_physicalMeleeSampleId) {
         const PhysicalMeleePose pose{
@@ -813,9 +1160,9 @@ void UpdatePhysicalMeleeProbe() noexcept {
         g_physicalMeleeFrame = frame;
         g_physicalMeleeSampleId = sampleId;
         g_physicalMeleeSampleTick = now;
-        contactRearmed = UpdatePhysicalMeleeContactSeparation(
+        contactRearm = UpdatePhysicalMeleeContactRearm(
             g_physicalMeleeContactState,
-            frame.currentTipUnits, frame.poseValid,
+            frame, frame.poseValid,
             g_physicalMeleeProfile);
         sampledProfile = g_physicalMeleeProfile;
         newSample = true;
@@ -888,17 +1235,47 @@ void UpdatePhysicalMeleeProbe() noexcept {
         return;
     }
 
-    if (contactRearmed) {
+    if (contactRearm.invalidSampleHeld) {
+        const LONG hold = InterlockedIncrement(
+            &g_physicalMeleeContactInvalidSampleHeld);
+        if (hold <= 512) {
+            char holdDetail[384]{};
+            std::snprintf(
+                holdDetail, sizeof(holdDetail),
+                "hold=%ld sample_id=%llu "
+                "reason=transient_invalid_sample reset=%s "
+                "release_dwell_reset=1 "
+                "native_impact_dispatch=blocked",
+                hold,
+                static_cast<unsigned long long>(sampleId),
+                PhysicalMeleeResetReasonName(frame.resetReason));
+            g_log(
+                "m5_physical_melee_contact_latch_held",
+                holdDetail);
+        }
+    }
+
+    if (contactRearm.rearmed) {
         const LONG rearm = InterlockedIncrement(
             &g_physicalMeleeContactRearmed);
         if (rearm <= 512) {
-            char rearmDetail[256]{};
+            char rearmDetail[512]{};
             std::snprintf(
                 rearmDetail, sizeof(rearmDetail),
-                "rearm=%ld sample_id=%llu normal_separation_m=0.12 "
+                "rearm=%ld sample_id=%llu reason=swing_completed "
+                "tip_displacement_m=%.3f max_tip_displacement_m=%.3f "
+                "required_tip_travel_m=%.3f speed_mps=%.3f "
+                "release_speed_mps=%.3f release_samples=%u/%u "
                 "native_impact_dispatch=blocked",
                 rearm,
-                static_cast<unsigned long long>(sampleId));
+                static_cast<unsigned long long>(sampleId),
+                contactRearm.tipDisplacementMeters,
+                contactRearm.maximumTipDisplacementMeters,
+                sampledProfile.contactRearmSeparationMeters,
+                contactRearm.speedMetersPerSecond,
+                contactRearm.releaseSpeedMetersPerSecond,
+                contactRearm.releaseSampleCount,
+                kPhysicalMeleeContactReleaseSampleCount);
             g_log(
                 "m5_physical_melee_contact_rearmed",
                 rearmDetail);
@@ -958,6 +1335,8 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
     ApplyToolMenuMeleeSettings(
         ReadVrToolMenuMeleeSettings(weaponIndex), selected);
+    ApplyToolMenuColliderSettings(
+        ReadVrToolMenuColliderSettings(weaponIndex), selected);
     RetailWeaponIdentitySnapshot identity{};
     const RetailWeaponIdentityReadResult identityResult =
         weaponIndex >= 0
@@ -996,6 +1375,8 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
         g_physicalMeleeSwingSampleTick = 0;
         g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
         changed = true;
+        g_physicalMeleePlayerCollisionObject = 0U;
+        g_physicalMeleePlayerCollisionTick = 0U;
     }
     ReleaseSRWLockExclusive(&g_physicalMeleeLock);
     if (!changed) {
@@ -1016,6 +1397,9 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
             "swing_attack=%u swing_trigger_mps=%.2f "
             "swing_rearm_mps=%.2f swing_pulse_ms=%u "
             "swing_cooldown_ms=%u "
+            "collider_base=(%.2f,%.2f,%.2f) "
+            "collider_tip=(%.2f,%.2f,%.2f) "
+            "collider_radius=%.2f "
             "grip_position=(%.3f,%.3f,%.3f) "
             "grip_rotation=(%.6f,%.6f,%.6f,%.6f) "
             "secondary_grip=%u "
@@ -1037,6 +1421,13 @@ void SelectPhysicalMeleeProfileForWeaponIndex(
             selected.swingAttackRearmSpeedMetersPerSecond,
             selected.swingAttackPulseMilliseconds,
             selected.swingAttackCooldownMilliseconds,
+            selected.localBaseOffsetUnits.x,
+            selected.localBaseOffsetUnits.y,
+            selected.localBaseOffsetUnits.z,
+            selected.localTipOffsetUnits.x,
+            selected.localTipOffsetUnits.y,
+            selected.localTipOffsetUnits.z,
+            selected.radiusUnits,
             selected.modelLocalGripPositionUnits.x,
             selected.modelLocalGripPositionUnits.y,
             selected.modelLocalGripPositionUnits.z,
@@ -1253,6 +1644,26 @@ void* FindCurrentInterface(
     }
     return nullptr;
 }
+
+bool IsExecutableAddress(const void* address) noexcept {
+    if (address == nullptr) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION information{};
+    if (VirtualQuery(
+            address, &information, sizeof(information)) !=
+        sizeof(information) ||
+        information.State != MEM_COMMIT) {
+        return false;
+    }
+    const DWORD protection = information.Protect &
+        ~(PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE);
+    return protection == PAGE_EXECUTE ||
+        protection == PAGE_EXECUTE_READ ||
+        protection == PAGE_EXECUTE_READWRITE ||
+        protection == PAGE_EXECUTE_WRITECOPY;
+}
+
 
 bool IsExecutableModuleAddress(
     const void* address,
@@ -1685,6 +2096,50 @@ bool __fastcall HookGetFireVectors(
     return result;
 }
 
+float __fastcall HookMasterDatabaseFloatReader(
+    void* database,
+    void* ignoredEdx,
+    const void* attribute,
+    std::uint32_t index,
+    float defaultValue) {
+    (void)ignoredEdx;
+    const auto* const caller = static_cast<const unsigned char*>(
+        _ReturnAddress());
+    const float retailValue =
+        g_originalMasterDatabaseFloatReader != nullptr
+        ? g_originalMasterDatabaseFloatReader(
+              database, attribute, index, defaultValue)
+        : defaultValue;
+    if (!g_physicalMeleeNativeCapsuleOverride.valid ||
+        g_gameClientBase == nullptr || caller == nullptr) {
+        return retailValue;
+    }
+
+    PhysicalMeleeNativeCapsuleProperty property =
+        PhysicalMeleeNativeCapsuleProperty::Retail;
+    std::uint32_t readBit = 0U;
+    if (caller == g_gameClientBase +
+            kMeleeNativeLengthUpReadReturnRva) {
+        property = PhysicalMeleeNativeCapsuleProperty::LengthUp;
+        readBit = 0x1U;
+    } else if (caller == g_gameClientBase +
+            kMeleeNativeLengthDownReadReturnRva) {
+        property = PhysicalMeleeNativeCapsuleProperty::LengthDown;
+        readBit = 0x2U;
+    } else if (caller == g_gameClientBase +
+            kMeleeNativeRadiusReadReturnRva) {
+        property = PhysicalMeleeNativeCapsuleProperty::Radius;
+        readBit = 0x4U;
+    }
+    if (readBit != 0U) {
+        g_physicalMeleeNativeCapsuleReadMask |= readBit;
+    }
+    return ResolvePhysicalMeleeNativeCapsuleProperty(
+        g_physicalMeleeNativeCapsuleOverride,
+        property, retailValue);
+}
+
+
 std::uintptr_t __fastcall HookMeleeEnableCollisions(
     void* controller,
     void* ignoredEdx,
@@ -1724,9 +2179,58 @@ std::uintptr_t __fastcall HookMeleeEnableCollisions(
             g_log("m5_aim_path_melee_collision_enable", detail);
         }
     }
-    return g_originalMeleeEnableCollisions(
-        controller, argument1, argument2, argument3, argument4,
-        argument5);
+    const PhysicalMeleeNativeCapsuleShape previousOverride =
+        g_physicalMeleeNativeCapsuleOverride;
+    const std::uint32_t previousReadMask =
+        g_physicalMeleeNativeCapsuleReadMask;
+    PhysicalMeleeNativeCapsuleShape requestedOverride{};
+    const bool overrideActive =
+        CapturePhysicalMeleeNativeCapsuleOverride(
+            argument1, requestedOverride);
+    if (overrideActive) {
+        g_physicalMeleeNativeCapsuleOverride = requestedOverride;
+        g_physicalMeleeNativeCapsuleReadMask = 0U;
+    }
+
+    std::uintptr_t result = 0U;
+    std::uint32_t appliedReadMask = 0U;
+    __try {
+        result = g_originalMeleeEnableCollisions(
+            controller, argument1, argument2, argument3,
+            argument4, argument5);
+        appliedReadMask = g_physicalMeleeNativeCapsuleReadMask;
+    } __finally {
+        g_physicalMeleeNativeCapsuleOverride = previousOverride;
+        g_physicalMeleeNativeCapsuleReadMask = previousReadMask;
+    }
+    if (overrideActive) {
+        const LONG overrideCount = InterlockedIncrement(
+            &g_physicalMeleeNativeCapsuleOverrides);
+        if (g_log != nullptr && overrideCount <= 64) {
+            char detail[640]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "count=%ld owner=0x%08lX "
+                "origin_tip=(%.3f,%.3f,%.3f) "
+                "length_up=%.3f length_down=%.3f radius=%.3f "
+                "read_mask=0x%X expected_read_mask=0x7 result=0x%08lX "
+                "endpoints=configured_base_tip",
+                overrideCount,
+                static_cast<unsigned long>(argument1),
+                requestedOverride.transform.positionUnits.x,
+                requestedOverride.transform.positionUnits.y,
+                requestedOverride.transform.positionUnits.z,
+                requestedOverride.lengthUpUnits,
+                requestedOverride.lengthDownUnits,
+                requestedOverride.radiusUnits,
+                appliedReadMask,
+                static_cast<unsigned long>(result));
+            g_log(
+                "m5_physical_melee_native_capsule_override",
+                detail);
+        }
+    }
+    return result;
 }
 
 void __fastcall HookMeleeUpdateCollision(
@@ -1739,15 +2243,36 @@ void __fastcall HookMeleeUpdateCollision(
     const bool playerOwned = snapshot.readable &&
         MarkPhysicalMeleeCollisionControllerOwnership(
             controller, snapshot.sourceObject);
+    const bool contactDamageEnabled =
+        InterlockedCompareExchange(
+            &g_physicalMeleeContactDamageEnabled, 0, 0) != 0;
+    const bool gameplayContextActive =
+        PhysicalMeleeContactDamageContextActive();
+    const bool maintainContinuously =
+        ShouldMaintainPhysicalMeleeCollision(
+            contactDamageEnabled, playerOwned,
+            snapshot.collisionObject != 0U,
+            gameplayContextActive);
+    SetPhysicalMeleeCollisionLifetime(
+        record, maintainContinuously);
+    void* const previousActiveCollisionRecord =
+        g_physicalMeleeActiveCollisionRecord;
     const bool previousPlayerCollisionUpdate =
         g_physicalMeleePlayerCollisionUpdate;
+    g_physicalMeleeActiveCollisionRecord = record;
     g_physicalMeleePlayerCollisionUpdate = playerOwned;
     __try {
         g_originalMeleeUpdateCollision(controller, record);
     } __finally {
+        g_physicalMeleeActiveCollisionRecord =
+            previousActiveCollisionRecord;
         g_physicalMeleePlayerCollisionUpdate =
             previousPlayerCollisionUpdate;
     }
+    snapshot = ReadMeleeCollisionRecord(record);
+    PublishPhysicalMeleePlayerCollisionObject(
+        playerOwned,
+        snapshot.readable ? snapshot.collisionObject : 0U);
     if (InterlockedCompareExchange(
             &g_aimPathProbeEnabled, 0, 0) == 0 ||
         g_log == nullptr || record == nullptr) {
@@ -1910,8 +2435,10 @@ void* __fastcall HookBuildRigidTransform(
         std::snprintf(
             detail, sizeof(detail),
             "target=GameOrig+0x0000F690 sample_id=%llu "
-            "source=controller_weapon_tip native_impact_dispatch=blocked "
-            "actor_damage=0 stale_fallback=retail_transform",
+            "source=controller_weapon_tip "
+            "native_impact_dispatch=contact_gate_owned "
+            "actor_damage=qualified_pipe_contact_only "
+            "stale_fallback=retail_transform",
             static_cast<unsigned long long>(physicalSampleId));
         g_log("m5_physical_melee_wall_proxy_active", detail);
     }
@@ -2023,33 +2550,166 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
             &g_physicalMeleeProbeEnabled, 0, 0) != 0 &&
         (physicalWallProxyEnabled
              ? EvaluatePhysicalMeleeContact(
-                   argument1, contactPosition, contactNormal,
-                   physicalFrame, physicalSampleId,
-                   physicalContact)
+                   argument1, contactPositionValid,
+                   {contactPosition.x, contactPosition.y,
+                    contactPosition.z},
+                   physicalFrame, physicalSampleId, physicalContact)
              : CopyLatestPhysicalMeleeFrame(
                    physicalFrame, physicalSampleId));
+    // Enabling the wall-proxy feature must not claim Retail's impact path by
+    // itself. With no fresh controller frame, no physical transform is being
+    // applied, so flatscreen and stale-tracking callbacks remain Retail-owned.
+    const bool physicalWallProxyActive =
+        physicalWallProxyEnabled && physicalFrameAvailable;
+    float physicalUnitsPerMeter = 0.0F;
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    physicalUnitsPerMeter = g_physicalMeleeProfile.unitsPerMeter;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    const PhysicalMeleeContactDistance contactDistance =
+        contactPositionValid && physicalFrameAvailable
+            ? MeasurePhysicalMeleeContactDistance(
+                  physicalFrame,
+                  {contactPosition.x, contactPosition.y,
+                   contactPosition.z},
+                  physicalUnitsPerMeter)
+            : PhysicalMeleeContactDistance{};
     if (physicalContact.accepted) {
         InterlockedIncrement(&g_physicalMeleeContactAccepted);
     }
+    const bool contactDamageActive =
+        PhysicalMeleeContactDamageContextActive();
     const bool nativeImpactForwarded =
         ShouldDispatchPhysicalMeleeNativeImpact(
-            physicalWallProxyEnabled,
-            playerOwnedCollision);
+            physicalWallProxyActive, playerOwnedCollision,
+            contactDamageActive, physicalContact.accepted);
     const std::uintptr_t result = nativeImpactForwarded
         ? g_originalMeleeImpactDispatch(
               impactController, argument1, argument2, argument3,
               argument4, argument5, argument6, argument7,
               argument8, argument9)
         : 0U;
+    RetailMeleeTargetReferenceVectorRelease retailTargetVector{};
+    if (contactDamageActive) {
+        // argument8 is the verified vector<LTObjRef> header at controller
+        // +0x60/+0xC0, not an LTObjRef element. The callback appends before
+        // dispatch; clear every live element and rewind end after either an
+        // accepted dispatch or a de-duplicated callback.
+        retailTargetVector = ReleaseRetailMeleeTargetReferenceVector(
+            impactController, argument8);
+        if (!retailTargetVector.ok &&
+            InterlockedCompareExchange(
+                &g_physicalMeleeRetailLatchReleaseFailedLogged,
+                1, 0) == 0 &&
+            g_log != nullptr) {
+            char failureDetail[640]{};
+            std::snprintf(
+                failureDetail, sizeof(failureDetail),
+                "target_reference_vector_clear_failed=1 state=%s "
+                "begin=0x%08lX end_before=0x%08lX "
+                "end_after=0x%08lX capacity=0x%08lX "
+                "references_before=%zu references_cleared=%zu",
+                retailTargetVector.state,
+                static_cast<unsigned long>(
+                    retailTargetVector.beginBefore),
+                static_cast<unsigned long>(
+                    retailTargetVector.endBefore),
+                static_cast<unsigned long>(
+                    retailTargetVector.endAfter),
+                static_cast<unsigned long>(
+                    retailTargetVector.capacityBefore),
+                retailTargetVector.referencesBefore,
+                retailTargetVector.referencesCleared);
+            g_log("m5_physical_melee_retail_latch_release_failed",
+                  failureDetail);
+        }
+    }
+    LONG damageDispatchCount = InterlockedCompareExchange(
+        &g_physicalMeleeDamageDispatched, 0, 0);
+    if (nativeImpactForwarded && contactDamageActive &&
+        physicalContact.accepted) {
+        damageDispatchCount = InterlockedIncrement(
+            &g_physicalMeleeDamageDispatched);
+    }
     if (g_log == nullptr) {
         return result;
     }
     const LONG call = InterlockedIncrement(
         &g_aimPathMeleeImpactCalls);
-    if (call > 512) {
+    const bool verboseContactDiagnostic = call <= 512;
+    const bool retailCleanupFailed =
+        contactDamageActive && !retailTargetVector.ok;
+    const bool compactContactDiagnostic =
+        verboseContactDiagnostic || physicalContact.accepted ||
+        retailCleanupFailed;
+    if (!compactContactDiagnostic) {
         return result;
     }
-    char detail[1792]{};
+    std::size_t passTargetCount = 0U;
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    passTargetCount = g_physicalMeleeContactState.targetCount;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    const std::uintptr_t controllerAddress =
+        reinterpret_cast<std::uintptr_t>(impactController);
+    const int targetSlot = argument8 == controllerAddress + 0x60U
+        ? 0
+        : (argument8 == controllerAddress + 0xC0U ? 1 : -1);
+    const bool actorCandidate = argument3 == 9U &&
+        argument2 != static_cast<std::uintptr_t>(-1);
+    char contactDiagnostic[1280]{};
+    std::snprintf(
+        contactDiagnostic, sizeof(contactDiagnostic),
+        "call=%ld target=0x%08lX target_node=0x%08lX "
+        "target_kind=%s accepted=%u reason=%s native_forwarded=%u "
+        "retail_ref_vector_clear_ok=%u retail_ref_vector_state=%s "
+        "retail_ref_vector_begin=0x%08lX "
+        "retail_ref_vector_end_before=0x%08lX "
+        "retail_ref_vector_end_after=0x%08lX "
+        "retail_ref_vector_capacity=0x%08lX "
+        "retail_refs_before=%zu retail_refs_cleared=%zu "
+        "target_slot=%d pass_target_count=%zu "
+        "damage_dispatch_count=%ld proxy_active=%u "
+        "contact_damage_active=%u speed_mps=%.3f energy_j=%.3f "
+        "contact_position_valid=%u contact_distance_valid=%u "
+        "weapon_tip_to_target_contact_m=%.4f "
+        "weapon_axis_to_target_contact_m=%.4f "
+        "weapon_capsule_to_target_gap_m=%.4f "
+        "weapon_capsule_radius_m=%.4f contact_axis_t=%.3f",
+        call, static_cast<unsigned long>(argument1),
+        static_cast<unsigned long>(argument2),
+        actorCandidate ? "actor_candidate" : "world_or_prop",
+        physicalContact.accepted ? 1U : 0U,
+        PhysicalMeleeContactReasonName(physicalContact.reason),
+        nativeImpactForwarded ? 1U : 0U,
+        retailTargetVector.ok ? 1U : 0U,
+        retailTargetVector.state,
+        static_cast<unsigned long>(retailTargetVector.beginBefore),
+        static_cast<unsigned long>(retailTargetVector.endBefore),
+        static_cast<unsigned long>(retailTargetVector.endAfter),
+        static_cast<unsigned long>(retailTargetVector.capacityBefore),
+        retailTargetVector.referencesBefore,
+        retailTargetVector.referencesCleared,
+        targetSlot, passTargetCount,
+        static_cast<long>(damageDispatchCount),
+        physicalWallProxyActive ? 1U : 0U,
+        contactDamageActive ? 1U : 0U,
+        physicalContact.swingSpeedMetersPerSecond,
+        physicalContact.swingEnergyJoules,
+        contactPositionValid ? 1U : 0U,
+        contactDistance.valid ? 1U : 0U,
+        contactDistance.tipToContactMeters,
+        contactDistance.centerlineToContactMeters,
+        contactDistance.capsuleSurfaceGapMeters,
+        contactDistance.capsuleRadiusMeters,
+        contactDistance.axisFraction);
+    g_log("m5_weapon_test_contact", contactDiagnostic);
+    char detail[2048]{};
+    if (!verboseContactDiagnostic) {
+        // Held-overlap callbacks can consume the verbose budget in seconds.
+        // Preserve every later accepted contact and cleanup failure for the
+        // live watcher without allowing duplicate detail to grow unbounded.
+        return result;
+    }
+
     std::snprintf(
         detail, sizeof(detail),
         "call=%ld impact_controller=%p "
@@ -2057,6 +2717,11 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
         "0x%08lX,0x%08lX,0x%08lX,0x%08lX) "
         "contact_position_valid=%u "
         "contact_position=(%.3f,%.3f,%.3f) "
+        "contact_distance_valid=%u "
+        "weapon_tip_to_target_contact_m=%.4f "
+        "weapon_axis_to_target_contact_m=%.4f "
+        "weapon_capsule_to_target_gap_m=%.4f "
+        "weapon_capsule_radius_m=%.4f contact_axis_t=%.3f "
         "contact_normal_valid=%u "
         "contact_normal=(%.4f,%.4f,%.4f) "
         "controller_aim_valid=%u "
@@ -2066,9 +2731,12 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
         "physical_tip=(%.3f,%.3f,%.3f) "
         "physical_sweep_valid=%u physical_speed_mps=%.3f "
         "physical_energy_j=%.3f physical_damage_qualified=%u "
-        "physical_wall_proxy=%u native_impact_forwarded=%u "
+        "physical_wall_proxy_enabled=%u physical_wall_proxy_active=%u "
+        "contact_damage_active=%u "
+        "native_impact_forwarded=%u retail_ref_vector_cleared=%u "
+        "damage_dispatch_count=%ld "
         "physical_contact_accepted=%u contact_reason=%s "
-        "normal_speed_mps=%.3f normal_energy_j=%.3f "
+        "swing_speed_mps=%.3f swing_energy_j=%.3f "
         "result=0x%08lX source=melee_collision_callback "
         "behavior=%s",
         call, impactController,
@@ -2083,6 +2751,12 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
         static_cast<unsigned long>(argument9),
         contactPositionValid ? 1U : 0U,
         contactPosition.x, contactPosition.y, contactPosition.z,
+        contactDistance.valid ? 1U : 0U,
+        contactDistance.tipToContactMeters,
+        contactDistance.centerlineToContactMeters,
+        contactDistance.capsuleSurfaceGapMeters,
+        contactDistance.capsuleRadiusMeters,
+        contactDistance.axisFraction,
         contactNormalValid ? 1U : 0U,
         contactNormal.x, contactNormal.y, contactNormal.z,
         controllerAim ? 1U : 0U,
@@ -2101,13 +2775,21 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
         physicalFrame.impactEnergyJoules,
         physicalFrame.damageQualified ? 1U : 0U,
         physicalWallProxyEnabled ? 1U : 0U,
+        physicalWallProxyActive ? 1U : 0U,
+        contactDamageActive ? 1U : 0U,
         nativeImpactForwarded ? 1U : 0U,
+        retailTargetVector.ok ? 1U : 0U,
+        static_cast<long>(damageDispatchCount),
         physicalContact.accepted ? 1U : 0U,
         PhysicalMeleeContactReasonName(physicalContact.reason),
-        physicalContact.normalSpeedMetersPerSecond,
-        physicalContact.normalEnergyJoules,
+        physicalContact.swingSpeedMetersPerSecond,
+        physicalContact.swingEnergyJoules,
         static_cast<unsigned long>(result),
-        nativeImpactForwarded ? "pass_through" : "wall_probe_blocked");
+        nativeImpactForwarded
+            ? (contactDamageActive
+                   ? "qualified_contact_damage"
+                   : "pass_through")
+            : "physical_contact_blocked");
     g_log("m5_aim_path_melee_impact_dispatch", detail);
     return result;
 }
@@ -2456,6 +3138,123 @@ bool MeleeEnableCollisionsTargetMatches(
     }
 }
 
+bool MeleeNativeCapsulePropertyCallsitesMatch(
+    HMODULE gameClientModule,
+    const unsigned char* enableCollisionsTarget) noexcept {
+    if (gameClientModule == nullptr ||
+        enableCollisionsTarget == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    auto* const lengthUpReturn =
+        base + kMeleeNativeLengthUpReadReturnRva;
+    auto* const lengthDownReturn =
+        base + kMeleeNativeLengthDownReadReturnRva;
+    auto* const radiusReturn =
+        base + kMeleeNativeRadiusReadReturnRva;
+    __try {
+        std::uint32_t lengthUpName = 0U;
+        std::uint32_t lengthDownName = 0U;
+        std::uint32_t radiusName = 0U;
+        std::memcpy(
+            &lengthUpName,
+            enableCollisionsTarget +
+                kMeleeLengthUpPropertyPushOffset + 1U,
+            sizeof(lengthUpName));
+        std::memcpy(
+            &lengthDownName,
+            enableCollisionsTarget +
+                kMeleeLengthDownPropertyPushOffset + 1U,
+            sizeof(lengthDownName));
+        std::memcpy(
+            &radiusName,
+            enableCollisionsTarget +
+                kMeleeRadiusPropertyPushOffset + 1U,
+            sizeof(radiusName));
+        return enableCollisionsTarget[
+                   kMeleeLengthUpPropertyPushOffset] == 0x68 &&
+               enableCollisionsTarget[
+                   kMeleeLengthDownPropertyPushOffset] == 0x68 &&
+               enableCollisionsTarget[
+                   kMeleeRadiusPropertyPushOffset] == 0x68 &&
+               lengthUpName == static_cast<std::uint32_t>(
+                   reinterpret_cast<std::uintptr_t>(
+                       base + kMeleeLengthUpPropertyNameRva)) &&
+               lengthDownName == static_cast<std::uint32_t>(
+                   reinterpret_cast<std::uintptr_t>(
+                       base + kMeleeLengthDownPropertyNameRva)) &&
+               radiusName == static_cast<std::uint32_t>(
+                   reinterpret_cast<std::uintptr_t>(
+                       base + kMeleeRadiusPropertyNameRva)) &&
+               std::memcmp(
+                   lengthUpReturn -
+                       sizeof(kMeleeNativeFloatReadCall),
+                   kMeleeNativeFloatReadCall,
+                   sizeof(kMeleeNativeFloatReadCall)) == 0 &&
+               std::memcmp(
+                   lengthUpReturn, kMeleeNativeLengthUpStore,
+                   sizeof(kMeleeNativeLengthUpStore)) == 0 &&
+               std::memcmp(
+                   lengthDownReturn -
+                       sizeof(kMeleeNativeFloatReadCall),
+                   kMeleeNativeFloatReadCall,
+                   sizeof(kMeleeNativeFloatReadCall)) == 0 &&
+               std::memcmp(
+                   lengthDownReturn, kMeleeNativeLengthDownStore,
+                   sizeof(kMeleeNativeLengthDownStore)) == 0 &&
+               std::memcmp(
+                   radiusReturn -
+                       sizeof(kMeleeNativeFloatReadCall),
+                   kMeleeNativeFloatReadCall,
+                   sizeof(kMeleeNativeFloatReadCall)) == 0 &&
+               std::memcmp(
+                   radiusReturn, kMeleeNativeRadiusStore,
+                   sizeof(kMeleeNativeRadiusStore)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+DatabaseFloatReaderFunction ResolveMasterDatabaseFloatReader(
+    HMODULE gameClientModule) noexcept {
+    if (gameClientModule == nullptr) {
+        return nullptr;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    __try {
+        void* masterDatabase = nullptr;
+        std::memcpy(
+            &masterDatabase, base + kMasterDatabaseGlobalRva,
+            sizeof(masterDatabase));
+        if (masterDatabase == nullptr) {
+            return nullptr;
+        }
+        void** vtable = nullptr;
+        std::memcpy(&vtable, masterDatabase, sizeof(vtable));
+        if (vtable == nullptr) {
+            return nullptr;
+        }
+        void* target = nullptr;
+        std::memcpy(
+            &target,
+            reinterpret_cast<const unsigned char*>(vtable) +
+                kMasterDatabaseFloatReaderSlot,
+            sizeof(target));
+        if (!IsExecutableAddress(target) ||
+            std::memcmp(
+                target, kMasterDatabaseFloatReaderBody,
+                sizeof(kMasterDatabaseFloatReaderBody)) != 0) {
+            return nullptr;
+        }
+        return reinterpret_cast<DatabaseFloatReaderFunction>(
+            target);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
 bool MeleeUpdateCollisionTargetMatches(
     const unsigned char* target) noexcept {
     if (target == nullptr) {
@@ -2501,28 +3300,66 @@ bool MeleeImpactDispatchTargetMatches(
     }
     auto* const base = reinterpret_cast<unsigned char*>(
         gameClientModule);
+    auto* const vectorSetup =
+        base + kMeleeCollisionCallbackRva + 0x34DU;
+    auto* const vectorPushCall =
+        base + kMeleeTargetReferenceVectorPushCallRva;
+    auto* const vectorPush =
+        base + kMeleeTargetReferenceVectorPushRva;
     auto* const callbackCallsite =
         base + kMeleeCollisionCallbackRva + 0x36DU;
     auto* const dispatchCall =
         base + kMeleeImpactDispatchCallRva;
     __try {
-        std::int32_t relativeTarget = 0;
+        std::int32_t vectorPushRelativeTarget = 0;
         std::memcpy(
-            &relativeTarget, dispatchCall + 1,
-            sizeof(relativeTarget));
-        const auto resolvedTarget =
+            &vectorPushRelativeTarget, vectorPushCall + 1,
+            sizeof(vectorPushRelativeTarget));
+        const auto resolvedVectorPush =
+            reinterpret_cast<std::uintptr_t>(vectorPushCall + 5) +
+            static_cast<std::intptr_t>(vectorPushRelativeTarget);
+        std::int32_t dispatchRelativeTarget = 0;
+        std::memcpy(
+            &dispatchRelativeTarget, dispatchCall + 1,
+            sizeof(dispatchRelativeTarget));
+        const auto resolvedDispatch =
             reinterpret_cast<std::uintptr_t>(dispatchCall + 5) +
-            static_cast<std::intptr_t>(relativeTarget);
+            static_cast<std::intptr_t>(dispatchRelativeTarget);
         return std::memcmp(
                    target, kMeleeImpactDispatchPrefix,
                    sizeof(kMeleeImpactDispatchPrefix)) == 0 &&
+               std::memcmp(
+                   vectorSetup,
+                   kMeleeTargetReferenceVectorSetup,
+                   sizeof(kMeleeTargetReferenceVectorSetup)) == 0 &&
+               vectorPushCall[0] == 0xE8 &&
+               resolvedVectorPush ==
+                   reinterpret_cast<std::uintptr_t>(vectorPush) &&
+               std::memcmp(
+                   vectorPush,
+                   kMeleeTargetReferenceVectorPushPrefix,
+                   sizeof(kMeleeTargetReferenceVectorPushPrefix)) == 0 &&
                std::memcmp(
                    callbackCallsite,
                    kMeleeImpactDispatchCallsitePrefix,
                    sizeof(kMeleeImpactDispatchCallsitePrefix)) == 0 &&
                dispatchCall[0] == 0xE8 &&
-               resolvedTarget ==
+               resolvedDispatch ==
                    reinterpret_cast<std::uintptr_t>(target);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ResetMeleeTargetReferenceTargetMatches(
+    const unsigned char* target) noexcept {
+    if (target == nullptr) {
+        return false;
+    }
+    __try {
+        return std::memcmp(
+                   target, kResetMeleeTargetReferenceBody,
+                   sizeof(kResetMeleeTargetReferenceBody)) == 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -2972,6 +3809,8 @@ bool InstallHeadAimHooks(
     bool controllerMeleeAim,
     bool physicalMeleeProbe,
     bool physicalMeleeWallProxy,
+    bool physicalMeleeColliderDebug,
+    bool physicalMeleeContactDamage,
     bool physicalMeleeVisualProxy,
     bool weaponGripCalibration,
     bool twoHandedMelee) noexcept {
@@ -3001,6 +3840,19 @@ bool InstallHeadAimHooks(
         log(
             "m5_physical_melee_wall_proxy_rejected",
             "physical_melee_probe_required");
+        return false;
+    }
+    if (physicalMeleeContactDamage &&
+        !physicalMeleeWallProxy) {
+        log(
+            "m5_physical_melee_contact_damage_rejected",
+            "physical_melee_wall_proxy_required");
+        return false;
+    }
+    if (physicalMeleeColliderDebug && !physicalMeleeWallProxy) {
+        log(
+            "m5_physical_melee_collider_debug_rejected",
+            "physical_melee_wall_proxy_required");
         return false;
     }
     if (physicalMeleeWallProxy && controllerMeleeAim) {
@@ -3042,6 +3894,10 @@ bool InstallHeadAimHooks(
     auto* const meleeImpactDispatch =
         reinterpret_cast<unsigned char*>(gameClientModule) +
         kMeleeImpactDispatchRva;
+    auto* const resetMeleeTargetReference =
+        reinterpret_cast<unsigned char*>(gameClientModule) +
+        kResetMeleeTargetReferenceRva;
+    DatabaseFloatReaderFunction masterDatabaseFloatReader = nullptr;
     if (!FireVectorsTargetMatches(fireVectors)) {
         log(
             "m5_head_aim_rejected",
@@ -3075,6 +3931,32 @@ bool InstallHeadAimHooks(
             "m5_aim_path_rejected",
             "GameOrig_rva_0001f270_melee_impact_signature_mismatch");
         return false;
+    }
+    if (physicalMeleeContactDamage &&
+        !ResetMeleeTargetReferenceTargetMatches(
+            resetMeleeTargetReference)) {
+        log(
+            "m5_physical_melee_contact_damage_rejected",
+            "GameOrig_rva_00102b80_target_reference_signature_mismatch");
+        return false;
+    }
+    if (physicalMeleeContactDamage &&
+        !MeleeNativeCapsulePropertyCallsitesMatch(
+            gameClientModule, meleeEnableCollisions)) {
+        log(
+            "m5_physical_melee_native_capsule_rejected",
+            "GameOrig_rva_0001fd00_native_capsule_property_callsites_mismatch");
+        return false;
+    }
+    if (physicalMeleeContactDamage) {
+        masterDatabaseFloatReader =
+            ResolveMasterDatabaseFloatReader(gameClientModule);
+        if (masterDatabaseFloatReader == nullptr) {
+            log(
+                "m5_physical_melee_native_capsule_rejected",
+                "master_database_float_reader_slot_0x80_signature_mismatch");
+            return false;
+        }
     }
     if (physicalMeleeVisualProxy &&
         !EquippedWeaponLayoutMatches(gameClientModule)) {
@@ -3190,6 +4072,43 @@ bool InstallHeadAimHooks(
             log("m5_aim_path_rejected", MH_StatusToString(status));
             return false;
         }
+        if (physicalMeleeContactDamage) {
+            void* const databaseFloatReaderTarget =
+                reinterpret_cast<void*>(masterDatabaseFloatReader);
+            status = MH_CreateHook(
+                databaseFloatReaderTarget,
+                reinterpret_cast<void*>(
+                    &HookMasterDatabaseFloatReader),
+                reinterpret_cast<void**>(
+                    &g_originalMasterDatabaseFloatReader));
+            if (status == MH_OK) {
+                status = MH_EnableHook(
+                    databaseFloatReaderTarget);
+            }
+            if (status != MH_OK) {
+                MH_RemoveHook(databaseFloatReaderTarget);
+                g_originalMasterDatabaseFloatReader = nullptr;
+                MH_DisableHook(meleeImpactDispatch);
+                MH_RemoveHook(meleeImpactDispatch);
+                g_originalMeleeImpactDispatch = nullptr;
+                MH_DisableHook(buildRigidTransform);
+                MH_RemoveHook(buildRigidTransform);
+                g_originalBuildRigidTransform = nullptr;
+                MH_DisableHook(meleeUpdateCollision);
+                MH_RemoveHook(meleeUpdateCollision);
+                g_originalMeleeUpdateCollision = nullptr;
+                MH_DisableHook(meleeEnableCollisions);
+                MH_RemoveHook(meleeEnableCollisions);
+                g_originalMeleeEnableCollisions = nullptr;
+                MH_DisableHook(fireVectors);
+                MH_RemoveHook(fireVectors);
+                g_originalGetFireVectors = nullptr;
+                log(
+                    "m5_physical_melee_native_capsule_rejected",
+                    MH_StatusToString(status));
+                return false;
+            }
+        }
     }
 
     g_fireVectorsHookTarget = fireVectors;
@@ -3204,6 +4123,10 @@ bool InstallHeadAimHooks(
         : nullptr;
     g_meleeImpactDispatchHookTarget = aimPathProbe
         ? meleeImpactDispatch
+        : nullptr;
+    g_masterDatabaseFloatReaderHookTarget =
+        physicalMeleeContactDamage
+        ? reinterpret_cast<void*>(masterDatabaseFloatReader)
         : nullptr;
     g_gameClientBase = reinterpret_cast<unsigned char*>(
         gameClientModule);
@@ -3232,19 +4155,43 @@ bool InstallHeadAimHooks(
     g_physicalMeleeSwingSpeedMetersPerSecond = 0.0F;
     g_physicalMeleePlayerWeaponModelObject = 0U;
     g_physicalMeleePlayerCollisionController = nullptr;
+    g_physicalMeleePlayerCollisionObject = 0U;
+    g_physicalMeleePlayerCollisionTick = 0U;
     ReleaseSRWLockExclusive(&g_physicalMeleeLock);
+    g_physicalMeleeActiveCollisionRecord = nullptr;
+    g_physicalMeleeNativeCapsuleOverride = {};
+    g_physicalMeleeNativeCapsuleReadMask = 0U;
+    g_resetMeleeTargetReference = physicalMeleeContactDamage
+        ? reinterpret_cast<ResetMeleeTargetReferenceFunction>(
+              resetMeleeTargetReference)
+        : nullptr;
     InterlockedExchange(&g_physicalMeleeSampleCalls, 0);
     InterlockedExchange(&g_physicalMeleeDamageQualified, 0);
     InterlockedExchange(&g_physicalMeleeSwingAttackTriggered, 0);
     InterlockedExchange(&g_physicalMeleeWallProxyAppliedLogged, 0);
     InterlockedExchange(&g_physicalMeleeContactAccepted, 0);
     InterlockedExchange(&g_physicalMeleeContactRearmed, 0);
+    InterlockedExchange(&g_physicalMeleeNativeCapsuleOverrides, 0);
+    InterlockedExchange(&g_physicalMeleeDamageDispatched, 0);
+    InterlockedExchange(
+        &g_physicalMeleeContactInvalidSampleHeld, 0);
+    InterlockedExchange(&g_physicalMeleeContinuousCollisionHeld, 0);
+    InterlockedExchange(&g_physicalMeleeContinuousCollisionReleased, 0);
+    InterlockedExchange(&g_physicalMeleeRetailLatchReleased, 0);
+    InterlockedExchange(
+        &g_physicalMeleeRetailLatchReleaseFailedLogged, 0);
     InterlockedExchange(
         &g_physicalMeleeWallProxyEnabled,
         physicalMeleeWallProxy ? 1 : 0);
     InterlockedExchange(
+        &g_physicalMeleeColliderDebugEnabled,
+        physicalMeleeColliderDebug ? 1 : 0);
+    InterlockedExchange(
         &g_physicalMeleeVisualProxyEnabled,
         physicalMeleeVisualProxy ? 1 : 0);
+    InterlockedExchange(
+        &g_physicalMeleeContactDamageEnabled,
+        physicalMeleeContactDamage ? 1 : 0);
     SetPhysicalMeleeVisualProxyEnabled(
         physicalMeleeVisualProxy);
     SetWeaponGripCalibrationEnabled(
@@ -3307,18 +4254,51 @@ bool InstallHeadAimHooks(
             "swing_pulse_ms=100 swing_cooldown_ms=450 "
             "length_m=0.75 radius_m=0.04 mass_kg=1.5 "
             "sweep=base_and_tip speed_gate_mps=1.25 "
-            "energy_gate_j=1.0 native_impact_writes=0");
+            "energy_gate_j=1.0 native_impact_writes=qualified_contact_only");
     }
     if (physicalMeleeWallProxy) {
         log(
             "m5_physical_melee_wall_proxy_armed",
             "target=GameOrig+0x0000F690 "
             "proxy_origin=controller_weapon_tip length_m=0.75 "
-            "requires_retail_attack_window=1 collision_writes=1 "
-            "contact_gate=normal_speed_and_energy "
-            "duplicate_latch=normal_separation_0.12m "
-            "native_impact_dispatch=blocked actor_damage=0 "
+            "collision_lifetime=retail_window_or_contact_damage_hold "
+            "contact_gate=fresh_overlap "
+            "duplicate_latch=tip_displacement_0.12m "
+            "native_impact_dispatch=blocked_unless_new_contact "
             "stale_and_background_fallback=retail_transform");
+    }
+    if (physicalMeleeColliderDebug) {
+        log(
+            "m5_physical_melee_collider_debug_armed",
+            "shape=configured_swept_capsule "
+            "origin=exact_controller_weapon_tip_proxy "
+            "green=retail_collision_body_live "
+            "amber=preview_waiting_for_retail_seed "
+            "projection=verified_per_eye_camera "
+            "overlay_depth=always_visible");
+    }
+    if (physicalMeleeContactDamage) {
+        log(
+            "m5_physical_melee_native_capsule_armed",
+            "reader=verified_master_database_vtable_slot_0x80 "
+            "scope=local_player_pipe_creation_only "
+            "native_axis=local_y length_up=0 "
+            "length_down=configured_base_to_tip radius=configured "
+            "transform_origin=configured_tip "
+            "transform_axis=configured_base_to_tip "
+            "expected_read_mask=0x7 fallback=retail");
+    }
+    if (physicalMeleeContactDamage) {
+        log(
+            "m5_physical_melee_contact_damage_armed",
+            "weapon=pipe_lever retail_index=32 "
+            "collision_check=continuous_after_first_retail_seed "
+            "swing_speed_bool=diagnostic_only "
+            "contact_gate=fresh_overlap "
+            "one_hit_per_contact=1 "
+            "repeat_rearm=tip_displacement_0.12m "
+            "target_and_damage_dispatch=retail_owned "
+            "tracking_menu_focus_weapon_change=fail_closed");
     }
     if (physicalMeleeVisualProxy) {
         log(
@@ -3331,7 +4311,7 @@ bool InstallHeadAimHooks(
             "heavy_profiles=bounded_damped_spring_visible_inertia "
             "attack_required=0 weapon_switch_auto_release=1 "
             "render_override_only=1 exact_transform_restore=1 "
-            "placeholder_model=0 native_impact_dispatch=blocked");
+            "placeholder_model=0 native_impact_dispatch=contact_gate_owned");
     }
     if (weaponGripCalibration) {
         log(
@@ -3516,6 +4496,30 @@ void ReadPhysicalMeleeToolTelemetry(
         g_equippedWeaponIdentity.nameResolved;
     telemetry.weaponAnimationPropertyResolved =
         g_equippedWeaponIdentity.animationPropertyResolved;
+    telemetry.contactTrackingFresh =
+        g_physicalMeleeSampleId != 0 &&
+        g_physicalMeleeSampleTick != 0 &&
+        g_physicalMeleeFrame.poseValid &&
+        g_physicalMeleeFrame.sweepValid &&
+        now - g_physicalMeleeSampleTick <=
+            kInputFreshnessMilliseconds;
+    telemetry.contactSpeedMetersPerSecond =
+        telemetry.contactTrackingFresh
+        ? g_physicalMeleeFrame.impactSpeedMetersPerSecond
+        : 0.0F;
+    telemetry.contactFastEnough =
+        telemetry.contactTrackingFresh &&
+        g_physicalMeleeFrame.damageQualified;
+    telemetry.contactReleaseSpeedMetersPerSecond =
+        PhysicalMeleeContactReleaseSpeedMetersPerSecond(
+            g_physicalMeleeProfile);
+    telemetry.contactReleaseSampleCount =
+        g_physicalMeleeContactState.releaseSampleCount;
+    telemetry.contactLatched =
+        g_physicalMeleeContactState.haveContact &&
+        !g_physicalMeleeContactState.armed;
+    telemetry.contactRearmTravelReady =
+        g_physicalMeleeContactState.rearmDistanceReached;
     telemetry.trackingFresh =
         g_physicalMeleeSwingSampleId != 0 &&
         g_physicalMeleeSwingSampleTick != 0 &&
@@ -3529,11 +4533,77 @@ void ReadPhysicalMeleeToolTelemetry(
         std::max<LONG>(
             0, InterlockedCompareExchange(
                    &g_physicalMeleeSwingAttackTriggered, 0, 0)));
+    telemetry.contactCallbackCount = static_cast<std::uint32_t>(
+        std::max<LONG>(
+            0, InterlockedCompareExchange(
+                   &g_aimPathMeleeImpactCalls, 0, 0)));
+    telemetry.damageDispatchCount =
+        static_cast<std::uint32_t>(
+            std::max<LONG>(
+                0, InterlockedCompareExchange(
+                       &g_physicalMeleeDamageDispatched, 0, 0)));
+    telemetry.contactDamageEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeContactDamageEnabled, 0, 0) != 0;
     telemetry.wallProxyEnabled = InterlockedCompareExchange(
         &g_physicalMeleeWallProxyEnabled, 0, 0) != 0;
     telemetry.visualProxyEnabled = InterlockedCompareExchange(
         &g_physicalMeleeVisualProxyEnabled, 0, 0) != 0;
+    telemetry.colliderDebugEnabled = InterlockedCompareExchange(
+        &g_physicalMeleeColliderDebugEnabled, 0, 0) != 0;
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    telemetry.collisionBodyLive =
+        g_physicalMeleePlayerCollisionObject != 0U &&
+        g_physicalMeleePlayerCollisionTick != 0U &&
+        now - g_physicalMeleePlayerCollisionTick <=
+            kInputFreshnessMilliseconds;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
     ReadPhysicalMeleeTwoHandTelemetry(telemetry);
+}
+
+bool ReadPhysicalMeleeColliderDebugSnapshot(
+    PhysicalMeleeColliderDebugSnapshot& snapshot) noexcept {
+    snapshot = {};
+    snapshot.enabled = InterlockedCompareExchange(
+        &g_physicalMeleeColliderDebugEnabled, 0, 0) != 0;
+    if (!snapshot.enabled ||
+        InterlockedCompareExchange(
+            &g_physicalMeleeWallProxyEnabled, 0, 0) == 0) {
+        return false;
+    }
+    const ULONGLONG now = GetTickCount64();
+    PhysicalMeleeFrame frame{};
+    PhysicalMeleeProfile profile{};
+    ULONGLONG sampleTick = 0U;
+    std::uintptr_t collisionObject = 0U;
+    ULONGLONG collisionTick = 0U;
+    AcquireSRWLockShared(&g_physicalMeleeLock);
+    frame = g_physicalMeleeFrame;
+    profile = g_physicalMeleeProfile;
+    snapshot.sampleId = g_physicalMeleeSampleId;
+    sampleTick = g_physicalMeleeSampleTick;
+    collisionObject = g_physicalMeleePlayerCollisionObject;
+    collisionTick = g_physicalMeleePlayerCollisionTick;
+    ReleaseSRWLockShared(&g_physicalMeleeLock);
+    snapshot.trackingFresh = snapshot.sampleId != 0U &&
+        frame.poseValid && sampleTick != 0U &&
+        now - sampleTick <= kInputFreshnessMilliseconds &&
+        ProcessOwnsForegroundWindow();
+    if (!snapshot.trackingFresh) {
+        return false;
+    }
+    const PhysicalMeleeWallProxyTransform proxy =
+        ResolvePhysicalMeleeWallProxyTransform(frame, true);
+    if (!proxy.active) {
+        return false;
+    }
+    snapshot.baseUnits = frame.currentBaseUnits;
+    snapshot.tipUnits = frame.currentTipUnits;
+    snapshot.collisionOriginUnits = proxy.positionUnits;
+    snapshot.radiusUnits = profile.radiusUnits;
+    snapshot.collisionBodyLive = collisionObject != 0U &&
+        collisionTick != 0U &&
+        now - collisionTick <= kInputFreshnessMilliseconds;
+    return true;
 }
 
 } // namespace condemnedvr

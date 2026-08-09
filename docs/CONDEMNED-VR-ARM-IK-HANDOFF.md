@@ -53,15 +53,15 @@ license. Preserve `LICENSE` and the original commit attribution when porting.
 |---|---|
 | [`src/common/arm_ik.h`](../src/common/arm_ik.h) | Engine-independent vector helpers, tuning structure, sanitization, and analytic two-bone elbow solver. This is the principal portable file. |
 | [`tests/test_arm_ik.cpp`](../tests/test_arm_ik.cpp) | Portable solver tests. Copy with the solver and adapt only namespaces/build wiring. |
-| [`src/gameclient_loader/stereo_hook.cpp`](../src/gameclient_loader/stereo_hook.cpp) | LithTech integration: tracked targets, node/socket discovery, measured bone lengths, node callbacks, continuity state, settings, reset paths, menu text/actions, and arm material handling. Port selected regions rather than the entire file. |
-| [`src/common/vr_menu_model.h`](../src/common/vr_menu_model.h) | `NextVrSteppedValue`, used by fine live-tuning rows with wraparound. |
-| [`src/common/dev_menu_model.h`](../src/common/dev_menu_model.h) | Engine-independent floating-panel ray hit testing. Useful if Condemned VR does not already have an equivalent menu. |
-| [`tests/test_vr_menu_model.cpp`](../tests/test_vr_menu_model.cpp) | Covers stepped values, snapping, invalid input, and wraparound. |
-| [`tests/test_dev_menu_model.cpp`](../tests/test_dev_menu_model.cpp) | Covers tab/row hit testing after the IK tab was added. |
-| [`tests/CMakeLists.txt`](../tests/CMakeLists.txt) | Registration for `arm_ik`, `vr_menu_model`, and `dev_menu_model`. |
-| [`docs/OPENXR-INPUT.md`](OPENXR-INPUT.md) | User-facing description of the IK tab and left-hand correction behaviour. |
+| Donor `src/gameclient_loader/stereo_hook.cpp` | LithTech integration: tracked targets, node/socket discovery, measured bone lengths, node callbacks, continuity state, settings, reset paths, menu text/actions, and arm material handling. Port selected regions rather than the entire file. |
+| Donor `src/common/vr_menu_model.h` | `NextVrSteppedValue`, used by fine live-tuning rows with wraparound. |
+| Donor `src/common/dev_menu_model.h` | Engine-independent floating-panel ray hit testing. Useful if Condemned VR does not already have an equivalent menu. |
+| Donor `tests/test_vr_menu_model.cpp` | Covers stepped values, snapping, invalid input, and wraparound. |
+| Donor `tests/test_dev_menu_model.cpp` | Covers tab/row hit testing after the IK tab was added. |
+| Donor `tests/CMakeLists.txt` | Registration for `arm_ik`, `vr_menu_model`, and `dev_menu_model`. |
+| Donor `docs/OPENXR-INPUT.md` | User-facing description of the IK tab and left-hand correction behaviour. |
 
-Useful symbol locations in the current branch:
+Useful symbol locations in the audited donor branch:
 
 - `ArmIkTuning`, `SanitizeArmIkTuning`, `SolveTwoBoneElbow`:
   `src/common/arm_ik.h`

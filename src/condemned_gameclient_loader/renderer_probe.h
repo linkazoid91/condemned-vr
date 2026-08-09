@@ -113,6 +113,11 @@ bool VrToolMenuIsOpen() noexcept;
 ToolMenuMeleeSettings ReadVrToolMenuMeleeSettings(
     std::int32_t weaponIndex) noexcept;
 
+// Returns the persistent per-weapon swept-capsule calibration used by both
+// the collision solver and its stereo wireframe.
+ToolMenuColliderSettings ReadVrToolMenuColliderSettings(
+    std::int32_t weaponIndex) noexcept;
+
 // Publishes the current local-player weapon and its engine-owned model
 // reference. Both references are validated during every render, so switching
 // or releasing a weapon drops the old model automatically. Grip calibration

@@ -97,6 +97,11 @@ struct PhysicalMeleeProfile {
     float rotationalFollow{20.0F};
     float catchUpStrength{1.5F};
     float dampingRatio{1.0F};
+    // Physical contact damage is either overlap-only or gated by the
+    // continuously sampled weighted-weapon speed below. Impact energy remains
+    // diagnostic while the first headset-tuned gate intentionally stays
+    // simple and predictable.
+    bool requireSwingForContactDamage{true};
     float minimumImpactSpeedMetersPerSecond{1.25F};
     float minimumImpactEnergyJoules{1.0F};
     // Transitional controller gesture: an intentional fast sweep emits one
@@ -243,6 +248,25 @@ struct PhysicalMeleeWallProxyTransform {
     fearvr::TrackingVector positionUnits{};
     fearvr::TrackingQuaternion rotation{};
     bool active{false};
+};
+
+// Retail creates its capsule along local +/-Y. The configured capsule may
+// point anywhere in controller space, so the native descriptor owns both the
+// local dimensions and the world transform required to place those endpoints
+// exactly on the configured base/tip segment.
+enum class PhysicalMeleeNativeCapsuleProperty : std::uint8_t {
+    Retail,
+    LengthUp,
+    LengthDown,
+    Radius
+};
+
+struct PhysicalMeleeNativeCapsuleShape {
+    PhysicalMeleeWallProxyTransform transform{};
+    float lengthUpUnits{0.0F};
+    float lengthDownUnits{0.0F};
+    float radiusUnits{0.0F};
+    bool valid{false};
 };
 
 // A compact engine-independent rigid transform used to solve the diagnostic
@@ -414,25 +438,70 @@ enum class PhysicalMeleeContactReason : std::uint8_t {
     MissingTarget,
     InvalidContact,
     InvalidFrame,
-    BelowNormalSpeed,
-    BelowNormalEnergy,
+    OutsideConfiguredCollider,
+    SwingNotQualified,
     ContactLatched
 };
 
 struct PhysicalMeleeContactState {
     fearvr::TrackingVector acceptedTipUnits{};
-    fearvr::TrackingVector acceptedNormal{};
+    static constexpr std::size_t kMaximumTargetsPerPass = 8U;
+
     std::uintptr_t targetId{0};
     std::uint64_t sampleId{0};
+    std::array<std::uintptr_t, kMaximumTargetsPerPass> targetIds{};
+    float maximumTipDisplacementMeters{0.0F};
+    std::uint32_t releaseSampleCount{0U};
     bool armed{true};
     bool haveContact{false};
+    bool rearmDistanceReached{false};
+    std::size_t targetCount{0U};
+};
+
+constexpr float kPhysicalMeleeContactReleaseSpeedRatio = 0.50F;
+constexpr float kPhysicalMeleeContactMinimumReleaseSpeedMetersPerSecond =
+    0.10F;
+constexpr float kPhysicalMeleeContactMaximumReleaseSpeedMetersPerSecond =
+    2.00F;
+constexpr std::uint32_t kPhysicalMeleeContactReleaseSampleCount = 3U;
+
+struct PhysicalMeleeContactRearmUpdate {
+    float tipDisplacementMeters{0.0F};
+    float maximumTipDisplacementMeters{0.0F};
+    float speedMetersPerSecond{0.0F};
+    float releaseSpeedMetersPerSecond{0.0F};
+    std::uint32_t releaseSampleCount{0U};
+    bool distanceReached{false};
+    bool distanceReachedThisSample{false};
+    bool invalidSampleHeld{false};
+    bool rearmed{false};
 };
 
 struct PhysicalMeleeContactQualification {
-    float normalSpeedMetersPerSecond{0.0F};
-    float normalEnergyJoules{0.0F};
+    float swingSpeedMetersPerSecond{0.0F};
+    float swingEnergyJoules{0.0F};
     PhysicalMeleeContactReason reason{PhysicalMeleeContactReason::None};
     bool accepted{false};
+};
+
+// The verified Retail callback passes a vector header whose live elements are
+// 16-byte LTObjRef values. Keep layout validation portable and deterministic;
+// the x86 hook performs the guarded reads and element destruction separately.
+struct RetailMeleeTargetReferenceVectorSpan {
+    std::uintptr_t begin{0U};
+    std::uintptr_t end{0U};
+    std::uintptr_t capacity{0U};
+    std::size_t count{0U};
+    bool valid{false};
+};
+
+struct PhysicalMeleeContactDistance {
+    float tipToContactMeters{0.0F};
+    float centerlineToContactMeters{0.0F};
+    float capsuleSurfaceGapMeters{0.0F};
+    float capsuleRadiusMeters{0.0F};
+    float axisFraction{0.0F};
+    bool valid{false};
 };
 
 inline fearvr::TrackingVector PhysicalMeleeAdd(
@@ -463,6 +532,103 @@ inline float PhysicalMeleeDot(
     const fearvr::TrackingVector& left,
     const fearvr::TrackingVector& right) noexcept {
     return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+inline RetailMeleeTargetReferenceVectorSpan
+ResolveRetailMeleeTargetReferenceVectorSpan(
+    std::uintptr_t begin,
+    std::uintptr_t end,
+    std::uintptr_t capacity) noexcept {
+    constexpr std::uintptr_t kElementSize = 16U;
+    constexpr std::size_t kMaximumLiveReferences = 64U;
+    RetailMeleeTargetReferenceVectorSpan result{
+        begin, end, capacity, 0U, false};
+    if (begin == 0U || end == 0U || capacity == 0U) {
+        result.valid = begin == 0U && end == 0U && capacity == 0U;
+        return result;
+    }
+    if (end < begin || capacity < end) {
+        return result;
+    }
+    const std::uintptr_t liveBytes = end - begin;
+    const std::uintptr_t capacityBytes = capacity - begin;
+    if (liveBytes % kElementSize != 0U ||
+        capacityBytes % kElementSize != 0U) {
+        return result;
+    }
+    const std::uintptr_t count = liveBytes / kElementSize;
+    if (count > kMaximumLiveReferences) {
+        return result;
+    }
+    result.count = static_cast<std::size_t>(count);
+    result.valid = true;
+    return result;
+}
+
+// Measures the configured current capsule against Retail's target contact
+// point. A zero surface gap means the point lies on the capsule; a negative
+// value means it lies inside. This is more useful for hit alignment than a
+// target model origin, which may be far from the struck body part.
+inline PhysicalMeleeContactDistance MeasurePhysicalMeleeContactDistance(
+    const PhysicalMeleeFrame& frame,
+    const fearvr::TrackingVector& contactPositionUnits,
+    float unitsPerMeter) noexcept {
+    PhysicalMeleeContactDistance result{};
+    if (!frame.poseValid ||
+        !fearvr::IsFinite(frame.currentBaseUnits) ||
+        !fearvr::IsFinite(frame.currentTipUnits) ||
+        !fearvr::IsFinite(contactPositionUnits) ||
+        !std::isfinite(frame.radiusUnits) || frame.radiusUnits < 0.0F ||
+        !std::isfinite(unitsPerMeter) || unitsPerMeter <= 1.0e-4F) {
+        return result;
+    }
+    const fearvr::TrackingVector axis = PhysicalMeleeSubtract(
+        frame.currentTipUnits, frame.currentBaseUnits);
+    const float axisLengthSquared = PhysicalMeleeDot(axis, axis);
+    if (!std::isfinite(axisLengthSquared) ||
+        axisLengthSquared <= 1.0e-6F) {
+        return result;
+    }
+    const fearvr::TrackingVector fromBase = PhysicalMeleeSubtract(
+        contactPositionUnits, frame.currentBaseUnits);
+    result.axisFraction = std::clamp(
+        PhysicalMeleeDot(fromBase, axis) / axisLengthSquared,
+        0.0F, 1.0F);
+    const fearvr::TrackingVector closestPoint = PhysicalMeleeAdd(
+        frame.currentBaseUnits,
+        PhysicalMeleeScale(axis, result.axisFraction));
+    result.tipToContactMeters = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(
+            contactPositionUnits, frame.currentTipUnits)) /
+        unitsPerMeter;
+    result.centerlineToContactMeters = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(contactPositionUnits, closestPoint)) /
+        unitsPerMeter;
+    result.capsuleRadiusMeters = frame.radiusUnits / unitsPerMeter;
+    result.capsuleSurfaceGapMeters =
+        result.centerlineToContactMeters - result.capsuleRadiusMeters;
+    result.valid = std::isfinite(result.axisFraction) &&
+        std::isfinite(result.tipToContactMeters) &&
+        std::isfinite(result.centerlineToContactMeters) &&
+        std::isfinite(result.capsuleRadiusMeters) &&
+        std::isfinite(result.capsuleSurfaceGapMeters);
+    if (!result.valid) {
+        result = {};
+    }
+    return result;
+}
+
+constexpr float kPhysicalMeleeContactSurfaceToleranceMeters = 0.01F;
+
+inline bool PhysicalMeleeContactWithinConfiguredCollider(
+    const PhysicalMeleeContactDistance& distance,
+    float toleranceMeters =
+        kPhysicalMeleeContactSurfaceToleranceMeters) noexcept {
+    return distance.valid &&
+        std::isfinite(distance.capsuleSurfaceGapMeters) &&
+        std::isfinite(toleranceMeters) &&
+        toleranceMeters >= 0.0F &&
+        distance.capsuleSurfaceGapMeters <= toleranceMeters;
 }
 
 inline bool PhysicalMeleePoseIsValid(
@@ -529,6 +695,69 @@ inline bool PhysicalMeleeShortestArcRotation(
         {cross.x, cross.y, cross.z, 1.0F + dot});
     return fearvr::IsFinite(rotation);
 }
+
+inline PhysicalMeleeNativeCapsuleShape
+ResolvePhysicalMeleeNativeCapsuleShape(
+    const PhysicalMeleeFrame& frame,
+    bool sampleFresh) noexcept {
+    PhysicalMeleeNativeCapsuleShape result{};
+    if (!sampleFresh || !frame.poseValid ||
+        !fearvr::IsFinite(frame.currentBaseUnits) ||
+        !fearvr::IsFinite(frame.currentTipUnits) ||
+        !std::isfinite(frame.radiusUnits) ||
+        frame.radiusUnits <= 0.0F || frame.radiusUnits > 100.0F) {
+        return result;
+    }
+    const fearvr::TrackingVector axis = PhysicalMeleeSubtract(
+        frame.currentTipUnits, frame.currentBaseUnits);
+    const float lengthUnits = PhysicalMeleeLength(axis);
+    if (!std::isfinite(lengthUnits) ||
+        lengthUnits < 1.0e-3F || lengthUnits > 1000.0F) {
+        return result;
+    }
+    fearvr::TrackingQuaternion worldFromNative{};
+    if (!PhysicalMeleeShortestArcRotation(
+            {0.0F, 1.0F, 0.0F}, axis, worldFromNative)) {
+        return result;
+    }
+    result.transform.positionUnits = frame.currentTipUnits;
+    result.transform.rotation = fearvr::Normalize(worldFromNative);
+    result.transform.active =
+        fearvr::IsFinite(result.transform.positionUnits) &&
+        fearvr::IsFinite(result.transform.rotation);
+    result.lengthUpUnits = 0.0F;
+    result.lengthDownUnits = lengthUnits;
+    result.radiusUnits = frame.radiusUnits;
+    result.valid = result.transform.active;
+    return result;
+}
+
+inline float ResolvePhysicalMeleeNativeCapsuleProperty(
+    const PhysicalMeleeNativeCapsuleShape& shape,
+    PhysicalMeleeNativeCapsuleProperty property,
+    float retailValue) noexcept {
+    if (!shape.valid || !shape.transform.active ||
+        !std::isfinite(shape.lengthUpUnits) ||
+        !std::isfinite(shape.lengthDownUnits) ||
+        !std::isfinite(shape.radiusUnits) ||
+        shape.lengthUpUnits < 0.0F ||
+        shape.lengthDownUnits <= 0.0F ||
+        shape.radiusUnits <= 0.0F) {
+        return retailValue;
+    }
+    switch (property) {
+    case PhysicalMeleeNativeCapsuleProperty::LengthUp:
+        return shape.lengthUpUnits;
+    case PhysicalMeleeNativeCapsuleProperty::LengthDown:
+        return shape.lengthDownUnits;
+    case PhysicalMeleeNativeCapsuleProperty::Radius:
+        return shape.radiusUnits;
+    case PhysicalMeleeNativeCapsuleProperty::Retail:
+    default:
+        return retailValue;
+    }
+}
+
 
 inline bool PhysicalMeleeSecondaryGripSettingsAreValid(
     const PhysicalMeleeSecondaryGripSettings& settings) noexcept {
@@ -1050,26 +1279,8 @@ inline PhysicalMeleeWallProxyTransform
 ResolvePhysicalMeleeWallProxyTransform(
     const PhysicalMeleeFrame& frame,
     bool sampleFresh) noexcept {
-    PhysicalMeleeWallProxyTransform result{};
-    if (!sampleFresh || !frame.poseValid ||
-        !fearvr::IsFinite(frame.currentTipUnits) ||
-        !fearvr::IsFinite(frame.currentRotation)) {
-        return result;
-    }
-    const float rotationLengthSquared =
-        frame.currentRotation.x * frame.currentRotation.x +
-        frame.currentRotation.y * frame.currentRotation.y +
-        frame.currentRotation.z * frame.currentRotation.z +
-        frame.currentRotation.w * frame.currentRotation.w;
-    if (!std::isfinite(rotationLengthSquared) ||
-        rotationLengthSquared < 0.25F ||
-        rotationLengthSquared > 4.0F) {
-        return result;
-    }
-    result.positionUnits = frame.currentTipUnits;
-    result.rotation = fearvr::Normalize(frame.currentRotation);
-    result.active = fearvr::IsFinite(result.rotation);
-    return result;
+    return ResolvePhysicalMeleeNativeCapsuleShape(
+        frame, sampleFresh).transform;
 }
 
 inline bool PhysicalMeleeCollisionBelongsToEquippedWeapon(
@@ -1088,12 +1299,26 @@ inline bool ShouldApplyPhysicalMeleePlayerOverride(
 
 inline bool ShouldDispatchPhysicalMeleeNativeImpact(
     bool wallProxyEnabled,
-    bool playerOwnedCollision) noexcept {
-    // The physical proxy may suppress the local player's native impact until
-    // contact qualification is enabled, but it must never suppress Retail
-    // melee owned by enemies or another unrecognised controller.
-    return !ShouldApplyPhysicalMeleePlayerOverride(
-        wallProxyEnabled, playerOwnedCollision);
+    bool playerOwnedCollision,
+    bool contactDamageEnabled = false,
+    bool contactAccepted = false) noexcept {
+    // Enemy and unrecognised Retail melee are never subject to the local
+    // physical-weapon gate. The player's proxy reaches Retail's native
+    // dispatcher only for a newly qualified physical contact.
+    if (!ShouldApplyPhysicalMeleePlayerOverride(
+            wallProxyEnabled, playerOwnedCollision)) {
+        return true;
+    }
+    return contactDamageEnabled && contactAccepted;
+}
+
+inline bool ShouldMaintainPhysicalMeleeCollision(
+    bool contactDamageEnabled,
+    bool playerOwnedCollision,
+    bool collisionActive,
+    bool gameplayContextActive) noexcept {
+    return contactDamageEnabled && playerOwnedCollision &&
+        collisionActive && gameplayContextActive;
 }
 
 inline void ResetPhysicalMeleeContactState(
@@ -1101,48 +1326,106 @@ inline void ResetPhysicalMeleeContactState(
     state = {};
 }
 
-inline bool UpdatePhysicalMeleeContactSeparation(
+inline float PhysicalMeleeContactReleaseSpeedMetersPerSecond(
+    const PhysicalMeleeProfile& profile) noexcept {
+    const float hitSpeed = profile.minimumImpactSpeedMetersPerSecond;
+    if (!std::isfinite(hitSpeed) || hitSpeed <= 0.0F) {
+        return 0.0F;
+    }
+    const float scaled = std::max(
+        kPhysicalMeleeContactMinimumReleaseSpeedMetersPerSecond,
+        hitSpeed * kPhysicalMeleeContactReleaseSpeedRatio);
+    return std::min(
+        std::min(
+            scaled,
+            kPhysicalMeleeContactMaximumReleaseSpeedMetersPerSecond),
+        hitSpeed * 0.75F);
+}
+
+// One continuous fast motion is one physical swing. Tip travel is retained as
+// a secondary guard, but reaching it no longer clears the per-target latch by
+// itself: the weighted weapon must then remain below a lower release speed for
+// several consecutive samples. This prevents a long follow-through from
+// damaging the same target repeatedly while preserving multi-target sweeps.
+inline PhysicalMeleeContactRearmUpdate UpdatePhysicalMeleeContactRearm(
     PhysicalMeleeContactState& state,
-    const fearvr::TrackingVector& currentTipUnits,
+    const PhysicalMeleeFrame& frame,
     bool trackingFresh,
     const PhysicalMeleeProfile& profile = {}) noexcept {
+    PhysicalMeleeContactRearmUpdate result{};
+    result.speedMetersPerSecond = frame.impactSpeedMetersPerSecond;
+    result.releaseSpeedMetersPerSecond =
+        PhysicalMeleeContactReleaseSpeedMetersPerSecond(profile);
     if (!trackingFresh || !PhysicalMeleeProfileIsValid(profile) ||
-        !fearvr::IsFinite(currentTipUnits)) {
-        ResetPhysicalMeleeContactState(state);
-        return false;
+        !frame.poseValid || !frame.sweepValid ||
+        !fearvr::IsFinite(frame.currentTipUnits) ||
+        !std::isfinite(frame.impactSpeedMetersPerSecond) ||
+        frame.impactSpeedMetersPerSecond < 0.0F) {
+        // A transient bad kinematic sample is not evidence that the swing
+        // ended. Explicit tracking-loss and weapon-profile transitions own
+        // full resets. Fail closed here: preserve every latched target and
+        // cancel partial release dwell so only consecutive valid low-speed
+        // samples can re-open damage.
+        result.maximumTipDisplacementMeters =
+            state.maximumTipDisplacementMeters;
+        result.distanceReached = state.rearmDistanceReached;
+        result.invalidSampleHeld = state.haveContact && !state.armed;
+        state.releaseSampleCount = 0U;
+        return result;
     }
     if (!state.haveContact || state.armed) {
-        return false;
+        return result;
     }
-    const float normalLength = PhysicalMeleeLength(
-        state.acceptedNormal);
-    if (!std::isfinite(normalLength) || normalLength < 0.5F ||
-        normalLength > 1.5F) {
-        ResetPhysicalMeleeContactState(state);
-        return false;
-    }
-    const fearvr::TrackingVector normal = PhysicalMeleeScale(
-        state.acceptedNormal, 1.0F / normalLength);
     const fearvr::TrackingVector travel = PhysicalMeleeSubtract(
-        currentTipUnits, state.acceptedTipUnits);
-    const float separationMeters = std::fabs(
-        PhysicalMeleeDot(travel, normal)) / profile.unitsPerMeter;
-    if (!std::isfinite(separationMeters) ||
-        separationMeters < profile.contactRearmSeparationMeters) {
-        return false;
+        frame.currentTipUnits, state.acceptedTipUnits);
+    const float separationMeters =
+        PhysicalMeleeLength(travel) / profile.unitsPerMeter;
+    if (!std::isfinite(separationMeters)) {
+        ResetPhysicalMeleeContactState(state);
+        return result;
+    }
+    result.tipDisplacementMeters = separationMeters;
+    state.maximumTipDisplacementMeters = std::max(
+        state.maximumTipDisplacementMeters, separationMeters);
+    result.maximumTipDisplacementMeters =
+        state.maximumTipDisplacementMeters;
+    const bool distanceWasReached = state.rearmDistanceReached;
+    if (state.maximumTipDisplacementMeters >=
+        profile.contactRearmSeparationMeters) {
+        state.rearmDistanceReached = true;
+    }
+    result.distanceReached = state.rearmDistanceReached;
+    result.distanceReachedThisSample =
+        state.rearmDistanceReached && !distanceWasReached;
+
+    if (!state.rearmDistanceReached ||
+        frame.impactSpeedMetersPerSecond >
+            result.releaseSpeedMetersPerSecond) {
+        state.releaseSampleCount = 0U;
+        result.releaseSampleCount = 0U;
+        return result;
+    }
+    if (state.releaseSampleCount <
+        kPhysicalMeleeContactReleaseSampleCount) {
+        ++state.releaseSampleCount;
+    }
+    result.releaseSampleCount = state.releaseSampleCount;
+    if (state.releaseSampleCount <
+        kPhysicalMeleeContactReleaseSampleCount) {
+        return result;
     }
     ResetPhysicalMeleeContactState(state);
-    return true;
+    result.rearmed = true;
+    return result;
 }
 
 inline PhysicalMeleeContactQualification QualifyPhysicalMeleeContact(
     PhysicalMeleeContactState& state,
     std::uintptr_t targetId,
-    const fearvr::TrackingVector& contactPositionUnits,
-    const fearvr::TrackingVector& contactNormal,
     const PhysicalMeleeFrame& frame,
     std::uint64_t sampleId,
-    const PhysicalMeleeProfile& profile = {}) noexcept {
+    const PhysicalMeleeProfile& profile = {},
+    bool requireDamageQualification = true) noexcept {
     PhysicalMeleeContactQualification result{};
     if (!PhysicalMeleeProfileIsValid(profile)) {
         result.reason = PhysicalMeleeContactReason::InvalidProfile;
@@ -1152,49 +1435,40 @@ inline PhysicalMeleeContactQualification QualifyPhysicalMeleeContact(
         result.reason = PhysicalMeleeContactReason::MissingTarget;
         return result;
     }
-    const float normalLength = PhysicalMeleeLength(contactNormal);
-    if (!fearvr::IsFinite(contactPositionUnits) ||
-        !fearvr::IsFinite(contactNormal) ||
-        !std::isfinite(normalLength) || normalLength < 0.5F ||
-        normalLength > 1.5F) {
-        result.reason = PhysicalMeleeContactReason::InvalidContact;
-        return result;
-    }
     if (sampleId == 0U || !frame.poseValid || !frame.sweepValid ||
         !fearvr::IsFinite(frame.currentTipUnits) ||
         !fearvr::IsFinite(frame.tipVelocityUnitsPerSecond)) {
         result.reason = PhysicalMeleeContactReason::InvalidFrame;
         return result;
     }
-    if (!state.armed || state.haveContact) {
+    const std::size_t targetCount = std::min(
+        state.targetCount,
+        PhysicalMeleeContactState::kMaximumTargetsPerPass);
+    if (std::find(
+            state.targetIds.begin(),
+            state.targetIds.begin() + targetCount,
+            targetId) != state.targetIds.begin() + targetCount ||
+        targetCount >=
+            PhysicalMeleeContactState::kMaximumTargetsPerPass) {
         result.reason = PhysicalMeleeContactReason::ContactLatched;
         return result;
     }
 
-    const fearvr::TrackingVector normal = PhysicalMeleeScale(
-        contactNormal, 1.0F / normalLength);
-    result.normalSpeedMetersPerSecond = std::fabs(
-        PhysicalMeleeDot(
-            frame.tipVelocityUnitsPerSecond, normal)) /
-        profile.unitsPerMeter;
-    result.normalEnergyJoules =
-        0.5F * profile.massKilograms *
-        result.normalSpeedMetersPerSecond *
-        result.normalSpeedMetersPerSecond;
-    if (!std::isfinite(result.normalSpeedMetersPerSecond) ||
-        result.normalSpeedMetersPerSecond <
-            profile.minimumImpactSpeedMetersPerSecond) {
-        result.reason = PhysicalMeleeContactReason::BelowNormalSpeed;
-        return result;
-    }
-    if (!std::isfinite(result.normalEnergyJoules) ||
-        result.normalEnergyJoules < profile.minimumImpactEnergyJoules) {
-        result.reason = PhysicalMeleeContactReason::BelowNormalEnergy;
+    result.swingSpeedMetersPerSecond =
+        frame.impactSpeedMetersPerSecond;
+    result.swingEnergyJoules = frame.impactEnergyJoules;
+    if ((requireDamageQualification && !frame.damageQualified) ||
+        !std::isfinite(result.swingSpeedMetersPerSecond) ||
+        !std::isfinite(result.swingEnergyJoules)) {
+        result.reason = PhysicalMeleeContactReason::SwingNotQualified;
         return result;
     }
 
-    state.acceptedTipUnits = frame.currentTipUnits;
-    state.acceptedNormal = normal;
+    if (targetCount == 0U) {
+        state.acceptedTipUnits = frame.currentTipUnits;
+    }
+    state.targetIds[targetCount] = targetId;
+    state.targetCount = targetCount + 1U;
     state.targetId = targetId;
     state.sampleId = sampleId;
     state.armed = false;
@@ -1202,6 +1476,35 @@ inline PhysicalMeleeContactQualification QualifyPhysicalMeleeContact(
     result.reason = PhysicalMeleeContactReason::Accepted;
     result.accepted = true;
     return result;
+}
+
+// Retail's native collision body is database-sized and is not the configured
+// capsule drawn by the VR tool. Gate the callback's target-surface point
+// before target de-duplication so an early native overlap cannot consume the
+// target before the configured capsule actually reaches it.
+inline PhysicalMeleeContactQualification
+QualifyPhysicalMeleeContactAtDistance(
+    PhysicalMeleeContactState& state,
+    std::uintptr_t targetId,
+    const PhysicalMeleeFrame& frame,
+    std::uint64_t sampleId,
+    const PhysicalMeleeContactDistance& distance,
+    const PhysicalMeleeProfile& profile = {},
+    bool requireDamageQualification = true) noexcept {
+    if (!distance.valid) {
+        PhysicalMeleeContactQualification result{};
+        result.reason = PhysicalMeleeContactReason::InvalidContact;
+        return result;
+    }
+    if (!PhysicalMeleeContactWithinConfiguredCollider(distance)) {
+        PhysicalMeleeContactQualification result{};
+        result.reason =
+            PhysicalMeleeContactReason::OutsideConfiguredCollider;
+        return result;
+    }
+    return QualifyPhysicalMeleeContact(
+        state, targetId, frame, sampleId, profile,
+        requireDamageQualification);
 }
 
 inline void ResetPhysicalMeleeKinematics(
@@ -1394,11 +1697,12 @@ inline PhysicalMeleeFrame UpdatePhysicalMeleeKinematics(
         fearvr::IsFinite(frame.angularVelocityRadiansPerSecond) &&
         std::isfinite(frame.impactSpeedMetersPerSecond) &&
         std::isfinite(frame.impactEnergyJoules);
+    // The configurable physical-hit gate is deliberately speed-only. Energy
+    // is still calculated and logged so a later material/damage model can use
+    // it without making the initial headset tuning depend on weapon mass.
     frame.damageQualified = frame.sweepValid &&
         frame.impactSpeedMetersPerSecond >=
-            profile.minimumImpactSpeedMetersPerSecond &&
-        frame.impactEnergyJoules >=
-            profile.minimumImpactEnergyJoules;
+            profile.minimumImpactSpeedMetersPerSecond;
 
     state.previousPose = pose;
     state.previousTimeNs = timestampNs;

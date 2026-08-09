@@ -5,9 +5,13 @@ An experimental, open-source VR mod for the Steam release of
 OpenXR head tracking and motion controls while keeping the original game
 installation unchanged.
 
-The project is under active development. M0-M4 have passed live testing; M5
-is building controller-driven physical melee, per-weapon handling and an
-in-headset calibration/tool menu. See
+Developers and AI coding agents should start with [`AGENTS.md`](AGENTS.md),
+then read [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md) for the active gate.
+
+The project is under active development. M1-M4 have passed their live gates;
+the usable M0 baseline retains a few release-oriented checks. M5 is building
+controller-driven physical melee, per-weapon handling and an in-headset
+calibration/tool menu. See
 [`docs/CONDEMNED-PORT-PLAN.md`](docs/CONDEMNED-PORT-PLAN.md) and
 [`docs/CONDEMNED-M5.md`](docs/CONDEMNED-M5.md) for the current boundaries.
 
@@ -97,6 +101,41 @@ Then launch the tested feature set:
 M5 melee gates are opt-in diagnostics; their exact switches and safety
 constraints are documented in [`docs/CONDEMNED-M5.md`](docs/CONDEMNED-M5.md).
 Do not enable write-oriented probes on an unsupported executable build.
+
+For the one-handed physical-weapon baseline, launch the guarded pipe test
+preset and equip `pipe_lever` (Retail weapon index 32):
+
+```powershell
+.\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait
+```
+
+The preset enables the required controls, physical-melee proxies, grip
+calibration, full arm IK, recentering, desktop-window support, and the
+pipe-only live contact-damage gate. It does not enable two-hand attachment.
+If Retail has not created its collision body yet, make one deliberate swing
+to prime it. Later contacts are checked continuously; the Debug tab's Melee
+view increments `CALLBACKS` whenever the collision body reports contact and
+`HITS` when a fresh, de-duplicated pipe contact is forwarded to Retail's native
+impact path. In the current lifecycle-validation build, speed and energy are
+diagnostic only; see `CURRENT_STATE.md` before interpreting those counters.
+
+The Pipe preset also enables a stereo collider wireframe. Amber shows the
+configured swept volume while it is waiting for that first Retail seed;
+green means the player-owned collision body is live. The bright cross marks
+the exact controller-tip proxy origin. Debug lines are always visible.
+
+Open VR Tools with both grips + Y and select the `COLLIDER` tab to edit the
+equipped weapon's local position, pitch/yaw/roll, length, radius, and direction.
+Use the left stick to select, the right stick to adjust, and A to toggle
+direction or reset. Changes are previewed immediately and saved automatically
+by Retail weapon index.
+
+The `GRIP` tab similarly adjusts the equipped weapon model's local position
+and rotation. Menu adjustments and reset save automatically in the per-weapon
+`grip` record; `SAVE GRIP SNAPSHOT` forces another save. When using the
+continuous both-grips calibration fallback, press controller Y or keyboard P
+to save before quitting. Saved alignment loads automatically the next time the
+same Retail weapon profile is equipped.
 
 ## Repository layout
 

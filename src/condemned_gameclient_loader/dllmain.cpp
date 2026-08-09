@@ -235,6 +235,10 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             CommandLineContains(
                 L"-condemnedvr-m5-physical-melee-wall-proxy"),
             CommandLineContains(
+                L"-condemnedvr-m5-physical-melee-collider-debug"),
+            CommandLineContains(
+                L"-condemnedvr-m5-physical-melee-contact-damage"),
+            CommandLineContains(
                 L"-condemnedvr-m5-physical-melee-visual-proxy"),
             CommandLineContains(
                 L"-condemnedvr-m5-weapon-grip-calibration"),

@@ -70,10 +70,25 @@
 
 .PARAMETER PhysicalMeleeWallProxy
     Moves Retail's verified melee collision body to the controller-driven
-    weapon endpoint for wall-contact testing. Every native melee impact is
-    blocked, so this gate cannot damage actors. Requires -PhysicalMeleeProbe
-    and cannot be combined with -MeleeAimProbe.
+    weapon endpoint. Native impact from the player's equipped weapon remains
+    blocked unless the separate pipe-only -PhysicalMeleeContactDamage gate is
+    enabled; enemy and unrecognised Retail melee remains untouched. Requires
+    -PhysicalMeleeProbe and cannot be combined with -MeleeAimProbe.
 
+.PARAMETER PhysicalMeleeContactDamage
+    Enables the pipe-only live damage acceptance gate. Once Retail has seeded
+    its verified collision body, that body is checked continuously. The current
+    lifecycle-validation build forwards one fresh, de-duplicated Retail-valid
+    overlap, then rearms only after separation; speed and energy are diagnostic
+    until that lifecycle passes live. Requires -PhysicalMeleeWallProxy and fails
+    closed for other weapons, menus, focus loss, stale tracking, and weapon
+    changes.
+
+.PARAMETER PhysicalMeleeColliderDebug
+    Draws the configured swept melee volume in real time in both headset eyes.
+    Amber is the predicted proxy before Retail creates its collision body;
+    green means that player-owned body is live. The exact proxy origin is
+    marked with a cross. Requires -PhysicalMeleeWallProxy.
 .PARAMETER PhysicalMeleeVisualProxy
     Temporarily moves the equipped Retail melee model during stereo rendering
     so its profile-defined grip sits on the OpenXR right-controller grip and
@@ -86,8 +101,10 @@
 .PARAMETER WeaponGripCalibration
     Arms the Grip tab of the foreground-gated VR tool menu for the equipped
     weapon model. Both headset eyes update immediately, calibration is retained
-    per equipped weapon for the current run, and the Snapshot row logs exact
-    profile-ready values. A generic controller wireframe marks the OpenXR grip
+    and persisted per equipped Retail weapon, and the Snapshot row saves and
+    logs exact profile-ready values. Grip/2-Hand menu edits auto-save; the
+    continuous fallback saves on controller Y or keyboard P. A generic
+    controller wireframe marks the OpenXR grip
     pose and aim direction while the Grip tab is open. F11 retains the legacy
     keyboard/controller calibration mode. Requires -PhysicalMeleeVisualProxy.
 
@@ -126,6 +143,13 @@
     tracking loss returns smoothly to weighted one-hand control. Requires
     -PhysicalMeleeVisualProxy.
 
+.PARAMETER WeaponTest
+    Applies a complete guarded headset-test preset for a known weapon. `Pipe`
+    enables the accepted M4 controls, one-handed physical-melee proxy, live
+    grip calibration, full arm IK, recentering, and desktop-window workflow.
+    It deliberately leaves two-hand attachment disabled. Equip Retail weapon
+    index 32 (`pipe_lever`) after launch.
+
 .PARAMETER NoHidFpsFix
     Diagnostic rollback that leaves Condemned's redundant Jupiter EX
     HID/joystick initialization unmodified.
@@ -146,6 +170,8 @@
 param(
     [string]$RuntimeManifest,
     [string]$StartupImage,
+    [ValidateSet('Pipe')]
+    [string]$WeaponTest,
     [switch]$ValidateOnly,
     [switch]$RendererProbe,
     [switch]$RendererPassThrough,
@@ -168,6 +194,8 @@ param(
     [switch]$MeleeAimProbe,
     [switch]$PhysicalMeleeProbe,
     [switch]$PhysicalMeleeWallProxy,
+    [switch]$PhysicalMeleeContactDamage,
+    [switch]$PhysicalMeleeColliderDebug,
     [switch]$PhysicalMeleeVisualProxy,
     [switch]$WeaponGripCalibration,
     [switch]$WeaponCatalogProbe,
@@ -207,6 +235,40 @@ if ($PSBoundParameters.ContainsKey('StartupImage')) {
     } else {
         $StartupImage = $null
     }
+}
+
+if ($WeaponTest -eq 'Pipe') {
+    if ($TwoHandedMelee) {
+        throw '-WeaponTest Pipe cannot be combined with -TwoHandedMelee.'
+    }
+    if ($MeleeAimProbe) {
+        throw '-WeaponTest Pipe cannot be combined with -MeleeAimProbe.'
+    }
+    if ($ArmIkRightHandProof) {
+        throw '-WeaponTest Pipe cannot be combined with -ArmIkRightHandProof.'
+    }
+
+    # One-handed is the canonical weapon path. The support grip remains a
+    # profile capability and is intentionally absent from this preset.
+    $StereoTuning = $true
+    $LocomotionProbe = $true
+    $TurningProbe = $true
+    $MenuProbe = $true
+    $MenuControlsProbe = $true
+    $InteractionProbe = $true
+    $CoreActionsProbe = $true
+    $HapticsProbe = $true
+    $HeadAimProbe = $true
+    $AimPathProbe = $true
+    $PhysicalMeleeProbe = $true
+    $PhysicalMeleeWallProxy = $true
+    $PhysicalMeleeContactDamage = $true
+    $PhysicalMeleeColliderDebug = $true
+    $PhysicalMeleeVisualProxy = $true
+    $WeaponGripCalibration = $true
+    $ArmIkRightArm = $true
+    $RecenterProbe = $true
+    $DesktopWindow = $true
 }
 
 if ($RecenterProbe -and -not $StereoTuning) {
@@ -249,6 +311,12 @@ if ($PhysicalMeleeProbe -and -not $AimPathProbe) {
 }
 if ($PhysicalMeleeWallProxy -and -not $PhysicalMeleeProbe) {
     throw '-PhysicalMeleeWallProxy requires -PhysicalMeleeProbe.'
+}
+if ($PhysicalMeleeContactDamage -and -not $PhysicalMeleeWallProxy) {
+    throw '-PhysicalMeleeContactDamage requires -PhysicalMeleeWallProxy.'
+}
+if ($PhysicalMeleeColliderDebug -and -not $PhysicalMeleeWallProxy) {
+    throw '-PhysicalMeleeColliderDebug requires -PhysicalMeleeWallProxy.'
 }
 if ($PhysicalMeleeWallProxy -and $MeleeAimProbe) {
     throw '-PhysicalMeleeWallProxy cannot be combined with -MeleeAimProbe.'
@@ -394,6 +462,12 @@ $runLogDirectory = Assert-UnderCondemnedVrProjectRoot (
         'run-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')))
 New-Item -ItemType Directory -Force -Path @(
     $runLogDirectory, $deployment.UserDirectory) | Out-Null
+$liveColliderCommandPath = $null
+if ($WeaponTest -eq 'Pipe') {
+    $liveColliderCommandPath = Assert-UnderCondemnedVrProjectRoot (
+        Join-Path $runLogDirectory 'weapon-alignment-command.txt')
+}
+
 
 $sessionId = [uint64]([DateTime]::UtcNow.Ticks)
 $sessionId = $sessionId -bxor ([uint64]$PID -shl 32)
@@ -550,6 +624,12 @@ if ($PhysicalMeleeProbe) {
 if ($PhysicalMeleeWallProxy) {
     $gameArguments += '-condemnedvr-m5-physical-melee-wall-proxy'
 }
+if ($PhysicalMeleeContactDamage) {
+    $gameArguments += '-condemnedvr-m5-physical-melee-contact-damage'
+}
+if ($PhysicalMeleeColliderDebug) {
+    $gameArguments += '-condemnedvr-m5-physical-melee-collider-debug'
+}
 if ($PhysicalMeleeVisualProxy) {
     $gameArguments += '-condemnedvr-m5-physical-melee-visual-proxy'
 }
@@ -603,11 +683,20 @@ if ($DesktopWindow) {
             [Globalization.CultureInfo]::InvariantCulture))
 }
 $game = $null
+$previousLiveColliderCommandPath =
+    $env:CONDEMNEDVR_LIVE_COLLIDER_COMMAND_PATH
 try {
-    $game = Start-Process -FilePath $deployment.RuntimeExe `
-        -ArgumentList $gameArguments `
-        -WorkingDirectory $deployment.WorkingDirectory `
-        -PassThru
+    try {
+        $env:CONDEMNEDVR_LIVE_COLLIDER_COMMAND_PATH =
+            $liveColliderCommandPath
+        $game = Start-Process -FilePath $deployment.RuntimeExe `
+            -ArgumentList $gameArguments `
+            -WorkingDirectory $deployment.WorkingDirectory `
+            -PassThru
+    } finally {
+        $env:CONDEMNEDVR_LIVE_COLLIDER_COMMAND_PATH =
+            $previousLiveColliderCommandPath
+    }
     $gameFocusAttempted = $false
     $gameFocusRestored = $false
 
@@ -733,6 +822,16 @@ try {
                 '"event":"m5_physical_melee_wall_proxy_rejected"')) {
             throw 'The guarded M5 physical-melee wall proxy was rejected.'
         }
+        if ($PhysicalMeleeContactDamage -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_contact_damage_rejected"')) {
+            throw 'The guarded M5 pipe contact-damage gate was rejected.'
+        }
+        if ($PhysicalMeleeColliderDebug -and
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_collider_debug_rejected"')) {
+            throw 'The guarded M5 melee collider visualizer was rejected.'
+        }
         if ($PhysicalMeleeVisualProxy -and
             $loaderText.Contains(
                 '"event":"m5_physical_melee_visual_proxy_rejected"')) {
@@ -833,6 +932,14 @@ try {
         $physicalMeleeWallProxyReady = -not $PhysicalMeleeWallProxy -or
             $loaderText.Contains(
                 '"event":"m5_physical_melee_wall_proxy_armed"')
+        $physicalMeleeContactDamageReady =
+            -not $PhysicalMeleeContactDamage -or
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_contact_damage_armed"')
+        $physicalMeleeColliderDebugReady =
+            -not $PhysicalMeleeColliderDebug -or
+            $loaderText.Contains(
+                '"event":"m5_physical_melee_collider_debug_armed"')
         $physicalMeleeVisualProxyReady = -not $PhysicalMeleeVisualProxy -or
             $loaderText.Contains(
                 '"event":"m5_physical_melee_visual_proxy_armed"')
@@ -870,6 +977,8 @@ try {
             $interactionReady -and $coreActionsReady -and $hapticsReady -and
             $headAimReady -and $aimPathReady -and $meleeAimReady -and
             $physicalMeleeReady -and $physicalMeleeWallProxyReady -and
+            $physicalMeleeContactDamageReady -and
+            $physicalMeleeColliderDebugReady -and
             $physicalMeleeVisualProxyReady -and
             $weaponGripCalibrationReady -and
             $twoHandedMeleeReady -and
@@ -908,17 +1017,25 @@ try {
 
     $reportPath = Assert-UnderCondemnedVrProjectRoot (
         Join-Path $runLogDirectory 'm2-mono-live.json')
+    $weaponDiagnosticsPath = $null
+    if ($WeaponTest -eq 'Pipe') {
+        $weaponDiagnosticsPath = Assert-UnderCondemnedVrProjectRoot (
+            Join-Path $runLogDirectory 'weapon-diagnostics-live.json')
+    }
     $report = [pscustomobject][ordered]@{
         SchemaVersion = 1
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Session = $sessionText
+        WeaponTestPreset = $WeaponTest
         GameProcessId = $game.Id
         HostProcessId = $hostProcess.Id
         Bridge = $loadedBridge
         AsiModules = $asiModules
         HostLog = $hostLog.FullName
+        WeaponAlignmentCommand = $liveColliderCommandPath
         ProxyLog = $proxyLog.FullName
         LoaderLog = $deployment.LoaderLog
+        WeaponDiagnostics = $weaponDiagnosticsPath
         M4Input = [pscustomobject][ordered]@{
             Locomotion = [bool]$LocomotionProbe
             Turning = [bool]$TurningProbe
@@ -932,6 +1049,8 @@ try {
             MeleeAim = [bool]$MeleeAimProbe
             PhysicalMelee = [bool]$PhysicalMeleeProbe
             PhysicalMeleeWallProxy = [bool]$PhysicalMeleeWallProxy
+            PhysicalMeleeContactDamage = [bool]$PhysicalMeleeContactDamage
+            PhysicalMeleeColliderDebug = [bool]$PhysicalMeleeColliderDebug
             PhysicalMeleeVisualProxy = [bool]$PhysicalMeleeVisualProxy
             WeaponGripCalibration = [bool]$WeaponGripCalibration
             TwoHandedMelee = [bool]$TwoHandedMelee
@@ -963,6 +1082,34 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($StartupImage)) {
         Write-Host "Startup:   $StartupImage"
     }
+    if ($WeaponTest -eq 'Pipe') {
+        Write-Host ('Pipe combat test: equip pipe_lever (Retail index 32); ' +
+            'live contact damage is ON; two-hand attachment is OFF.') -ForegroundColor Cyan
+        Write-Host ('  If Retail collision is not seeded yet, one deliberate swing ' +
+            'primes it; later contacts are checked continuously.') -ForegroundColor Cyan
+        Write-Host ('  Collider wireframe: AMBER = preview waiting for seed; ' +
+            'GREEN = the Retail collision body is live.') -ForegroundColor Cyan
+        Write-Host ('  Configure it in VR Tools > COLLIDER: left stick selects, ' +
+            'right stick adjusts, A toggles direction/reset; changes auto-save.') `
+            -ForegroundColor Cyan
+        $diagnosticWatcherScript = Join-Path $PSScriptRoot (
+            'watch-condemned-weapon-diagnostics.ps1')
+        $diagnosticWatcherArguments = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', ('"{0}"' -f $diagnosticWatcherScript),
+            '-Run', ('"{0}"' -f $runLogDirectory),
+            '-GameProcessId', $game.Id.ToString(
+                [Globalization.CultureInfo]::InvariantCulture))
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList $diagnosticWatcherArguments `
+            -WindowStyle Hidden | Out-Null
+        Write-Host "  Live weapon diagnostics: $weaponDiagnosticsPath" `
+            -ForegroundColor Cyan
+        Write-Host "  Live alignment commands: $liveColliderCommandPath" `
+            -ForegroundColor Cyan
+    }
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
     if ($MenuControlsProbe) {
         Write-Host 'VR menu controls: left stick = navigate; A/trigger = accept; B = back.' `
@@ -973,6 +1120,7 @@ try {
             -ForegroundColor Cyan
         Write-Host '  Hold BOTH grips: right stick = X/Y; left-stick up/down = Z'
         Write-Host '  A = position; B = rotation; X = reset; Y = save snapshot'
+        Write-Host '  GRIP / 2-HAND menu adjustments and resets auto-save'
         Write-Host '  Left/right stick click = finer/coarser; release a grip = gameplay'
         Write-Host '  Keyboard fallback: J/L X, K/I Y, U/O Z, T mode, ,/. step, R reset, P save'
         Write-Host '  Wireframe = grip pose; magenta = grip centre; RGB = local axes; yellow = aim'

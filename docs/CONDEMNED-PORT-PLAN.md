@@ -282,12 +282,14 @@ profile-owned model-local grip calibration form one reusable held-weapon
 pipeline; the animation-relative melee transform remains temporary diagnostic
 scaffolding only for the wall collision body. An opt-in, foreground-gated live
 setup mode now adjusts model-local position and XYZ rotation in the next stereo
-frame, caches separate alignments for observed equipped weapons during the
-session, and logs exact profile-ready snapshots. A stereo-correct generic
-controller wireframe follows the OpenXR grip pose during setup, with a marked
-grip origin/local basis and a separate aim-pose ray, so profile alignment can be
-judged directly in the headset. Permanent values are still bound only after a
-stable Retail weapon identity has been verified.
+frame and caches separate alignments for observed equipped weapons. A versioned
+per-weapon `grip` record now persists those alignments; menu edits auto-save
+and the continuous fallback saves on its snapshot action. A stereo-correct
+generic controller wireframe follows the OpenXR grip pose during setup, with a
+marked grip origin/local basis and a separate aim-pose ray, so profile alignment
+can be judged directly in the headset. Disk records are guarded by the resolved
+profile identity and fail closed to authored defaults. Promoting an accepted
+override into authored profile data remains a deliberate source change.
 
 Retail weapon index 17 is now tester-verified as the fire axe and owns the
 first persistent weapon record: the captured model-local grip, an 82-unit
@@ -329,9 +331,11 @@ remain the M5 authority target.
 A stereo-correct tabbed VR tool menu now exposes this threshold and the other
 live melee, weapon-handling, grip-alignment, and display controls without a
 relaunch. It includes Controls and Debug tabs, captures controller input while
-open, and waits for all menu controls to return to neutral after closing. The
-settings are intentionally session-local until live-tested values are promoted
-to stable per-weapon profiles.
+open, and waits for all menu controls to return to neutral after closing.
+Melee, Weapon, Grip, 2-Hand, and hand/arm IK tuning now use versioned persistent
+records at the appropriate per-weapon or global scope. Profile identity guards
+per-weapon records so a later remap cannot silently inherit stale tuning;
+authored profile promotion remains separate from user overrides.
 
 The initial full-eye NDC layout was readable but uncomfortable in-headset. The
 panel now defaults to 62% of that size, sits slightly below eye centre, and uses

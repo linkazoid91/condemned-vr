@@ -18,6 +18,19 @@ enum class WeaponSettingsStoreResult : std::uint8_t {
     WriteFailed
 };
 
+// Per-weapon visual alignment. The primary position is the absolute local
+// grip point sampled from the Retail weapon model plus any live adjustment;
+// rotation remains a local Euler correction over the authored base rotation.
+// Secondary-grip values share the record because the GRIP and 2-HAND tabs
+// edit the same runtime calibration slot.
+struct WeaponGripSettings {
+    fearvr::TrackingVector positionUnits{};
+    fearvr::TrackingVector localRotationDegrees{};
+    fearvr::TrackingVector secondaryGripOffsetUnits{};
+    float secondaryGripGrabRadiusMeters{0.15F};
+    bool secondaryGripEnabled{false};
+};
+
 // Persists the editable Melee/Weapon tabs by stable Retail player-weapon
 // index. Runtime pointers and calibration objects are intentionally excluded.
 // CONDEMNEDVR_SETTINGS_PATH can override the normal LocalAppData path for
@@ -31,6 +44,30 @@ WeaponSettingsStoreResult SaveWeaponToolSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId profileId,
     const ToolMenuMeleeSettings& settings) noexcept;
+
+// Stored independently so collider geometry can evolve without invalidating
+// existing melee handling or hand-alignment tuning.
+WeaponSettingsStoreResult LoadWeaponColliderSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuColliderSettings& settings) noexcept;
+
+WeaponSettingsStoreResult SaveWeaponColliderSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId,
+    const ToolMenuColliderSettings& settings) noexcept;
+
+// Stored independently from collision and handling so visual alignment can
+// evolve without invalidating accepted melee tuning.
+WeaponSettingsStoreResult LoadWeaponGripSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    WeaponGripSettings& settings) noexcept;
+
+WeaponSettingsStoreResult SaveWeaponGripSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId,
+    const WeaponGripSettings& settings) noexcept;
 
 // Stored independently from the Melee/Weapon record so existing user tuning
 // remains backward-compatible while hand alignment can evolve on its own.

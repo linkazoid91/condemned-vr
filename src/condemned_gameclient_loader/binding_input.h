@@ -60,6 +60,8 @@ bool InstallHeadAimHooks(
     bool controllerMeleeAim = false,
     bool physicalMeleeProbe = false,
     bool physicalMeleeWallProxy = false,
+    bool physicalMeleeColliderDebug = false,
+    bool physicalMeleeContactDamage = false,
     bool physicalMeleeVisualProxy = false,
     bool weaponGripCalibration = false,
     bool twoHandedMelee = false) noexcept;
@@ -81,4 +83,22 @@ bool InstallMenuToggleHook(
 void ReadPhysicalMeleeToolTelemetry(
     ToolMenuMeleeTelemetry& telemetry) noexcept;
 
+
+// Coherent renderer-facing view of the configured swept weapon volume and
+// the exact proxy origin currently supplied to Retail's collision transform.
+// A body is live only while the player-owned collision record remains fresh;
+// before the first Retail seed the same geometry is an explicit preview.
+struct PhysicalMeleeColliderDebugSnapshot {
+    fearvr::TrackingVector baseUnits{};
+    fearvr::TrackingVector tipUnits{};
+    fearvr::TrackingVector collisionOriginUnits{};
+    float radiusUnits{0.0F};
+    std::uint64_t sampleId{0U};
+    bool enabled{false};
+    bool trackingFresh{false};
+    bool collisionBodyLive{false};
+};
+
+bool ReadPhysicalMeleeColliderDebugSnapshot(
+    PhysicalMeleeColliderDebugSnapshot& snapshot) noexcept;
 } // namespace condemnedvr

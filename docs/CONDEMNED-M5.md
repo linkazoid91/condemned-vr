@@ -72,9 +72,10 @@ the final melee implementation.
 4. **Physical contact qualification:** accept impacts from swept volume and
    contact velocity, with per-contact de-duplication and recovery after a
    weapon separates from a surface.
-5. **Native damage handoff:** allow qualified actor contacts through the
-   verified Retail dispatcher while preserving target, weapon, material, and
-   difficulty data. Start with one pipe/axe profile.
+5. **Pipe native damage handoff:** keep the verified collision body active
+   after Retail's first seed and pass only speed- and energy-qualified contacts
+   through its dispatcher. Retail preserves target, weapon, material, and
+   difficulty data; the first guarded slice is pipe-only.
 6. **Permanent visible decoupling:** replace the render-only diagnostic with
    a lifetime-safe standalone held item at the collision-constrained physical
    pose. Add configurable grip offsets and weapon geometry profiles.
@@ -128,8 +129,8 @@ grip/squeeze buttons to capture the setup controls:
 - Left-stick up/down adjusts local Z.
 - A selects position mode; B selects model-local XYZ rotation mode.
 - X resets only the currently equipped weapon to its profile values.
-- Y emits a profile-ready position/quaternion snapshot as
-  `m5_weapon_grip_calibration_snapshot` in the loader log.
+- Y saves the active weapon's `grip` record and emits a position/quaternion
+  snapshot as `m5_weapon_grip_calibration_snapshot` in the loader log.
 - Left/right stick click selects a finer/coarser adjustment step.
 
 While the Grip or 2-Hand tab is active, both eyes show always-visible generic
@@ -149,15 +150,431 @@ gameplay immediately. F11 pauses/resumes the setup tool entirely.
 
 The non-numpad keyboard fallback is J/L for X, K/I for Y, U/O for Z, T to
 toggle position/rotation, comma/period for finer/coarser steps, R to reset, and
-P to save a snapshot. Existing numpad controls remain available when present.
+P to save the active weapon. Existing numpad controls remain available when
+present.
 
 Both eyes use each updated value immediately. Switching weapons preserves each
 stable Retail weapon index independently for the current game process. If the
 same weapon is dropped, reacquired, or recreated during a level transition,
 its process-local object/model pointers are refreshed while its alignment is
-retained. These values are deliberately session-local: the snapshot is
-reviewed and assigned to a stable Retail weapon identity before it becomes
-permanent profile data.
+retained.
+
+The session cache is backed by a versioned `grip` record in
+`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini`. GRIP and 2-HAND menu
+adjustments, captures, and resets save immediately. Continuous fallback
+controller/keyboard adjustment does not write every tracking sample; controller
+Y or keyboard P saves that current calibration explicitly. Position, local
+rotation correction, support-grip enable/offset, and grab radius share the
+record because both tabs edit one calibration slot.
+
+Each record contains the stable Retail weapon index and resolved profile
+identity. A profile mismatch, malformed value, or unsafe range fails closed to
+the authored profile values. Those authored base values remain immutable in
+the live slot, so RESET restores a known default and persists that reset rather
+than changing the profile itself. Successful loads and saves are reported as
+`m5_weapon_grip_settings_loaded` and
+`m5_weapon_grip_settings_saved`; failures have an explicit
+`m5_weapon_grip_settings_save_failed` event.
+
+The first live persistence round trip used Pipe runs `run-20260809-103049`
+and `run-20260809-103422`. The first process loaded the recovered
+`{2.5, 2.5, -3.5} / {-28, 0, 0}` record, emitted `result=ok` for each
+GRIP-menu save, and exited with position `{2.5, 5.0, -3.5}` on disk. The
+second process loaded that exact changed value with
+`source=local_app_data`. This live-verifies the engine-level
+load/edit/save/relaunch path. The tester confirmed in-headset that the Pipe
+returned where they left it and accepted Y 5.0 as the current alignment, closing
+the perceptual persistence boundary.
+
+## Pipe-first one-hand acceptance slice
+
+One-handed handling is the canonical physical-weapon path. A support hand is
+an optional profile capability layered on top of it, not a requirement of the
+shared pose, weight, collision, swing, or ownership code. `pipe_lever` at
+Retail weapon index 32 is the first acceptance weapon because its model grip
+has already been measured and it exercises the majority path without support-
+hand attachment state.
+
+### Shared behavior contract for later melee weapons
+
+The pipe is the acceptance reference for every mapped melee weapon, not a
+one-off gameplay rule. Later one-handed weapons, and two-handed profiles after
+their optional support-hand pose is resolved, must use the same dominant-hand
+collision and damage state machine:
+
+1. Resolve the stable Retail weapon identity and its own grip, capsule, mass,
+   swing threshold, and optional support-grip profile.
+2. Drive the configured capsule from the same weighted controller pose used by
+   the visible weapon.
+3. On Retail collision-body creation, replace the native local-Y capsule with
+   that profile's configured base, tip, and radius; keep it active continuously
+   rather than borrowing the Retail animation window.
+4. Accept damage only when the native contact is within the configured capsule
+   and the continuously sampled swing-speed qualification is true.
+5. Dispatch at most once per target during one continuous fast swing and allow
+   several different targets in that sweep. Configured tip travel is only the
+   first rearm guard; require three consecutive samples below the lower release
+   speed before clearing the target set. Keep target/material/difficulty/final
+   damage ownership with Retail.
+
+Weapon-specific code should therefore select data and eligibility, not create a
+different hit algorithm. Firearms and non-melee tools are outside this contract.
+The current implementation still admits only `pipe_lever` (Retail index 32,
+`PhysicalMeleeProfileId::Pipe`) to native replacement and contact damage. The
+pipe result proves the shared constructor ABI, but it does not automatically
+enable or live-validate the fire axe, 2x4 family, crowbar, or other melee
+assets. Promote them one identity at a time: verify their profile and constructor
+path, require a seed event with `read_mask=0x7`, then repeat the slow-contact,
+fast-contact, de-duplication, rearm, and visible-damage acceptance checks. Any
+weapon that takes a different Retail path fails closed until that path is
+separately verified.
+
+After building and refreshing the M2 mono stage, start its guarded headset
+configuration with:
+
+```powershell
+.\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait
+```
+
+The preset expands the accepted M4 controller gates plus physical-melee
+telemetry, wall and visual proxies, grip calibration, full arm IK, recentering,
+desktop-window support, and pipe-only `-PhysicalMeleeContactDamage`. It
+deliberately leaves `-TwoHandedMelee` off. Equip `pipe_lever` and confirm the
+Debug tab reports Retail index 32 before judging alignment, inertia, sweep
+speed, or collision behavior.
+
+The damage gate reuses Retail's verified melee collision body, so Retail must
+create that body once. If `CONTACT DAMAGE ON` is shown but `CALLBACKS` stays
+at zero on contact, make one deliberate swing to seed it. Once seeded, the
+hook keeps it active throughout fresh, focused gameplay; collision checks no
+longer wait for the attack animation's collision window.
+
+Automatic equip-time seeding is explicitly deferred. The intended later state
+machine waits for stable weapon identity/model and a fresh pose, issues one
+seed-only Retail pulse with damage blocked, and declares readiness only after
+a player-owned body reports native override `read_mask=0x7`. Weapon changes,
+death/load transitions, or failed verification reset and retry that state.
+Calling `EnableCollisions` directly is not an accepted shortcut until its five
+arguments and ownership contract are verified.
+
+`-PhysicalMeleeColliderDebug` draws the configured swept capsule in both eyes
+from the same fresh physical-melee frame. Amber is a preview while no fresh
+player-owned Retail collision object exists; green means that object is live.
+The cross marks the exact controller-tip origin supplied to the collision
+transform. This developer overlay is intentionally visible through geometry.
+The VR Tools `COLLIDER` tab edits controller-local position, pitch/yaw/roll,
+length, radius, and forward/reverse direction with immediate preview. Values
+are stored independently per stable Retail weapon index.
+
+The 9 August working tree exposes actual physical-hit settings in the VR Tools
+`MELEE` tab:
+
+- `Require Swing`: on requires the continuously sampled weighted-weapon frame
+  to be fast enough; off retains overlap-only diagnosis.
+- `Hit Speed`: 0.25--10.00 m/s in 0.25 m/s steps; default 1.25 m/s.
+- `Rearm Travel`: 0.02--1.00 m in 0.01 m steps; default 0.12 m. This is
+  weighted-tip travel from the first accepted contact, not distance from the
+  enemy.
+- `Live Speed / Fast Enough`: read-only feedback from the exact physical frame
+  used by contact qualification, not the Retail seed-gesture meter.
+- `Hit State`: read-only `READY` or `LATCHED` feedback. While latched it
+  shows whether travel is complete and the low-speed reset count from 0/3 to
+  3/3.
+
+A fixed per-pass set still accepts up to eight distinct targets and blocks
+repeat damage during one active swing. Reaching Rearm Travel while still fast
+does not clear that set. The release threshold is half Hit Speed, capped at
+2.00 m/s and kept below the hit threshold; three consecutive samples at or
+below it complete the reset. Impact energy is telemetry-only. Settings persist
+per Retail weapon index with version-one migration. Automated checks pass 19/19
+x86 and 15/15 x64. The speed gate and original menu are live-accepted; the new
+swing-end reset is automated-tested and awaiting headset acceptance. VR Tools
+blocks damage while open, so adjust values, observe the indicators, then close
+the menu before testing a hit.
+
+### Pipe contact lifecycle findings (2026-08-08)
+
+- Flatscreen collisions were reaching the hook but were suppressed when the
+  wall-proxy option was merely enabled without a fresh VR frame. The dispatcher
+  now passes straight through to Retail unless the VR proxy is actually active;
+  flatscreen enemy damage was confirmed working in-headset testing.
+- A Retail attack seeds the reusable weapon collision body. It does not lend
+  its animation damage window to later physical contacts. Amber means no body;
+  green means the seeded body exists and continues receiving contacts.
+- The first physical enemy overlap damaged correctly, but subsequent useful
+  contacts stopped until opening the tool menu and reseeding. Logs showed every
+  retained-target cleanup attempt failing with
+  `retail_target_latch_released=0`.
+- The collision callback is asynchronous relative to the collision-update
+  hook, so its thread-local `activeCollisionRecord` is no longer available at
+  callback time. The first controller-relative fix correctly recovered the
+  persistent `+0x60`/`+0xC0` callback slots, but incorrectly treated each slot
+  as one `LTObjRef`.
+- Live run `run-20260807-162549` falsified that interpretation. One accepted
+  callback reported a clear, then the same object produced two
+  `contact_latched` callbacks 23--27 ms later whose cleanup raised access
+  exceptions. The accepted callback was forwarded once and a 0.12 m rearm was
+  observed, but no actor-candidate contact or second accepted dispatch occurred.
+- Verified disassembly then established the missing container layer. The
+  callback constructs a 16-byte `LTObjRef`, pushes it into the vector at
+  collision-record `+0x48` (live controller slot `+0x60`), destroys the local
+  copy, and passes the vector header to the dispatcher. The header fields at
+  `+4/+8/+C` are begin/end/capacity. The apparent first clear had therefore
+  invoked the element reset routine on the vector header and corrupted it;
+  the two later exceptions were consequences of that corruption.
+- The current implementation verifies the callback's vector setup, exact
+  push-back call target, 16-byte element layout, native dispatcher call, and
+  element reset routine. It accepts only bounded aligned begin/end/capacity
+  spans, resets every live `LTObjRef`, then rewinds vector end to begin. This
+  cleanup runs after accepted dispatches and rejected duplicates, while the
+  mod-owned per-target latch remains the sole damage de-duplicator.
+- The vector-span guards, per-target lifecycle, overlap-only path, and capsule
+  distance math pass all automated checks: 19/19 x86 and 15/15 x64. The
+  live-tested loader SHA-256 is
+  `27CC43313B1E88188685BE5A0763B98C4DB6C9AAE418526531081C6CCFB38655`.
+- Live run `run-20260808-060131` reached `repeated_contact_observed`: the first
+  512 callbacks contained 42 accepted contacts, 40 native forwards, 470
+  blocked held-overlap duplicates, 510 released references, repeated 0.12 m
+  rearms, and zero vector failures. This validates the corrected container
+  cleanup and continued callback lifecycle. It does not yet prove repeatable
+  visible enemy damage because all captured targets were classified as
+  world/prop.
+- That run also live-validated the distance fields. Accepted contact gaps were
+  0.1728--0.9229 m outside the configured pipe capsule; the latest captured
+  point was 0.5834 m outside. This is strong evidence that the seeded Retail
+  collision body's transform or shape does not match the configured/drawn pipe
+  capsule. Preserve a deliberate enemy-contact sample before changing geometry.
+- Held-overlap spam exhausted that run's 512-record logging cap. The current
+  staged build keeps verbose records bounded but continues emitting compact
+  diagnostics for every later accepted contact and any vector-cleanup failure.
+  Its SHA-256 is
+  `1F9FF7913B953E93E6AA1E6AAFB747022E2DC81938F5C3FEDC9B6410E53F0F45`.
+- Live run `run-20260808-062240` verified that accepted contacts continue after
+  the verbose cap. It captured seven targets and 1,035 successful reference
+  clears with zero failures. Actor-candidate target `0x38CE54F0` produced five
+  accepted/native-forwarded contacts, all with vector state `cleared`; their
+  capsule gaps were 0.1403--0.8869 m. This proves that Retail's larger native
+  shape reaches enemy contacts well before the configured capsule. The headset
+  tester also confirmed that the pipe visibly hit and defeated enemies in this
+  run, proving repeat damage after one seed. Later configured-capsule gating,
+  rather than visual retuning, owns the distance correction.
+- The subsequent live-alignment stage is SHA-256
+  `35D79A9B96BE2018864197CE4CDD2550A4EC1A5764A79D4FB23593ABE8586E13`.
+  It passes 19/19 x86 and 15/15 x64 tests, and the external sender produced the
+  exact bounded command and matched its applied revision in disposable runtime
+  fixtures. Launch attempts `run-20260808-065304` and `run-20260808-065448`
+  timed out safely while VDXR was not visible. With Virtual Desktop active,
+  `run-20260808-072314` reached focused gameplay and selected pipe index 32 at
+  persisted collider values `(0,12,10)`, rotation `(-50,0,0)`, length 40,
+  radius 4.5, forward. External revision `639217706402833475` changed local X
+  to 5 and the game acknowledged those exact values without a restart. The
+  Retail seed briefly dropped immediately before the save, then the same
+  collision object `0x38FBFF68` returned green; event order therefore does not
+  implicate the command. Contacts continued afterward, reaching 580 callbacks,
+  106 accepted/native-forwarded contacts, 106 rearms, three targets and zero
+  reference failures. This live-accepts the command bridge.
+- The later revision `639217707924647700` reverted the temporary probe. The
+  headset tester confirmed the configured wireframe itself was already correct,
+  so visual alignment was ruled out as the distance fault.
+- Verified Retail disassembly explains the positive gaps. Collision creation at
+  `GameOrig+0x0001FE30` reads `CollisionRadiusScale`, `Radius`,
+  `LengthDown`, and `LengthUp` and constructs a native primitive. Update
+  code at `GameOrig+0x0001FC00` only applies a transform to that existing
+  object. The VR transform hook moves the native database-sized shape to the
+  weapon endpoint, while the green wireframe is separately derived from the
+  configured base, tip, and radius. The drawing was never the physics shape.
+- The configured-capsule gate now measures the callback's verified target
+  surface point and rejects gaps above 0.01 m before per-target de-duplication.
+  Invalid points fail closed, and rejected callbacks still release Retail's
+  reference vector. Automated tests prove that a far callback does not latch the
+  target and that the same target is accepted on a later real overlap. The
+  tested/staged loader SHA-256 is
+  `5CF2BCEADEDA6F236BC6BB28A9389B8658FA029C9E2D34D53DF363956C5E75CE`;
+  19/19 x86 and 15/15 x64 tests pass.
+- Live run `run-20260808-074159` immediately rejected its first 512 distant
+  wall callbacks as `outside_configured_collider`, with zero accepts/forwards,
+  512 clean vector clears, and 0.575--0.839 m gaps. The headset tester then
+  moved the drawn collider through enemies. A 40-second poll produced no later
+  callback; the count stayed frozen at 512. This proves callback gating cannot
+  recover true overlap after Retail's oversized body makes its single early
+  notification.
+- The native-body replacement is now live-accepted. During local-player pipe
+  creation only, a guarded database reader supplies `LengthUp=0`,
+  `LengthDown=distance(base,tip)`, and the configured radius. The body transform
+  maps Retail's local +Y capsule from configured base to tip. Exact constructor
+  callsites, property addresses, runtime vtable slot `0x80`, and the reader's
+  50-byte body are verified before hooking; every other read retains its Retail
+  value.
+- Staged loader SHA-256
+  `9EE61E2E817F69ED96F59B493A07F83C793E5F5050C88D31CC90534BD44935FD`
+  passes 19/19 x86 and 15/15 x64 checks. In `run-20260808-082609`, the seed
+  reported `read_mask=0x7`, length 10.0 units, and radius 2.5 units. The
+  confirmation snapshot contained 574 callbacks, 126 accepted/forwarded
+  contacts, 338 duplicates, 126 rearms, seven targets, and 574 clean reference
+  clears with zero failures. Two actor candidates produced ten actor-classified
+  accepted forwards; their maximum accepted surface gap was 0.0095 m.
+- The headset tester confirmed that the aligned pipe works against enemies.
+  Native pipe alignment and visible overlap-only damage are therefore live.
+- Live run `run-20260808-165819` accepted the configurable physical-hit menu
+  and speed gate. The final pipe record used Require Swing on, Hit Speed
+  7.25 m/s, and Rearm Distance 0.12 m. Its 522 compact contact records split
+  cleanly at the threshold: 446 `swing_not_qualified` samples topped out at
+  7.189 m/s, while 16 accepted/native-forwarded damage dispatches began at
+  7.256 m/s and reached 13.865 m/s. It also recorded 26 held-overlap
+  duplicates, 34 outside-collider rejections, 16 rearms, four targets, 522
+  clean reference-vector clears, and zero failures. The tester reported that
+  speed works and the menu is good. Alternate Rearm Distance values were not
+  separately feel-tuned in that run.
+
+- Live run `run-20260809-035231` falsified distance-only rearming rather than
+  finding a stable distance. At Hit Speed 7.25 m/s, 0.20 m produced
+  double/triple same-target forwards; 0.30 m produced a double; and 0.35 m
+  produced a triple plus a double. The first 0.40 m three-strike pass was clean,
+  but a later hard follow-through re-hit the same target seven tracking samples
+  after rearm. At the 1.00 m maximum, a multi-target pass still re-hit the same
+  actor 16 samples later. The weighted tip can cover those distances during one
+  8--10 m/s swing, so displacement alone cannot identify a new attack.
+- The first replacement lifecycle kept accepted targets latched throughout
+  continuous fast motion. Once Rearm Travel had been reached, three consecutive
+  samples below the derived release speed were required before the target set
+  cleared. Any renewed speed reset the partial 1/3 or 2/3 dwell.
+- Live run `run-20260809-065827` exercised that build at Rearm Travel 1.00 m,
+  not the requested 0.12 m. It recorded 564 callbacks, 66 accepted/native
+  forwards, 155 blocked latched callbacks, 113 outside-collider callbacks, 230
+  slow callbacks, 55 completed rearms, 12 object pointers, 564 clean Retail
+  reference releases, and zero cleanup failures. Every rearm completed at
+  `3/3`, no faster than 1.902 m/s against the 2.00 m/s release threshold. Seven
+  completed swings accepted two or three distinct object pointers, proving the
+  multi-target state path without requiring an intentional two-enemy sweep.
+- Automatic replay also found two violations: the same object pointer was
+  accepted twice before a `swing_completed` event. The object stayed constant
+  while its target node changed. Source audit found that a transient invalid
+  kinematic sweep silently called `ResetPhysicalMeleeContactState`; that was the
+  only unlogged reset path between those callbacks.
+- The corrected lifecycle fails closed on a transient invalid sweep. It keeps
+  the target set latched, resets partial release dwell to zero, and emits
+  `m5_physical_melee_contact_latch_held`. Explicit tracking loss and profile
+  changes remain valid full resets. Automated regression now covers the 1.06 m
+  fast follow-through, multiple targets, three-sample release, speed jitter,
+  and an invalid sweep arriving during a 2/3 release dwell. Both x86 and x64
+  suites pass.
+- Live confirmation `run-20260809-095447` used Hit Speed 7.25 m/s and the
+  intended Rearm Travel 0.12 m. Six contacts were accepted/native-forwarded,
+  34 same-swing callbacks were blocked, all six rearms completed at `3/3` no
+  faster than 1.741 m/s against the 2.00 m/s release threshold, and all 60
+  Retail reference vectors were released without failure. The watcher reported
+  zero `SameTargetAcceptedBeforeRearm`, so the corrected user-facing Pipe
+  lifecycle passes live.
+- Three invalid-frame callbacks in that confirmation occurred only after an
+  earlier swing had already rearmed. `InvalidSampleLatchHolds` was therefore
+  zero: the transient fail-closed branch remains regression-proven rather than
+  naturally observed live. This caveat does not erase the clean repeated-swing
+  acceptance, but it must remain explicit in later evidence.
+- The local pipe record now persists Rearm Travel 0.12 m and Hit Speed
+  7.25 m/s.
+
+### Live weapon diagnostics
+
+`-WeaponTest Pipe` now starts a hidden diagnostics watcher after the verified
+run report is written. The game emits compact `m5_weapon_test_collider_state`
+and `m5_weapon_test_contact` events; the watcher turns them into these files in
+the session's `stage/condemned-m2-mono/logs/run-*` directory:
+
+- `weapon-diagnostics-live.json`: atomic current-state snapshot intended for a
+  developer or Codex to poll during headset testing.
+- `weapon-diagnostics-events.jsonl`: concise chronological collider, contact,
+  rearm and tracking stream.
+
+Schema-v3 snapshots expose the current phase and recommendation, pipe identity,
+seeded collision object, last target/node, actor-candidate classification,
+accepted/duplicate/native-forward counts, Retail reference-vector clears and
+released element counts, rearm count, invalid-sample latch holds, distinct
+targets and the last 24 events. The watcher now computes
+`SameTargetAcceptedBeforeRearm` and completed multi-target swing counts directly.
+Any same-target reaccept adds a warning, makes the snapshot unhealthy, and sets
+phase `same_target_reaccepted_before_rearm`. Rearm events identify
+`reason=swing_completed` and carry actual/current and maximum tip displacement,
+configured travel, current and release speed, and the completed release-sample
+count. `contact_latch_held` events record transient invalid samples that were
+prevented from clearing the target latch.
+They also expose the per-run alignment command path, the last game-acknowledged
+position/rotation/length/radius/direction and revision, plus any command
+rejection and the applied/rejected counters.
+Important phases include `awaiting_seed`, `ready_waiting_for_contact`,
+`first_contact_observed`, `repeated_contact_observed`, `contacts_rejected`, and
+`retail_reference_vector_failure`, plus the invariant-failure phase above.
+
+Every compact contact also records the configured weapon capsule's distance to
+Retail's target contact point: tip-to-contact, closest axis-to-contact, capsule
+radius, capsule surface gap, and the closest-point fraction along the weapon
+axis. A gap at or below zero means the reported target contact lies on/inside
+the configured capsule; a positive gap measures the mismatch in metres. This
+uses the collision callback's actual target surface point rather than a model
+origin, which can be far from the struck body part. It also avoids making a new
+engine transform call from the collision callback thread.
+
+The watcher exits with the game and leaves a final snapshot. The loader source
+is shared and reset by the next launch, so `-Run <run-name> -Once` can rebuild a
+completed session only before another launch replaces that source. The derived
+per-run snapshot and event stream are the durable records; do not claim a later
+replay is archival evidence.
+For a read-only human summary use
+`tools/read-condemned-weapon-diagnostics.ps1`; pass `-Json` to return the
+unchanged snapshot for Codex or another tool.
+
+The Pipe preset gives only its child game process a unique
+`weapon-alignment-command.txt` path. The loader polls that file at most 10 Hz
+and accepts only a rigid versioned line with a newer revision, the exact current
+process ID, active weapon index, finite settings and the existing Collider-tab
+bounds. Malformed, stale, cross-process and wrong-weapon commands fail closed.
+
+Codex or a developer can change the running game's collider from another
+terminal while the tester keeps moving in headset:
+
+```powershell
+.\tools\set-condemned-weapon-collider.ps1 -DeltaPositionX 1
+.\tools\set-condemned-weapon-collider.ps1 -RotationX -45 -Length 42
+.\tools\set-condemned-weapon-collider.ps1 -Direction Reverse
+```
+
+Unspecified fields are based on the last game-acknowledged snapshot, so absolute
+and delta edits compose safely. The tool writes atomically and waits for the
+matching applied or rejected revision. Accepted values update the collision
+proxy and wireframe on the next tracking sample and use the existing per-weapon
+settings persistence; they do not require a restart or another Retail seed.
+
+End-to-end validation on run `run-20260807-162549` confirmed that the launcher
+started the hidden watcher and both diagnostic files updated while the game was
+running. It first reported the fire axe at Retail index 17 with an amber body;
+after equipping/seeding the pipe it recorded a green body, three callbacks for
+one world/prop-classified target, one accepted/native-forwarded dispatch, two
+blocked duplicates, and one 0.12 m rearm. The final two cleanup exceptions
+directly exposed the vector-header bug described above. This proves the live
+game-to-investigator channel and the old implementation's failure; the
+corrected element-wise vector cleanup and new distance fields were then live
+verified by `run-20260808-060131`. That second run produced repeated accepted
+callbacks and zero vector failures, while its positive 0.1728--0.9229 m contact
+gaps exposed Retail's larger database-sized native shape. The later
+`run-20260808-062240` captured five clean actor-candidate forwards and the
+headset tester confirmed visible pipe hits and enemy defeats. Repeat damage is
+therefore live. Run `run-20260808-074159` proves the configured-capsule gate
+blocks the old distant wall range, then proves the oversized native body emits
+no later callback when the accepted wireframe enters an enemy. Run
+`run-20260808-082609` closes that gap: the scoped native constructor override
+reported `read_mask=0x7`, actor contacts stayed within 0.0095 m of the configured
+surface, and the headset tester confirmed that the aligned pipe works against
+enemies.
+
+
+Retail continues to own target validity, material effects, difficulty rules,
+and final damage.
+
+The rest of the pipe acceptance pass covers right-hand ownership and alignment,
+weighted one-hand follow, right-arm/socket placement, visual and wall-proxy
+motion, and safe reset on menus, tracking loss, recenter, focus loss, and
+weapon changes. Rejected local-player contacts stay blocked; enemy and
+unrecognised Retail melee continue through the original path. Two-hand behavior
+remains available only for profiles that explicitly enable a secondary grip.
 
 ## Two-hand axe interaction slice
 
@@ -211,14 +628,16 @@ The VR tool menu's **2-Hand** tab edits the per-weapon support offset and grab
 radius. Place the cyan left-controller grip where the hand should sit on the
 visible handle and activate **Capture Current Left Hand Pose**; the offset is
 computed in the dominant right-hand aim frame and updates immediately. Reset
-restores the profile values, and **Log Two Hand Snapshot** emits the primary
-and secondary profile-ready values together. After closing the menu, release
-the left grip once, place it on the handle, and squeeze to attach.
+restores and saves the profile values, and **Save Two Hand Snapshot** writes
+the combined primary/secondary record and emits the profile-ready values.
+After closing the menu, release the left grip once, place it on the handle,
+and squeeze to attach.
 
 The accepted fire-axe support offset from the 2026-08-04 headset run is
 `{3.114, -30.258, -14.828}` LithTech units with a 0.15-metre grab radius.
-It is now the stable profile starting point. Further live changes remain
-session-local until another tested snapshot is deliberately promoted.
+It remains the stable profile starting point. Further live changes persist as
+per-weapon overrides; deliberately promoting a tested value into profile data
+is still a separate source change.
 
 This follows the common XR interaction pattern of allowing multiple selecting
 interactors on one held object while retaining an explicit movement/velocity
@@ -421,12 +840,14 @@ The menu has ten tabs:
   `%LOCALAPPDATA%\\CondemnedVR\\weapon-settings.ini`; profile identity is
   stored with each record so stale values fail closed if a mapping changes.
 - **Grip:** adjust the equipped model's local XYZ position and rotation,
-  adjustment step, reset, and log a profile snapshot. This tab requires the
-  `-WeaponGripCalibration` launch option and shows the controller wireframe.
+  adjustment step, reset, and save a grip snapshot. Adjustments and reset
+  auto-save the equipped Retail weapon's `grip` record. This tab requires
+  the `-WeaponGripCalibration` launch option and shows the controller
+  wireframe.
 - **2-Hand:** enable the profile's support grip, edit its local offset and grab
-  radius, capture the current left-hand pose, reset, and log a combined
-  profile snapshot. Live attachment distance/error remains visible on the
-  tab.
+  radius, capture the current left-hand pose, reset, and save a combined
+  snapshot in the same `grip` record. All changes auto-save. Live attachment
+  distance/error remains visible on the tab.
 - **Hand IK:** adjust the rendered dominant hand's per-weapon local XYZ socket
   target and pitch/yaw/roll while seeing the result immediately. The tab has
   independent fine/coarse steps, zero-offset reset, callback status, and a
@@ -453,10 +874,12 @@ The menu has ten tabs:
 Use the left/right triggers to change tabs, left-stick up/down to choose a row,
 right-stick left/right to change a value, A to activate a row, and B to close.
 The keyboard equivalents are left/right square brackets, arrow keys, Enter,
-and F12. All values take effect immediately. Melee, Weapon, Hand IK, Left IK,
-and Elbow values are persisted automatically; the existing Grip and 2-Hand setup
-snapshots remain the path for deliberately promoting tested model/profile
-values.
+and F12. All values take effect immediately. Melee, Weapon, Grip, 2-Hand, Hand
+IK, Left IK, and Elbow menu values are persisted automatically. The Grip and
+2-Hand snapshot rows force an additional save and diagnostic snapshot. The
+continuous fallback calibration path uses controller Y or keyboard P to avoid
+writing on every tracking sample. Promoting a tested override into authored
+profile data remains a deliberate source change.
 
 The cyan `EQUIPPED ... INDEX ...` banner identifies exactly which weapon is
 being edited. Settings use the stable Retail weapon index rather than runtime
@@ -509,7 +932,7 @@ contact energy rather than the current render-pose approximation.
 
 ## Fire-axe swing attack bridge
 
-Until native physical-contact damage is enabled, the fire axe uses its
+The fire axe continues to use its
 tracking-space hand/endpoint sweep speed to request Retail's ordinary
 Fire/attack command 17. Keeping this meter in OpenXR tracking space excludes
 Retail locomotion and turning from the gesture. While the support grip is
@@ -521,17 +944,22 @@ repeated attacks from one continuous fast motion.
 The right trigger remains available and is merged with this pulse through the
 same verified binding-value hook.
 
-This is deliberately a transitional adapter, not the final damage authority.
-It does not claim a hit merely because the swing was fast: Retail still owns
-the attack animation and its existing attack/collision window, while native
-physical impact dispatch remains blocked. The adapter is enabled only for the
-explicitly mapped fire-axe and provisional `pipe_lever` profiles. Tracking
-loss, an invalid sweep, menus, focus loss,
-weapon changes, stale input, and captured grip-calibration controls cancel the
-pulse and reset its latch. Each accepted gesture is logged as
+For the fire axe, this remains a transitional adapter rather than damage
+authority. A fast swing requests an attack, but Retail still owns the attack
+animation and collision window, and physical impact dispatch remains blocked.
+
+The pipe preset retains the same pulse as a collision-seed and compatibility
+bridge. After Retail's verified collision body exists, the separate pipe-only
+contact gate checks it continuously and does not use animation or pulse timing
+to decide damage.
+
+For both profiles, tracking loss, an invalid sweep, menus, focus loss, weapon
+changes, stale input, and captured grip-calibration controls cancel the pulse
+and reset its latch. Each accepted gesture is logged as
 `m5_physical_melee_swing_attack_triggered` with the measured speed and timing
 parameters.
 
 The 3.00 m/s value replaces the initial, over-sensitive 1.80 m/s test value.
-It can be adjusted live from 0.50 to 10.00 m/s in the menu's Melee tab without
-restarting the game.
+Its legacy trigger/rearm/pulse/cooldown values remain persisted for the
+temporary seed and fire-axe bridges, but are intentionally no longer exposed
+as the main Melee tab. That tab now owns only physical contact behavior.

@@ -8,6 +8,7 @@
 
 #include "weapon_settings_store.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -16,7 +17,9 @@
 namespace condemnedvr {
 namespace {
 
-constexpr unsigned int kWeaponSettingsFormatVersion = 1U;
+constexpr unsigned int kWeaponSettingsFormatVersion = 2U;
+constexpr unsigned int kColliderSettingsFormatVersion = 1U;
+constexpr unsigned int kGripSettingsFormatVersion = 1U;
 constexpr unsigned int kRightHandIkSettingsFormatVersion = 1U;
 constexpr unsigned int kArmIkTuningFormatVersion = 2U;
 constexpr wchar_t kSettingsPathOverride[] =
@@ -86,6 +89,47 @@ bool FormatWeaponSection(
             static_cast<long>(weaponIndex)) > 0;
 }
 
+bool WeaponGripSettingsAreValid(
+    const WeaponGripSettings& settings) noexcept {
+    constexpr float kMaximumPositionUnits = 300.0F;
+    constexpr float kMinimumSecondaryLengthUnits = 5.0F;
+    constexpr float kMaximumSecondaryLengthUnits = 300.0F;
+    constexpr float kMinimumGrabRadiusMeters = 0.05F;
+    constexpr float kMaximumGrabRadiusMeters = 0.50F;
+    const float secondaryLengthSquared =
+        settings.secondaryGripOffsetUnits.x *
+            settings.secondaryGripOffsetUnits.x +
+        settings.secondaryGripOffsetUnits.y *
+            settings.secondaryGripOffsetUnits.y +
+        settings.secondaryGripOffsetUnits.z *
+            settings.secondaryGripOffsetUnits.z;
+    return fearvr::IsFinite(settings.positionUnits) &&
+        fearvr::IsFinite(settings.localRotationDegrees) &&
+        fearvr::IsFinite(settings.secondaryGripOffsetUnits) &&
+        std::isfinite(settings.secondaryGripGrabRadiusMeters) &&
+        std::isfinite(secondaryLengthSquared) &&
+        std::fabs(settings.positionUnits.x) <= kMaximumPositionUnits &&
+        std::fabs(settings.positionUnits.y) <= kMaximumPositionUnits &&
+        std::fabs(settings.positionUnits.z) <= kMaximumPositionUnits &&
+        settings.localRotationDegrees.x >= -180.0F &&
+        settings.localRotationDegrees.x <= 180.0F &&
+        settings.localRotationDegrees.y >= -180.0F &&
+        settings.localRotationDegrees.y <= 180.0F &&
+        settings.localRotationDegrees.z >= -180.0F &&
+        settings.localRotationDegrees.z <= 180.0F &&
+        secondaryLengthSquared <=
+            kMaximumSecondaryLengthUnits *
+                kMaximumSecondaryLengthUnits &&
+        (!settings.secondaryGripEnabled ||
+         secondaryLengthSquared >=
+             kMinimumSecondaryLengthUnits *
+                 kMinimumSecondaryLengthUnits) &&
+        settings.secondaryGripGrabRadiusMeters >=
+            kMinimumGrabRadiusMeters &&
+        settings.secondaryGripGrabRadiusMeters <=
+            kMaximumGrabRadiusMeters;
+}
+
 } // namespace
 
 WeaponSettingsStoreResult LoadWeaponToolSettings(
@@ -117,27 +161,37 @@ WeaponSettingsStoreResult LoadWeaponToolSettings(
     unsigned int version = 0U;
     unsigned int profileId = 0U;
     unsigned int swingEnabled = 0U;
+    unsigned int requireSwing = 1U;
     unsigned long pulseMilliseconds = 0UL;
     unsigned long cooldownMilliseconds = 0UL;
     ToolMenuMeleeSettings loaded{};
     const int fields = swscanf_s(
         value,
-        L"%u,%u,%u,%f,%f,%lu,%lu,%f,%f,%f,%f,%f,%f",
+        L"%u,%u,%u,%f,%f,%lu,%lu,%f,%f,%f,%f,%f,%f,%u,%f,%f",
         &version, &profileId, &swingEnabled,
         &loaded.swingTriggerSpeedMetersPerSecond,
         &loaded.swingRearmSpeedMetersPerSecond,
         &pulseMilliseconds, &cooldownMilliseconds,
         &loaded.massKilograms, &loaded.handlingWeight,
         &loaded.positionalFollow, &loaded.rotationalFollow,
-        &loaded.catchUpStrength, &loaded.dampingRatio);
-    if (fields != 13 || version != kWeaponSettingsFormatVersion ||
-        swingEnabled > 1U || pulseMilliseconds > UINT32_MAX ||
-        cooldownMilliseconds > UINT32_MAX) {
+        &loaded.catchUpStrength, &loaded.dampingRatio,
+        &requireSwing,
+        &loaded.hitSpeedMetersPerSecond,
+        &loaded.contactRearmDistanceMeters);
+    const bool versionOne = version == 1U && fields == 13;
+    const bool versionTwo =
+        version == kWeaponSettingsFormatVersion && fields == 16;
+    if ((!versionOne && !versionTwo) || swingEnabled > 1U ||
+        pulseMilliseconds > UINT32_MAX ||
+        cooldownMilliseconds > UINT32_MAX ||
+        (versionTwo && requireSwing > 1U)) {
         return WeaponSettingsStoreResult::ParseFailed;
     }
     if (profileId != static_cast<unsigned int>(expectedProfileId)) {
         return WeaponSettingsStoreResult::ProfileMismatch;
     }
+    loaded.requireSwingForContactDamage =
+        versionTwo ? requireSwing != 0U : true;
     loaded.swingAttackEnabled = swingEnabled != 0U;
     loaded.swingPulseMilliseconds =
         static_cast<std::uint32_t>(pulseMilliseconds);
@@ -167,7 +221,7 @@ WeaponSettingsStoreResult SaveWeaponToolSettings(
     wchar_t value[512]{};
     const int length = swprintf_s(
         value,
-        L"%u,%u,%u,%.9g,%.9g,%lu,%lu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+        L"%u,%u,%u,%.9g,%.9g,%lu,%lu,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,%.9g,%.9g",
         kWeaponSettingsFormatVersion,
         static_cast<unsigned int>(profileId),
         settings.swingAttackEnabled ? 1U : 0U,
@@ -182,13 +236,207 @@ WeaponSettingsStoreResult SaveWeaponToolSettings(
         static_cast<double>(settings.positionalFollow),
         static_cast<double>(settings.rotationalFollow),
         static_cast<double>(settings.catchUpStrength),
-        static_cast<double>(settings.dampingRatio));
+        static_cast<double>(settings.dampingRatio),
+        settings.requireSwingForContactDamage ? 1U : 0U,
+        static_cast<double>(settings.hitSpeedMetersPerSecond),
+        static_cast<double>(settings.contactRearmDistanceMeters));
     if (length <= 0 ||
         static_cast<std::size_t>(length) >= std::size(value)) {
         return WeaponSettingsStoreResult::WriteFailed;
     }
     return WritePrivateProfileStringW(
                section, L"settings", value, path)
+        ? WeaponSettingsStoreResult::Ok
+        : WeaponSettingsStoreResult::WriteFailed;
+}
+
+WeaponSettingsStoreResult LoadWeaponColliderSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuColliderSettings& settings) noexcept {
+    if (weaponIndex < 0) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[256]{};
+    const DWORD length = GetPrivateProfileStringW(
+        section, L"collider", L"", value,
+        static_cast<DWORD>(std::size(value)), path);
+    if (length == 0U) {
+        return WeaponSettingsStoreResult::NotFound;
+    }
+    if (length >= std::size(value) - 1U) {
+        return WeaponSettingsStoreResult::ReadFailed;
+    }
+
+    unsigned int version = 0U;
+    unsigned int profileId = 0U;
+    unsigned int reversed = 0U;
+    ToolMenuColliderSettings loaded{};
+    const int fields = swscanf_s(
+        value, L"%u,%u,%f,%f,%f,%f,%f,%f,%f,%f,%u",
+        &version, &profileId,
+        &loaded.positionOffsetUnits.x,
+        &loaded.positionOffsetUnits.y,
+        &loaded.positionOffsetUnits.z,
+        &loaded.rotationOffsetDegrees.x,
+        &loaded.rotationOffsetDegrees.y,
+        &loaded.rotationOffsetDegrees.z,
+        &loaded.lengthUnits, &loaded.radiusUnits, &reversed);
+    if (fields != 11 ||
+        version != kColliderSettingsFormatVersion ||
+        reversed > 1U) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    if (profileId != static_cast<unsigned int>(expectedProfileId)) {
+        return WeaponSettingsStoreResult::ProfileMismatch;
+    }
+    loaded.reversed = reversed != 0U;
+    if (!ToolMenuColliderSettingsAreValid(loaded)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    settings = loaded;
+    return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult SaveWeaponColliderSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId,
+    const ToolMenuColliderSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !ToolMenuColliderSettingsAreValid(settings)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[256]{};
+    const int length = swprintf_s(
+        value,
+        L"%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u",
+        kColliderSettingsFormatVersion,
+        static_cast<unsigned int>(profileId),
+        static_cast<double>(settings.positionOffsetUnits.x),
+        static_cast<double>(settings.positionOffsetUnits.y),
+        static_cast<double>(settings.positionOffsetUnits.z),
+        static_cast<double>(settings.rotationOffsetDegrees.x),
+        static_cast<double>(settings.rotationOffsetDegrees.y),
+        static_cast<double>(settings.rotationOffsetDegrees.z),
+        static_cast<double>(settings.lengthUnits),
+        static_cast<double>(settings.radiusUnits),
+        settings.reversed ? 1U : 0U);
+    if (length <= 0 ||
+        static_cast<std::size_t>(length) >= std::size(value)) {
+        return WeaponSettingsStoreResult::WriteFailed;
+    }
+    return WritePrivateProfileStringW(
+               section, L"collider", value, path)
+        ? WeaponSettingsStoreResult::Ok
+        : WeaponSettingsStoreResult::WriteFailed;
+}
+
+WeaponSettingsStoreResult LoadWeaponGripSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    WeaponGripSettings& settings) noexcept {
+    if (weaponIndex < 0) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[320]{};
+    const DWORD length = GetPrivateProfileStringW(
+        section, L"grip", L"", value,
+        static_cast<DWORD>(std::size(value)), path);
+    if (length == 0U) {
+        return WeaponSettingsStoreResult::NotFound;
+    }
+    if (length >= std::size(value) - 1U) {
+        return WeaponSettingsStoreResult::ReadFailed;
+    }
+
+    unsigned int version = 0U;
+    unsigned int profileId = 0U;
+    unsigned int secondaryEnabled = 0U;
+    WeaponGripSettings loaded{};
+    const int fields = swscanf_s(
+        value,
+        L"%u,%u,%f,%f,%f,%f,%f,%f,%u,%f,%f,%f,%f",
+        &version, &profileId,
+        &loaded.positionUnits.x,
+        &loaded.positionUnits.y,
+        &loaded.positionUnits.z,
+        &loaded.localRotationDegrees.x,
+        &loaded.localRotationDegrees.y,
+        &loaded.localRotationDegrees.z,
+        &secondaryEnabled,
+        &loaded.secondaryGripOffsetUnits.x,
+        &loaded.secondaryGripOffsetUnits.y,
+        &loaded.secondaryGripOffsetUnits.z,
+        &loaded.secondaryGripGrabRadiusMeters);
+    if (fields != 13 || version != kGripSettingsFormatVersion ||
+        secondaryEnabled > 1U) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    if (profileId != static_cast<unsigned int>(expectedProfileId)) {
+        return WeaponSettingsStoreResult::ProfileMismatch;
+    }
+    loaded.secondaryGripEnabled = secondaryEnabled != 0U;
+    if (!WeaponGripSettingsAreValid(loaded)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    settings = loaded;
+    return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult SaveWeaponGripSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId,
+    const WeaponGripSettings& settings) noexcept {
+    if (weaponIndex < 0 || !WeaponGripSettingsAreValid(settings)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[320]{};
+    const int length = swprintf_s(
+        value,
+        L"%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,%.9g,%.9g,%.9g,%.9g",
+        kGripSettingsFormatVersion,
+        static_cast<unsigned int>(profileId),
+        static_cast<double>(settings.positionUnits.x),
+        static_cast<double>(settings.positionUnits.y),
+        static_cast<double>(settings.positionUnits.z),
+        static_cast<double>(settings.localRotationDegrees.x),
+        static_cast<double>(settings.localRotationDegrees.y),
+        static_cast<double>(settings.localRotationDegrees.z),
+        settings.secondaryGripEnabled ? 1U : 0U,
+        static_cast<double>(settings.secondaryGripOffsetUnits.x),
+        static_cast<double>(settings.secondaryGripOffsetUnits.y),
+        static_cast<double>(settings.secondaryGripOffsetUnits.z),
+        static_cast<double>(
+            settings.secondaryGripGrabRadiusMeters));
+    if (length <= 0 ||
+        static_cast<std::size_t>(length) >= std::size(value)) {
+        return WeaponSettingsStoreResult::WriteFailed;
+    }
+    return WritePrivateProfileStringW(section, L"grip", value, path)
         ? WeaponSettingsStoreResult::Ok
         : WeaponSettingsStoreResult::WriteFailed;
 }

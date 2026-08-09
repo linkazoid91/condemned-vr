@@ -73,6 +73,66 @@ bool FitsCompleteMenuOverlay(
 int main() {
     using namespace condemnedvr;
 
+    if (ToolMenuRowCount(ToolMenuTab::Melee) != 4U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Melee),
+            "MELEE") != 0) {
+        return Fail(
+            "physical-hit tuning must have four bounded Melee rows");
+    }
+
+    if (ToolMenuRowCount(ToolMenuTab::Collider) != 10U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Collider),
+            "COLLIDER") != 0) {
+        return Fail("collider setup must have a dedicated bounded menu tab");
+    }
+    LiveColliderAlignmentCommand liveCommand{};
+    const char* const validLiveCommand =
+        "version=1 revision=42 process_id=1234 weapon_index=32 "
+        "position_x=1.5 position_y=-2 position_z=3.25 "
+        "rotation_x=-50 rotation_y=10 rotation_z=180 "
+        "length=40 radius=4.5 reversed=1";
+    if (ParseLiveColliderAlignmentCommand(
+            validLiveCommand, liveCommand) !=
+            LiveColliderAlignmentCommandParseResult::Ok ||
+        liveCommand.revision != 42U ||
+        !LiveColliderAlignmentCommandMatchesTarget(
+            liveCommand, 1234U, 32) ||
+        LiveColliderAlignmentCommandMatchesTarget(
+            liveCommand, 1235U, 32) ||
+        !Near(liveCommand.settings.positionOffsetUnits.x, 1.5F) ||
+        !Near(liveCommand.settings.positionOffsetUnits.y, -2.0F) ||
+        !Near(liveCommand.settings.positionOffsetUnits.z, 3.25F) ||
+        !Near(liveCommand.settings.rotationOffsetDegrees.x, -50.0F) ||
+        !Near(liveCommand.settings.rotationOffsetDegrees.y, 10.0F) ||
+        !Near(liveCommand.settings.rotationOffsetDegrees.z, 180.0F) ||
+        !Near(liveCommand.settings.lengthUnits, 40.0F) ||
+        !Near(liveCommand.settings.radiusUnits, 4.5F) ||
+        !liveCommand.settings.reversed) {
+        return Fail(
+            "live collider commands must parse exact bounded session values");
+    }
+    if (ParseLiveColliderAlignmentCommand(
+            "version=1 revision=42 process_id=1234 weapon_index=32 "
+            "position_x=0 position_y=0 position_z=0 "
+            "rotation_x=0 rotation_y=0 rotation_z=0 "
+            "length=40 radius=4.5 reversed=0 trailing=junk",
+            liveCommand) !=
+            LiveColliderAlignmentCommandParseResult::Malformed ||
+        ParseLiveColliderAlignmentCommand(
+            "version=1 revision=42 process_id=1234 weapon_index=32 "
+            "position_x=0 position_y=0 position_z=0 "
+            "rotation_x=0 rotation_y=0 rotation_z=0 "
+            "length=251 radius=4.5 reversed=0",
+            liveCommand) !=
+            LiveColliderAlignmentCommandParseResult::InvalidValue ||
+        ParseLiveColliderAlignmentCommand(nullptr, liveCommand) !=
+            LiveColliderAlignmentCommandParseResult::Missing) {
+        return Fail(
+            "live collider commands must reject malformed or unsafe values");
+    }
+
     if (ToolMenuRowCount(ToolMenuTab::TwoHand) != 8U ||
         std::strcmp(
             ToolMenuTabName(ToolMenuTab::TwoHand),
@@ -181,6 +241,9 @@ int main() {
 
     ToolMenuMeleeSettings settings{};
     if (!ToolMenuMeleeSettingsAreValid(settings) ||
+        !settings.requireSwingForContactDamage ||
+        !Near(settings.hitSpeedMetersPerSecond, 1.25F) ||
+        !Near(settings.contactRearmDistanceMeters, 0.12F) ||
         !Near(settings.swingTriggerSpeedMetersPerSecond, 3.0F)) {
         return Fail("tool-menu melee defaults must be safe and valid");
     }
@@ -209,10 +272,16 @@ int main() {
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(
             kCondemnedFireAxeWeaponIndex);
     settings.swingTriggerSpeedMetersPerSecond = 4.25F;
+    settings.requireSwingForContactDamage = false;
+    settings.hitSpeedMetersPerSecond = 2.5F;
+    settings.contactRearmDistanceMeters = 0.20F;
     settings.massKilograms = 6.0F;
     settings.handlingWeight = 3.5F;
     ApplyToolMenuMeleeSettings(settings, axe);
-    if (!Near(axe.swingAttackTriggerSpeedMetersPerSecond, 4.25F) ||
+    if (axe.requireSwingForContactDamage ||
+        !Near(axe.minimumImpactSpeedMetersPerSecond, 2.5F) ||
+        !Near(axe.contactRearmSeparationMeters, 0.20F) ||
+        !Near(axe.swingAttackTriggerSpeedMetersPerSecond, 4.25F) ||
         !Near(axe.massKilograms, 6.0F) ||
         !Near(axe.handlingWeight, 3.5F)) {
         return Fail("live menu settings must update the axe profile");
@@ -223,11 +292,47 @@ int main() {
     if (pipe.id != PhysicalMeleeProfileId::Pipe ||
         !ToolMenuProfileSupportsSwingAttack(pipe.id) ||
         !ToolMenuMeleeSettingsFromProfile(pipe).swingAttackEnabled ||
-        std::strcmp(
-            ToolMenuWeaponProfileLabel(pipe.id), "PIPE") != 0) {
+        !ToolMenuMeleeSettingsFromProfile(pipe)
+             .requireSwingForContactDamage ||
+        !Near(ToolMenuMeleeSettingsFromProfile(pipe)
+                  .hitSpeedMetersPerSecond, 1.25F) ||
+        std::strcmp(ToolMenuWeaponProfileLabel(pipe.id), "PIPE") != 0) {
         return Fail(
             "pipe_lever must expose its independent one-hand tool profile");
     }
+    ToolMenuColliderSettings collider =
+        ToolMenuColliderSettingsFromProfile(pipe);
+    if (!ToolMenuColliderSettingsAreValid(collider) ||
+        !Near(collider.lengthUnits, 75.0F) ||
+        !Near(collider.radiusUnits, 4.0F) ||
+        collider.reversed) {
+        return Fail("pipe collider defaults must be editable and valid");
+    }
+    collider.positionOffsetUnits = {1.0F, 2.0F, 3.0F};
+    collider.rotationOffsetDegrees = {0.0F, 90.0F, 0.0F};
+    collider.lengthUnits = 80.0F;
+    collider.radiusUnits = 5.0F;
+    PhysicalMeleeProfile configuredPipe = pipe;
+    ApplyToolMenuColliderSettings(collider, configuredPipe);
+    if (!Near(configuredPipe.localBaseOffsetUnits.x, 1.0F) ||
+        !Near(configuredPipe.localBaseOffsetUnits.y, 2.0F) ||
+        !Near(configuredPipe.localBaseOffsetUnits.z, 3.0F) ||
+        !Near(configuredPipe.localTipOffsetUnits.x, 81.0F) ||
+        !Near(configuredPipe.localTipOffsetUnits.y, 2.0F) ||
+        !Near(configuredPipe.localTipOffsetUnits.z, 3.0F) ||
+        !Near(configuredPipe.radiusUnits, 5.0F)) {
+        return Fail("collider settings must resolve in controller-local space");
+    }
+    collider.reversed = true;
+    ApplyToolMenuColliderSettings(collider, configuredPipe);
+    if (!Near(configuredPipe.localTipOffsetUnits.x, -79.0F)) {
+        return Fail("collider direction toggle must reverse the capsule");
+    }
+    collider.lengthUnits = 0.0F;
+    if (ToolMenuColliderSettingsAreValid(collider)) {
+        return Fail("degenerate collider settings must fail closed");
+    }
+
     const PhysicalMeleeProfile plank =
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(
             kCondemned2x4WeaponIndices.front());
@@ -246,10 +351,23 @@ int main() {
     PhysicalMeleeProfile fallback{};
     ApplyToolMenuMeleeSettings(settings, fallback);
     if (fallback.swingAttackEnabled ||
+        fallback.requireSwingForContactDamage ||
+        !Near(fallback.minimumImpactSpeedMetersPerSecond, 2.5F) ||
+        !Near(fallback.contactRearmSeparationMeters, 0.20F) ||
         !Near(fallback.massKilograms, 6.0F)) {
         return Fail(
             "generic weapons may tune handling but must not arm swing attack");
     }
+    settings.hitSpeedMetersPerSecond = 0.24F;
+    if (ToolMenuMeleeSettingsAreValid(settings)) {
+        return Fail("out-of-range Hit Speed must fail closed");
+    }
+    settings.hitSpeedMetersPerSecond = 2.5F;
+    settings.contactRearmDistanceMeters = 0.01F;
+    if (ToolMenuMeleeSettingsAreValid(settings)) {
+        return Fail("out-of-range Rearm Distance must fail closed");
+    }
+    settings.contactRearmDistanceMeters = 0.20F;
     settings.swingRearmSpeedMetersPerSecond =
         settings.swingTriggerSpeedMetersPerSecond;
     if (ToolMenuMeleeSettingsAreValid(settings)) {
@@ -271,6 +389,8 @@ int main() {
     if (axeSlot == nullptr || genericSlot == nullptr ||
         axeSlot == genericSlot || !axeSlot->settings.swingAttackEnabled ||
         !Near(axeSlot->settings.massKilograms, 4.5F) ||
+        !Near(axeSlot->colliderSettings.lengthUnits, 82.0F) ||
+        !Near(genericSlot->colliderSettings.lengthUnits, 75.0F) ||
         genericSlot->settings.swingAttackEnabled ||
         !Near(genericSlot->settings.massKilograms, 1.5F)) {
         return Fail(
@@ -278,6 +398,7 @@ int main() {
     }
     axeSlot->settings.swingTriggerSpeedMetersPerSecond = 5.25F;
     axeSlot->rightHandIkSettings.positionOffsetUnits.x = 2.5F;
+    axeSlot->colliderSettings.reversed = true;
     genericSlot->settings.massKilograms = 2.75F;
     axeSlot = ResolveToolMenuWeaponSettingsSlot(
         registry, kCondemnedFireAxeWeaponIndex, catalogAxe);
@@ -287,8 +408,10 @@ int main() {
         !Near(axeSlot->settings.swingTriggerSpeedMetersPerSecond, 5.25F) ||
         !Near(axeSlot->settings.massKilograms, 4.5F) ||
         !Near(axeSlot->rightHandIkSettings.positionOffsetUnits.x, 2.5F) ||
+        !axeSlot->colliderSettings.reversed ||
         !Near(genericSlot->settings.massKilograms, 2.75F) ||
         !Near(genericSlot->rightHandIkSettings.positionOffsetUnits.x, 0.0F) ||
+        genericSlot->colliderSettings.reversed ||
         std::strcmp(
             ToolMenuWeaponProfileLabel(axeSlot->profileId),
             "FIRE AXE") != 0) {
@@ -368,7 +491,7 @@ int main() {
         "ROTATION Z                    -180.00 DEG",
         "ADJUSTMENT STEP               10.00",
         "RESET CURRENT GRIP",
-        "LOG PROFILE SNAPSHOT"};
+        "SAVE GRIP SNAPSHOT"};
     std::size_t completeVertexCount = 0U;
     if (!FitsCompleteMenuOverlay(
             gripRows, sizeof(gripRows) / sizeof(gripRows[0]),

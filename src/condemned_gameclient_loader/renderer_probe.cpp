@@ -20,6 +20,7 @@
 #include "arm_ik_integration.h"
 #include "binding_input.h"
 #include "condemned_calibration_gizmo.h"
+#include "condemned_physical_melee_collider_gizmo.h"
 #include "condemned_controller_input.h"
 #include "condemned_physical_melee.h"
 #include "head_tracking_math.h"
@@ -196,6 +197,9 @@ volatile LONG g_physicalMeleeVisualActiveLogged = 0;
 volatile LONG g_physicalMeleeVisualRestoreFailed = 0;
 volatile LONG g_weaponGripControllerGizmoActiveLogged = 0;
 volatile LONG g_weaponGripControllerGizmoFailureLogged = 0;
+volatile LONG g_physicalMeleeColliderPreviewLogged = 0;
+volatile LONG g_physicalMeleeColliderLiveLogged = 0;
+volatile LONG g_physicalMeleeColliderFailureLogged = 0;
 volatile LONG g_twoHandedMeleeEnabled = 0;
 volatile LONG g_physicalMeleeSecondaryGripAttached = 0;
 SRWLOCK g_physicalMeleeSecondaryGripTelemetryLock = SRWLOCK_INIT;
@@ -241,6 +245,18 @@ bool g_physicalMeleeWeightedPoseValid = false;
 volatile LONG g_physicalMeleeWeightActiveLogged = 0;
 SRWLOCK g_toolMenuSettingsLock = SRWLOCK_INIT;
 ToolMenuWeaponSettingsRegistry g_toolMenuWeaponSettingsRegistry{};
+constexpr wchar_t kLiveColliderCommandPathEnvironment[] =
+    L"CONDEMNEDVR_LIVE_COLLIDER_COMMAND_PATH";
+constexpr ULONGLONG kLiveColliderCommandPollMilliseconds = 100U;
+SRWLOCK g_liveColliderCommandLock = SRWLOCK_INIT;
+wchar_t g_liveColliderCommandPath[MAX_PATH]{};
+bool g_liveColliderCommandPathResolved = false;
+bool g_liveColliderCommandPathAvailable = false;
+FILETIME g_liveColliderCommandLastWriteTime{};
+ULONGLONG g_liveColliderCommandLastPollTick = 0U;
+std::uint64_t g_liveColliderCommandLastRevision = 0U;
+std::int32_t g_liveColliderCommandArmedWeaponIndex = -1;
+
 std::size_t g_rightHandIkCalibrationStepIndex = 2U;
 ToolMenuState g_toolMenuState{};
 ToolMenuOverlay g_toolMenuOverlay{};
@@ -659,7 +675,11 @@ std::int32_t FindOrCreateWeaponGripCalibrationSlot(
     void* modelObject,
     const fearvr::TrackingVector& basePosition,
     const fearvr::TrackingQuaternion& baseRotation,
-    const PhysicalMeleeProfile& profile) noexcept {
+    const PhysicalMeleeProfile& profile,
+    WeaponSettingsStoreResult& persistentLoadResult,
+    bool& persistentLoadAttempted) noexcept {
+    persistentLoadResult = WeaponSettingsStoreResult::NotFound;
+    persistentLoadAttempted = false;
     if (weaponIndex < 0) {
         return -1;
     }
@@ -699,6 +719,24 @@ std::int32_t FindOrCreateWeaponGripCalibrationSlot(
         profile.secondaryGripEnabled;
     slot.calibration.secondaryGripEnabled =
         profile.secondaryGripEnabled;
+    WeaponGripSettings persisted{};
+    persistentLoadAttempted = true;
+    persistentLoadResult = LoadWeaponGripSettings(
+        weaponIndex, profile.id, persisted);
+    if (persistentLoadResult == WeaponSettingsStoreResult::Ok) {
+        slot.calibration.positionUnits = persisted.positionUnits;
+        slot.calibration.localRotationDegrees =
+            persisted.localRotationDegrees;
+        slot.calibration.secondaryGripOffsetUnits =
+            persisted.secondaryGripOffsetUnits;
+        slot.calibration.secondaryGripGrabRadiusMeters =
+            persisted.secondaryGripGrabRadiusMeters;
+        // A persisted record may disable a supported secondary grip, but it
+        // must never enable one for a profile that has no authored anchor.
+        slot.calibration.secondaryGripEnabled =
+            profile.secondaryGripEnabled &&
+            persisted.secondaryGripEnabled;
+    }
     slot.lastUsed = ++g_weaponGripCalibrationUseSequence;
     slot.occupied = true;
     return static_cast<std::int32_t>(replacement);
@@ -794,6 +832,78 @@ void LogWeaponGripCalibrationState(
         calibration.secondaryGripOffsetUnits.z,
         calibration.secondaryGripGrabRadiusMeters);
     g_passThroughLog(event, detail);
+}
+
+bool PersistActiveWeaponGripCalibration(
+    const char* action) noexcept {
+    PhysicalMeleeGripCalibration calibration{};
+    void* weapon = nullptr;
+    void* modelObject = nullptr;
+    std::int32_t weaponIndex = -1;
+    std::uint64_t sourceGeneration = 0;
+    if (!CopyActiveWeaponGripCalibration(
+            calibration, weapon, weaponIndex, modelObject,
+            sourceGeneration)) {
+        if (g_passThroughLog != nullptr) {
+            char detail[192]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "action=%s result=no_active_weapon",
+                action != nullptr ? action : "unknown");
+            g_passThroughLog(
+                "m5_weapon_grip_settings_save_failed", detail);
+        }
+        return false;
+    }
+
+    WeaponGripSettings settings{};
+    settings.positionUnits = calibration.positionUnits;
+    settings.localRotationDegrees =
+        calibration.localRotationDegrees;
+    settings.secondaryGripOffsetUnits =
+        calibration.secondaryGripOffsetUnits;
+    settings.secondaryGripGrabRadiusMeters =
+        calibration.secondaryGripGrabRadiusMeters;
+    settings.secondaryGripEnabled =
+        calibration.secondaryGripEnabled;
+    const PhysicalMeleeProfile profile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    const WeaponSettingsStoreResult result =
+        SaveWeaponGripSettings(weaponIndex, profile.id, settings);
+    if (g_passThroughLog != nullptr) {
+        char detail[640]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "action=%s weapon_index=%ld profile=%s result=%s "
+            "source_generation=%llu position_units=(%.3f,%.3f,%.3f) "
+            "local_rotation_degrees=(%.3f,%.3f,%.3f) "
+            "secondary_enabled=%u "
+            "secondary_offset_units=(%.3f,%.3f,%.3f) "
+            "secondary_grab_radius_m=%.3f",
+            action != nullptr ? action : "unknown",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(profile.id),
+            WeaponSettingsStoreResultName(result),
+            static_cast<unsigned long long>(sourceGeneration),
+            settings.positionUnits.x, settings.positionUnits.y,
+            settings.positionUnits.z,
+            settings.localRotationDegrees.x,
+            settings.localRotationDegrees.y,
+            settings.localRotationDegrees.z,
+            settings.secondaryGripEnabled ? 1U : 0U,
+            settings.secondaryGripOffsetUnits.x,
+            settings.secondaryGripOffsetUnits.y,
+            settings.secondaryGripOffsetUnits.z,
+            settings.secondaryGripGrabRadiusMeters);
+        g_passThroughLog(
+            result == WeaponSettingsStoreResult::Ok
+                ? "m5_weapon_grip_settings_saved"
+                : "m5_weapon_grip_settings_save_failed",
+            detail);
+    }
+    // The live edit remains valid even if persistence fails. This return
+    // reports that an active calibration was available and save was attempted.
+    return true;
 }
 
 bool AdjustActiveWeaponGripCalibration(
@@ -1151,6 +1261,306 @@ bool StoreToolMenuMeleeSettings(
     return stored;
 }
 
+ToolMenuColliderSettings CopyToolMenuColliderSettings(
+    std::int32_t weaponIndex) noexcept {
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    ToolMenuColliderSettings settings =
+        ToolMenuColliderSettingsFromProfile(baseProfile);
+    if (weaponIndex < 0) {
+        return settings;
+    }
+    WeaponSettingsStoreResult loadResult =
+        WeaponSettingsStoreResult::NotFound;
+    bool loadAttempted = false;
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        if (!slot->colliderPersistentLoadAttempted) {
+            slot->colliderPersistentLoadAttempted = true;
+            ToolMenuColliderSettings persisted{};
+            loadResult = LoadWeaponColliderSettings(
+                weaponIndex, baseProfile.id, persisted);
+            if (loadResult == WeaponSettingsStoreResult::Ok) {
+                slot->colliderSettings = persisted;
+            }
+            loadAttempted = true;
+        }
+        settings = slot->colliderSettings;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (loadAttempted && g_passThroughLog != nullptr) {
+        char detail[224]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s result=%s source=%s",
+            static_cast<long>(weaponIndex),
+            PhysicalMeleeProfileName(baseProfile.id),
+            WeaponSettingsStoreResultName(loadResult),
+            loadResult == WeaponSettingsStoreResult::Ok
+                ? "local_app_data" : "profile_defaults");
+        g_passThroughLog("m5_collider_settings_loaded", detail);
+    }
+    return settings;
+}
+
+bool StoreToolMenuColliderSettings(
+    std::int32_t weaponIndex,
+    const ToolMenuColliderSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !ToolMenuColliderSettingsAreValid(settings)) {
+        return false;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    bool stored = false;
+    AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
+    ToolMenuWeaponSettingsSlot* slot =
+        ResolveToolMenuWeaponSettingsSlot(
+            g_toolMenuWeaponSettingsRegistry,
+            weaponIndex, baseProfile);
+    if (slot != nullptr) {
+        slot->colliderSettings = settings;
+        slot->colliderPersistentLoadAttempted = true;
+        stored = true;
+    }
+    ReleaseSRWLockExclusive(&g_toolMenuSettingsLock);
+    if (stored) {
+        const WeaponSettingsStoreResult saveResult =
+            SaveWeaponColliderSettings(
+                weaponIndex, baseProfile.id, settings);
+        if (g_passThroughLog != nullptr) {
+            char detail[320]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld profile=%s result=%s "
+                "position_x=%.3f position_y=%.3f position_z=%.3f "
+                "rotation_x=%.3f rotation_y=%.3f "
+                "rotation_z=%.3f "
+                "length=%.2f radius=%.2f reversed=%u",
+                static_cast<long>(weaponIndex),
+                PhysicalMeleeProfileName(baseProfile.id),
+                WeaponSettingsStoreResultName(saveResult),
+                settings.positionOffsetUnits.x,
+                settings.positionOffsetUnits.y,
+                settings.positionOffsetUnits.z,
+                settings.rotationOffsetDegrees.x,
+                settings.rotationOffsetDegrees.y,
+                settings.rotationOffsetDegrees.z,
+                settings.lengthUnits, settings.radiusUnits,
+                settings.reversed ? 1U : 0U);
+            g_passThroughLog(
+                saveResult == WeaponSettingsStoreResult::Ok
+                    ? "m5_collider_settings_saved"
+                    : "m5_collider_settings_save_failed",
+                detail);
+        }
+    }
+    return stored;
+}
+
+bool SameFileTime(const FILETIME& left, const FILETIME& right) noexcept {
+    return left.dwLowDateTime == right.dwLowDateTime &&
+        left.dwHighDateTime == right.dwHighDateTime;
+}
+
+void LogLiveColliderAlignment(
+    const char* event,
+    std::uint64_t revision,
+    std::int32_t weaponIndex,
+    const ToolMenuColliderSettings& settings,
+    const char* result) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    char detail[512]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "revision=%llu process_id=%lu weapon_index=%ld "
+        "position_x=%.3f position_y=%.3f position_z=%.3f "
+        "rotation_x=%.3f rotation_y=%.3f rotation_z=%.3f "
+        "length=%.3f radius=%.3f reversed=%u result=%s",
+        static_cast<unsigned long long>(revision),
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<long>(weaponIndex),
+        settings.positionOffsetUnits.x,
+        settings.positionOffsetUnits.y,
+        settings.positionOffsetUnits.z,
+        settings.rotationOffsetDegrees.x,
+        settings.rotationOffsetDegrees.y,
+        settings.rotationOffsetDegrees.z,
+        settings.lengthUnits,
+        settings.radiusUnits,
+        settings.reversed ? 1U : 0U,
+        result != nullptr ? result : "unknown");
+    g_passThroughLog(event, detail);
+}
+
+void LogLiveColliderAlignmentRejected(
+    std::uint64_t revision,
+    const char* reason,
+    std::uint32_t targetProcessId,
+    std::int32_t targetWeaponIndex,
+    std::int32_t activeWeaponIndex) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    char detail[320]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "revision=%llu reason=%s process_id=%lu "
+        "target_process_id=%lu target_weapon_index=%ld "
+        "active_weapon_index=%ld",
+        static_cast<unsigned long long>(revision),
+        reason != nullptr ? reason : "unknown",
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(targetProcessId),
+        static_cast<long>(targetWeaponIndex),
+        static_cast<long>(activeWeaponIndex));
+    g_passThroughLog("m5_live_collider_alignment_rejected", detail);
+}
+
+bool ResolveLiveColliderCommandPath() noexcept {
+    if (g_liveColliderCommandPathResolved) {
+        return g_liveColliderCommandPathAvailable;
+    }
+    g_liveColliderCommandPathResolved = true;
+    const DWORD length = GetEnvironmentVariableW(
+        kLiveColliderCommandPathEnvironment,
+        g_liveColliderCommandPath,
+        static_cast<DWORD>(
+            sizeof(g_liveColliderCommandPath) /
+            sizeof(g_liveColliderCommandPath[0])));
+    g_liveColliderCommandPathAvailable =
+        length > 0U &&
+        length < sizeof(g_liveColliderCommandPath) /
+            sizeof(g_liveColliderCommandPath[0]);
+    if (!g_liveColliderCommandPathAvailable) {
+        g_liveColliderCommandPath[0] = L'\0';
+    }
+    return g_liveColliderCommandPathAvailable;
+}
+
+bool ReadLiveColliderCommandText(
+    char (&text)[1024]) noexcept {
+    text[0] = '\0';
+    HANDLE file = CreateFileW(
+        g_liveColliderCommandPath,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER size{};
+    DWORD bytesRead = 0U;
+    const bool readable =
+        GetFileSizeEx(file, &size) != FALSE &&
+        size.QuadPart > 0 &&
+        size.QuadPart < static_cast<LONGLONG>(sizeof(text)) &&
+        ReadFile(
+            file, text, static_cast<DWORD>(size.QuadPart),
+            &bytesRead, nullptr) != FALSE &&
+        bytesRead == static_cast<DWORD>(size.QuadPart);
+    CloseHandle(file);
+    if (!readable) {
+        text[0] = '\0';
+        return false;
+    }
+    text[bytesRead] = '\0';
+    return true;
+}
+
+void ProcessLiveColliderAlignmentCommand(
+    std::int32_t weaponIndex,
+    ToolMenuColliderSettings& settings) noexcept {
+    AcquireSRWLockExclusive(&g_liveColliderCommandLock);
+    if (!ResolveLiveColliderCommandPath()) {
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    if (weaponIndex >= 0 &&
+        g_liveColliderCommandArmedWeaponIndex != weaponIndex) {
+        g_liveColliderCommandArmedWeaponIndex = weaponIndex;
+        LogLiveColliderAlignment(
+            "m5_live_collider_alignment_armed",
+            g_liveColliderCommandLastRevision,
+            weaponIndex, settings, "ready");
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_liveColliderCommandLastPollTick <
+        kLiveColliderCommandPollMilliseconds) {
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    g_liveColliderCommandLastPollTick = now;
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if (GetFileAttributesExW(
+            g_liveColliderCommandPath,
+            GetFileExInfoStandard,
+            &attributes) == FALSE ||
+        SameFileTime(
+            attributes.ftLastWriteTime,
+            g_liveColliderCommandLastWriteTime)) {
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    g_liveColliderCommandLastWriteTime =
+        attributes.ftLastWriteTime;
+    char text[1024]{};
+    if (!ReadLiveColliderCommandText(text)) {
+        LogLiveColliderAlignmentRejected(
+            0U, "read_failed", 0U, -1, weaponIndex);
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    LiveColliderAlignmentCommand command{};
+    const LiveColliderAlignmentCommandParseResult parseResult =
+        ParseLiveColliderAlignmentCommand(text, command);
+    if (parseResult !=
+        LiveColliderAlignmentCommandParseResult::Ok) {
+        LogLiveColliderAlignmentRejected(
+            0U,
+            LiveColliderAlignmentCommandParseResultName(parseResult),
+            0U, -1, weaponIndex);
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    if (command.revision <=
+        g_liveColliderCommandLastRevision) {
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    g_liveColliderCommandLastRevision = command.revision;
+    if (!LiveColliderAlignmentCommandMatchesTarget(
+            command, GetCurrentProcessId(), weaponIndex)) {
+        LogLiveColliderAlignmentRejected(
+            command.revision, "target_mismatch",
+            command.processId, command.weaponIndex, weaponIndex);
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    if (!StoreToolMenuColliderSettings(
+            weaponIndex, command.settings)) {
+        LogLiveColliderAlignmentRejected(
+            command.revision, "store_failed",
+            command.processId, command.weaponIndex, weaponIndex);
+        ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    settings = command.settings;
+    LogLiveColliderAlignment(
+        "m5_live_collider_alignment_applied",
+        command.revision, weaponIndex, settings, "applied");
+    ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+}
+
 ToolMenuRightHandIkSettings CopyToolMenuRightHandIkSettings(
     std::int32_t weaponIndex) noexcept {
     ToolMenuRightHandIkSettings settings{};
@@ -1403,62 +1813,31 @@ bool ApplyToolMenuMeleeAdjustment(
     if (tab == ToolMenuTab::Melee) {
         switch (row) {
         case 0U:
-            if ((delta != 0 || activate) &&
-                ToolMenuProfileSupportsSwingAttack(baseProfile.id)) {
-                settings.swingAttackEnabled =
-                    !settings.swingAttackEnabled;
+            if (delta != 0 || activate) {
+                settings.requireSwingForContactDamage =
+                    !settings.requireSwingForContactDamage;
             }
             break;
         case 1U:
-            settings.swingTriggerSpeedMetersPerSecond = std::clamp(
-                settings.swingTriggerSpeedMetersPerSecond +
+            settings.hitSpeedMetersPerSecond = std::clamp(
+                settings.hitSpeedMetersPerSecond +
                     static_cast<float>(delta) * 0.25F,
-                0.50F, 10.0F);
-            settings.swingRearmSpeedMetersPerSecond = std::min(
-                settings.swingRearmSpeedMetersPerSecond,
-                settings.swingTriggerSpeedMetersPerSecond - 0.25F);
+                0.25F, 10.0F);
             break;
         case 2U:
-            settings.swingRearmSpeedMetersPerSecond = std::clamp(
-                settings.swingRearmSpeedMetersPerSecond +
-                    static_cast<float>(delta) * 0.25F,
-                0.0F,
-                settings.swingTriggerSpeedMetersPerSecond - 0.25F);
+            settings.contactRearmDistanceMeters = std::clamp(
+                settings.contactRearmDistanceMeters +
+                    static_cast<float>(delta) * 0.01F,
+                0.02F, 1.0F);
             break;
-        case 3U: {
-            const int value = std::clamp(
-                static_cast<int>(settings.swingPulseMilliseconds) +
-                    delta * 10,
-                30, 500);
-            settings.swingPulseMilliseconds =
-                static_cast<std::uint32_t>(value);
-            settings.swingCooldownMilliseconds = std::max(
-                settings.swingCooldownMilliseconds,
-                settings.swingPulseMilliseconds);
-            break;
-        }
-        case 4U: {
-            const int value = std::clamp(
-                static_cast<int>(settings.swingCooldownMilliseconds) +
-                    delta * 50,
-                static_cast<int>(settings.swingPulseMilliseconds),
-                3000);
-            settings.swingCooldownMilliseconds =
-                static_cast<std::uint32_t>(value);
-            break;
-        }
-        case 5U:
+        case 3U:
             if (activate) {
-                settings.swingAttackEnabled =
-                    defaults.swingAttackEnabled;
-                settings.swingTriggerSpeedMetersPerSecond =
-                    defaults.swingTriggerSpeedMetersPerSecond;
-                settings.swingRearmSpeedMetersPerSecond =
-                    defaults.swingRearmSpeedMetersPerSecond;
-                settings.swingPulseMilliseconds =
-                    defaults.swingPulseMilliseconds;
-                settings.swingCooldownMilliseconds =
-                    defaults.swingCooldownMilliseconds;
+                settings.requireSwingForContactDamage =
+                    defaults.requireSwingForContactDamage;
+                settings.hitSpeedMetersPerSecond =
+                    defaults.hitSpeedMetersPerSecond;
+                settings.contactRearmDistanceMeters =
+                    defaults.contactRearmDistanceMeters;
             }
             break;
         default:
@@ -1522,6 +1901,87 @@ bool ApplyToolMenuMeleeAdjustment(
     return StoreToolMenuMeleeSettings(weaponIndex, settings);
 }
 
+bool ApplyToolMenuColliderAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate,
+    std::int32_t weaponIndex) noexcept {
+    if (weaponIndex < 0) {
+        return false;
+    }
+    const PhysicalMeleeProfile baseProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(weaponIndex);
+    const ToolMenuColliderSettings defaults =
+        ToolMenuColliderSettingsFromProfile(baseProfile);
+    ToolMenuColliderSettings settings =
+        CopyToolMenuColliderSettings(weaponIndex);
+    const ToolMenuColliderSettings original = settings;
+    switch (row) {
+    case 0U:
+        settings.positionOffsetUnits.x = std::clamp(
+            settings.positionOffsetUnits.x + static_cast<float>(delta),
+            -kToolMenuColliderMaximumOffsetUnits,
+            kToolMenuColliderMaximumOffsetUnits);
+        break;
+    case 1U:
+        settings.positionOffsetUnits.y = std::clamp(
+            settings.positionOffsetUnits.y + static_cast<float>(delta),
+            -kToolMenuColliderMaximumOffsetUnits,
+            kToolMenuColliderMaximumOffsetUnits);
+        break;
+    case 2U:
+        settings.positionOffsetUnits.z = std::clamp(
+            settings.positionOffsetUnits.z + static_cast<float>(delta),
+            -kToolMenuColliderMaximumOffsetUnits,
+            kToolMenuColliderMaximumOffsetUnits);
+        break;
+    case 3U:
+        settings.rotationOffsetDegrees.x = std::clamp(
+            settings.rotationOffsetDegrees.x +
+                static_cast<float>(delta) * 5.0F,
+            -180.0F, 180.0F);
+        break;
+    case 4U:
+        settings.rotationOffsetDegrees.y = std::clamp(
+            settings.rotationOffsetDegrees.y +
+                static_cast<float>(delta) * 5.0F,
+            -180.0F, 180.0F);
+        break;
+    case 5U:
+        settings.rotationOffsetDegrees.z = std::clamp(
+            settings.rotationOffsetDegrees.z +
+                static_cast<float>(delta) * 5.0F,
+            -180.0F, 180.0F);
+        break;
+    case 6U:
+        settings.lengthUnits = std::clamp(
+            settings.lengthUnits + static_cast<float>(delta) * 2.5F,
+            5.0F, kToolMenuColliderMaximumLengthUnits);
+        break;
+    case 7U:
+        settings.radiusUnits = std::clamp(
+            settings.radiusUnits + static_cast<float>(delta) * 0.5F,
+            0.5F, kToolMenuColliderMaximumRadiusUnits);
+        break;
+    case 8U:
+        if (delta != 0 || activate) {
+            settings.reversed = !settings.reversed;
+        }
+        break;
+    case 9U:
+        if (activate) {
+            settings = defaults;
+        }
+        break;
+    default:
+        return false;
+    }
+    if (std::memcmp(&settings, &original, sizeof(settings)) == 0) {
+        return false;
+    }
+    return StoreToolMenuColliderSettings(weaponIndex, settings);
+}
+
 bool ApplyToolMenuGripAdjustment(
     std::uint32_t row,
     int delta,
@@ -1537,10 +1997,14 @@ bool ApplyToolMenuGripAdjustment(
             kWeaponGripTranslationSteps[
                 g_weaponGripCalibrationStepIndex] *
             static_cast<float>(delta);
-        return AdjustActiveWeaponGripCalibration(
+        const bool changed = AdjustActiveWeaponGripCalibration(
             row == 0U ? amount : 0.0F,
             row == 1U ? amount : 0.0F,
             row == 2U ? amount : 0.0F);
+        if (changed) {
+            PersistActiveWeaponGripCalibration("vr_tool_menu_adjust");
+        }
+        return changed;
     }
     if (row >= 3U && row <= 5U && delta != 0) {
         g_weaponGripCalibrationMode =
@@ -1549,10 +2013,14 @@ bool ApplyToolMenuGripAdjustment(
             kWeaponGripRotationSteps[
                 g_weaponGripCalibrationStepIndex] *
             static_cast<float>(delta);
-        return AdjustActiveWeaponGripCalibration(
+        const bool changed = AdjustActiveWeaponGripCalibration(
             row == 3U ? amount : 0.0F,
             row == 4U ? amount : 0.0F,
             row == 5U ? amount : 0.0F);
+        if (changed) {
+            PersistActiveWeaponGripCalibration("vr_tool_menu_adjust");
+        }
+        return changed;
     }
     if (row == 6U && delta != 0) {
         const int next = std::clamp(
@@ -1565,13 +2033,20 @@ bool ApplyToolMenuGripAdjustment(
         return changed;
     }
     if (row == 7U && activate) {
-        return ResetActiveWeaponGripCalibration();
+        const bool changed = ResetActiveWeaponGripCalibration();
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_reset");
+        }
+        return changed;
     }
     if (row == 8U && activate) {
+        const bool attempted = PersistActiveWeaponGripCalibration(
+            "vr_tool_menu_snapshot");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_snapshot",
             "vr_tool_menu_snapshot");
-        return true;
+        return attempted;
     }
     return false;
 }
@@ -1788,36 +2263,65 @@ bool ApplyToolMenuTwoHandAdjustment(
         return false;
     }
     if (row == 0U && (delta != 0 || activate)) {
-        return ToggleActiveSecondaryGripCalibration();
+        const bool changed =
+            ToggleActiveSecondaryGripCalibration();
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_two_hand_adjust");
+        }
+        return changed;
     }
     if (row >= 1U && row <= 3U && delta != 0) {
         const float amount =
             kWeaponGripTranslationSteps[
                 g_weaponGripCalibrationStepIndex] *
             static_cast<float>(delta);
-        return AdjustActiveSecondaryGripCalibration(
+        const bool changed = AdjustActiveSecondaryGripCalibration(
             row == 1U ? amount : 0.0F,
             row == 2U ? amount : 0.0F,
             row == 3U ? amount : 0.0F,
             0.0F);
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_two_hand_adjust");
+        }
+        return changed;
     }
     if (row == 4U && delta != 0) {
-        return AdjustActiveSecondaryGripCalibration(
+        const bool changed = AdjustActiveSecondaryGripCalibration(
             0.0F, 0.0F, 0.0F,
             static_cast<float>(delta) * 0.01F);
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_two_hand_adjust");
+        }
+        return changed;
     }
     if (row == 5U && activate) {
-        return CaptureActiveSecondaryGripCalibration(
+        const bool changed = CaptureActiveSecondaryGripCalibration(
             input, sampleFresh);
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_two_hand_capture");
+        }
+        return changed;
     }
     if (row == 6U && activate) {
-        return ResetActiveSecondaryGripCalibration();
+        const bool changed =
+            ResetActiveSecondaryGripCalibration();
+        if (changed) {
+            PersistActiveWeaponGripCalibration(
+                "vr_tool_menu_two_hand_reset");
+        }
+        return changed;
     }
     if (row == 7U && activate) {
+        const bool attempted = PersistActiveWeaponGripCalibration(
+            "vr_tool_menu_two_hand_snapshot");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_snapshot",
             "vr_tool_menu_two_hand_snapshot");
-        return true;
+        return attempted;
     }
     return false;
 }
@@ -2078,6 +2582,12 @@ void HandleVrToolMenuControls() noexcept {
         valueChanged = ApplyToolMenuGripAdjustment(
             g_toolMenuState.row, transition.valueDelta,
             transition.activate);
+    } else if (g_toolMenuState.tab == ToolMenuTab::Collider) {
+        ToolMenuMeleeTelemetry telemetry{};
+        ReadPhysicalMeleeToolTelemetry(telemetry);
+        valueChanged = ApplyToolMenuColliderAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate, telemetry.weaponIndex);
     } else if (g_toolMenuState.tab == ToolMenuTab::TwoHand) {
         valueChanged = ApplyToolMenuTwoHandAdjustment(
             g_toolMenuState.row, transition.valueDelta,
@@ -2198,6 +2708,8 @@ void DrawVrToolMenuOverlay(
             telemetry.weaponIndex);
     const ToolMenuMeleeSettings settings =
         CopyToolMenuMeleeSettings(telemetry.weaponIndex);
+    const ToolMenuColliderSettings colliderSettings =
+        CopyToolMenuColliderSettings(telemetry.weaponIndex);
     const ToolMenuRightHandIkSettings rightHandIkSettings =
         CopyToolMenuRightHandIkSettings(telemetry.weaponIndex);
     const fearvr::ArmIkTuning armIkTuning = ReadArmIkTuning();
@@ -2235,37 +2747,57 @@ void DrawVrToolMenuOverlay(
 
     switch (g_toolMenuState.tab) {
     case ToolMenuTab::Melee:
-        if (ToolMenuProfileSupportsSwingAttack(baseProfile.id)) {
-            std::snprintf(rowText, sizeof(rowText),
-                "SWING ATTACK                 %s",
-                settings.swingAttackEnabled ? "ON" : "OFF");
-        } else {
-            std::snprintf(rowText, sizeof(rowText),
-                "SWING ATTACK                 UNAVAILABLE");
-        }
+        std::snprintf(rowText, sizeof(rowText),
+            "REQUIRE SWING                %s",
+            settings.requireSwingForContactDamage ? "ON" : "OFF");
         Row(0U, rowText);
         std::snprintf(rowText, sizeof(rowText),
-            "TRIGGER SPEED                %.2F M/S",
-            settings.swingTriggerSpeedMetersPerSecond);
+            "HIT SPEED                    %.2F M/S",
+            settings.hitSpeedMetersPerSecond);
         Row(1U, rowText);
         std::snprintf(rowText, sizeof(rowText),
-            "REARM SPEED                  %.2F M/S",
-            settings.swingRearmSpeedMetersPerSecond);
+            "REARM TRAVEL                 %.2F M",
+            settings.contactRearmDistanceMeters);
         Row(2U, rowText);
+        Row(3U, "RESET PHYSICAL HIT DEFAULTS");
+        if (telemetry.contactTrackingFresh) {
+            std::snprintf(rowText, sizeof(rowText),
+                "LIVE SPEED %.2F M/S  FAST ENOUGH %s",
+                telemetry.contactSpeedMetersPerSecond,
+                telemetry.contactFastEnough ? "YES" : "NO");
+        } else {
+            std::snprintf(rowText, sizeof(rowText),
+                "LIVE SPEED -- M/S  FAST ENOUGH WAITING");
+        }
+        AddToolMenuRow(
+            overlay, 4U, rowText, false,
+            telemetry.contactTrackingFresh
+                ? (telemetry.contactFastEnough
+                       ? 0xFF50FF80U : 0xFFFFB060U)
+                : 0xFF95A5B2U);
+        if (telemetry.contactLatched) {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "HIT STATE LATCHED  TRAVEL %s  RESET %u/%u (< %.2F M/S)",
+                telemetry.contactRearmTravelReady ? "YES" : "NO",
+                telemetry.contactReleaseSampleCount,
+                kPhysicalMeleeContactReleaseSampleCount,
+                telemetry.contactReleaseSpeedMetersPerSecond);
+        } else {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "HIT STATE READY  NEXT SWING MAY DAMAGE");
+        }
+        AddToolMenuRow(
+            overlay, 5U, rowText, false,
+            telemetry.contactLatched
+                ? 0xFFFFB060U : 0xFF50FF80U);
         std::snprintf(rowText, sizeof(rowText),
-            "ATTACK PULSE                 %u MS",
-            settings.swingPulseMilliseconds);
-        Row(3U, rowText);
-        std::snprintf(rowText, sizeof(rowText),
-            "ATTACK COOLDOWN              %u MS",
-            settings.swingCooldownMilliseconds);
-        Row(4U, rowText);
-        Row(5U, "RESET MELEE DEFAULTS");
-        std::snprintf(rowText, sizeof(rowText),
-            "LIVE SWING %.2F M/S   ATTACKS %u",
-            telemetry.swingSpeedMetersPerSecond,
-            telemetry.triggerCount);
-        AddToolMenuRow(overlay, 7U, rowText, false, 0xFF76DBF4U);
+            "CONTACT DAMAGE %s  CALLBACKS %u  HITS %u",
+            telemetry.contactDamageEnabled ? "ON" : "OFF",
+            telemetry.contactCallbackCount,
+            telemetry.damageDispatchCount);
+        AddToolMenuRow(overlay, 6U, rowText, false);
         break;
     case ToolMenuTab::Weapon:
         std::snprintf(rowText, sizeof(rowText),
@@ -2332,7 +2864,46 @@ void DrawVrToolMenuOverlay(
                 g_weaponGripCalibrationStepIndex]);
         Row(6U, rowText);
         Row(7U, "RESET CURRENT GRIP");
-        Row(8U, "LOG PROFILE SNAPSHOT");
+        Row(8U, "SAVE GRIP SNAPSHOT");
+        break;
+    case ToolMenuTab::Collider:
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION X                    %.2F U",
+            colliderSettings.positionOffsetUnits.x);
+        Row(0U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION Y                    %.2F U",
+            colliderSettings.positionOffsetUnits.y);
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "POSITION Z                    %.2F U",
+            colliderSettings.positionOffsetUnits.z);
+        Row(2U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "PITCH X                       %.1F DEG",
+            colliderSettings.rotationOffsetDegrees.x);
+        Row(3U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "YAW Y                         %.1F DEG",
+            colliderSettings.rotationOffsetDegrees.y);
+        Row(4U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "ROLL Z                        %.1F DEG",
+            colliderSettings.rotationOffsetDegrees.z);
+        Row(5U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "LENGTH                        %.1F U",
+            colliderSettings.lengthUnits);
+        Row(6U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "RADIUS                        %.1F U",
+            colliderSettings.radiusUnits);
+        Row(7U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "DIRECTION                     %s",
+            colliderSettings.reversed ? "REVERSED" : "FORWARD");
+        Row(8U, rowText);
+        Row(9U, "RESET COLLIDER DEFAULTS");
         break;
     case ToolMenuTab::TwoHand:
         if (!haveGrip || !baseProfile.secondaryGripEnabled) {
@@ -2364,7 +2935,7 @@ void DrawVrToolMenuOverlay(
         Row(4U, rowText);
         Row(5U, "CAPTURE CURRENT LEFT HAND POSE");
         Row(6U, "RESET SUPPORT GRIP");
-        Row(7U, "LOG TWO HAND SNAPSHOT");
+        Row(7U, "SAVE TWO HAND SNAPSHOT");
         std::snprintf(rowText, sizeof(rowText),
             "STATE %s   HAND %.2F M   ERROR %.2F M",
             telemetry.secondaryGripAttached
@@ -2554,13 +3125,17 @@ void DrawVrToolMenuOverlay(
             telemetry.swingSpeedMetersPerSecond);
         AddToolMenuRow(overlay, 4U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "SWING ATTACK COUNT            %u",
-            telemetry.triggerCount);
+            "CALLBACKS %u  DAMAGE %s  HITS %u",
+            telemetry.contactCallbackCount,
+            telemetry.contactDamageEnabled ? "ON" : "OFF",
+            telemetry.damageDispatchCount);
         AddToolMenuRow(overlay, 5U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "PROXIES WALL %s  VISIBLE %s",
+            "PROXY W %s  MODEL %s  COLLIDER %s",
             telemetry.wallProxyEnabled ? "ON" : "OFF",
-            telemetry.visualProxyEnabled ? "ON" : "OFF");
+            telemetry.visualProxyEnabled ? "ON" : "OFF",
+            !telemetry.colliderDebugEnabled ? "OFF" :
+                telemetry.collisionBodyLive ? "LIVE" : "PREVIEW");
         AddToolMenuRow(overlay, 6U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "VR TWO HAND %s  SUPPORT %s",
@@ -2689,6 +3264,66 @@ bool DrawWeaponGripCalibrationControllerGizmo(
         g_passThroughLog(
             "m5_weapon_grip_controller_gizmo_failed",
             "bridge_overlay_draw_rejected=1 weapon_visual_continues=1");
+    }
+    return drawn;
+}
+
+bool DrawPhysicalMeleeColliderGizmo(
+    const RigidTransformAbi& eyeCamera,
+    float horizontalFovRadians,
+    float verticalFovRadians) noexcept {
+    if (g_drawOverlayLines == nullptr) {
+        return false;
+    }
+    PhysicalMeleeColliderDebugSnapshot snapshot{};
+    if (!ReadPhysicalMeleeColliderDebugSnapshot(snapshot)) {
+        return false;
+    }
+    const WeaponGripCalibrationGizmo gizmo =
+        BuildPhysicalMeleeColliderGizmo(
+            snapshot.baseUnits, snapshot.tipUnits,
+            snapshot.collisionOriginUnits, snapshot.radiusUnits,
+            snapshot.collisionBodyLive);
+    const WeaponGripCalibrationGizmoCamera camera{
+        {eyeCamera.position[0], eyeCamera.position[1],
+         eyeCamera.position[2]},
+        {eyeCamera.rotation[0], eyeCamera.rotation[1],
+         eyeCamera.rotation[2], eyeCamera.rotation[3]},
+        horizontalFovRadians, verticalFovRadians};
+    FearVrOverlayLineVertex projected[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t vertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            gizmo, camera, projected,
+            sizeof(projected) / sizeof(projected[0]));
+    const bool drawn = vertexCount != 0U &&
+        g_drawOverlayLines(
+            projected,
+            static_cast<std::uint32_t>(vertexCount)) != FALSE;
+    if (drawn) {
+        volatile LONG* const logged = snapshot.collisionBodyLive
+            ? &g_physicalMeleeColliderLiveLogged
+            : &g_physicalMeleeColliderPreviewLogged;
+        if (InterlockedCompareExchange(logged, 1, 0) == 0 &&
+            g_passThroughLog != nullptr) {
+            g_passThroughLog(
+                snapshot.collisionBodyLive
+                    ? "m5_physical_melee_collider_debug_live"
+                    : "m5_physical_melee_collider_debug_preview",
+                snapshot.collisionBodyLive
+                    ? "color=green retail_collision_body_live=1 "
+                      "origin=controller_weapon_tip depth=always_visible"
+                    : "color=amber retail_collision_body_live=0 "
+                      "waiting_for_first_retail_attack_seed=1 "
+                      "depth=always_visible");
+        }
+    } else if (InterlockedCompareExchange(
+                   &g_physicalMeleeColliderFailureLogged,
+                   1, 0) == 0 &&
+               g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_physical_melee_collider_debug_failed",
+            "projection_or_bridge_draw_rejected=1 gameplay_continues=1");
     }
     return drawn;
 }
@@ -2855,6 +3490,8 @@ void HandleWeaponGripCalibrationControls() noexcept {
             controllerReset, controller.captured,
             controller.resetDown) &&
         ResetActiveWeaponGripCalibration()) {
+        PersistActiveWeaponGripCalibration(
+            "controller_reset_weapon");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_changed",
             "controller_reset_weapon");
@@ -2862,6 +3499,8 @@ void HandleWeaponGripCalibrationControls() noexcept {
     if (ConsumeCalibrationButton(
             controllerSnapshot, controller.captured,
             controller.snapshotDown)) {
+        PersistActiveWeaponGripCalibration(
+            "controller_snapshot");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_snapshot",
             "controller_snapshot");
@@ -2951,6 +3590,8 @@ void HandleWeaponGripCalibrationControls() noexcept {
         PressedOnce('R', letterResetDown);
     if ((numpadResetPressed || letterResetPressed) &&
         ResetActiveWeaponGripCalibration()) {
+        PersistActiveWeaponGripCalibration(
+            "keyboard_reset_weapon");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_changed", "reset_weapon");
     }
@@ -2959,6 +3600,8 @@ void HandleWeaponGripCalibrationControls() noexcept {
     const bool letterSnapshotPressed =
         PressedOnce('P', letterSnapshotDown);
     if (numpadSnapshotPressed || letterSnapshotPressed) {
+        PersistActiveWeaponGripCalibration(
+            "keyboard_snapshot");
         LogWeaponGripCalibrationState(
             "m5_weapon_grip_calibration_snapshot", "snapshot");
     }
@@ -4422,6 +5065,11 @@ bool TryDoubleRenderDiagnostic(
                         stereoFovX, stereoFovY);
                 }
                 if (eyeResult[eye] == 0UL) {
+                    DrawPhysicalMeleeColliderGizmo(
+                        renderedEyeTransform,
+                        stereoFovX, stereoFovY);
+                }
+                if (eyeResult[eye] == 0UL) {
                     DrawVrToolMenuOverlay(
                         eye,
                         fearvr::InterpupillaryDistanceMeters(request),
@@ -5529,6 +6177,14 @@ ToolMenuMeleeSettings ReadVrToolMenuMeleeSettings(
     return CopyToolMenuMeleeSettings(weaponIndex);
 }
 
+ToolMenuColliderSettings ReadVrToolMenuColliderSettings(
+    std::int32_t weaponIndex) noexcept {
+    ToolMenuColliderSettings settings =
+        CopyToolMenuColliderSettings(weaponIndex);
+    ProcessLiveColliderAlignmentCommand(weaponIndex, settings);
+    return settings;
+}
+
 bool PublishEquippedWeaponVisualProxySource(
     void* const* equippedWeaponReference,
     void* equippedWeapon,
@@ -5583,6 +6239,9 @@ bool PublishEquippedWeaponVisualProxySource(
 
     bool sourceChanged = false;
     std::uint64_t generation = 0;
+    WeaponSettingsStoreResult gripLoadResult =
+        WeaponSettingsStoreResult::NotFound;
+    bool gripLoadAttempted = false;
     AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
     sourceChanged =
         equippedWeaponReference !=
@@ -5612,7 +6271,8 @@ bool PublishEquippedWeaponVisualProxySource(
             FindOrCreateWeaponGripCalibrationSlot(
                 equippedWeapon, equippedWeaponIndex, modelObject,
                 localGripPosition, localGripRotation,
-                weaponProfile);
+                weaponProfile, gripLoadResult,
+                gripLoadAttempted);
     }
     if (calibrationEnabled &&
         g_activeWeaponGripCalibrationSlot >= 0 &&
@@ -5644,6 +6304,20 @@ bool PublishEquippedWeaponVisualProxySource(
     generation = g_physicalMeleeVisualSourceGeneration;
     ReleaseSRWLockExclusive(&g_physicalMeleeVisualLock);
 
+    if (gripLoadAttempted && g_passThroughLog != nullptr) {
+        char detail[224]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld profile=%s result=%s source=%s",
+            static_cast<long>(equippedWeaponIndex),
+            PhysicalMeleeProfileName(weaponProfile.id),
+            WeaponSettingsStoreResultName(gripLoadResult),
+            gripLoadResult == WeaponSettingsStoreResult::Ok
+                ? "local_app_data" : "profile_defaults");
+        g_passThroughLog(
+            "m5_weapon_grip_settings_loaded", detail);
+    }
+
     if (sourceChanged && g_passThroughLog != nullptr) {
         char detail[448]{};
         std::snprintf(
@@ -5656,7 +6330,7 @@ bool PublishEquippedWeaponVisualProxySource(
             static_cast<long>(equippedWeaponIndex),
             equippedWeapon, modelObject,
             static_cast<unsigned long long>(generation),
-            calibrationEnabled ? "live_per_weapon_session" :
+            calibrationEnabled ? "persistent_per_weapon" :
                 "profile_data");
         g_passThroughLog(
             "m5_physical_melee_visual_source_captured", detail);

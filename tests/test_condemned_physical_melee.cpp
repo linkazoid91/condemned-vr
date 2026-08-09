@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "condemned_calibration_gizmo.h"
+#include "condemned_physical_melee_collider_gizmo.h"
 #include "condemned_physical_melee.h"
 #include "weapon_weight.h"
 
@@ -76,24 +77,79 @@ int main() {
         !Near(frame.currentTipUnits.z, 130.0F)) {
         return Fail("first physical-melee pose must only prime history");
     }
+    const PhysicalMeleeNativeCapsuleShape firstNativeCapsule =
+        ResolvePhysicalMeleeNativeCapsuleShape(frame, true);
     const PhysicalMeleeWallProxyTransform firstProxy =
         ResolvePhysicalMeleeWallProxyTransform(frame, true);
-    if (!firstProxy.active ||
-        !Near(firstProxy.positionUnits.x, frame.currentTipUnits.x) ||
-        !Near(firstProxy.positionUnits.y, frame.currentTipUnits.y) ||
-        !Near(firstProxy.positionUnits.z, frame.currentTipUnits.z) ||
-        !Near(firstProxy.rotation.w, 1.0F)) {
-        return Fail("fresh wall proxy must follow the weapon endpoint");
+    const fearvr::TrackingVector nativeBase = PhysicalMeleeAdd(
+        firstProxy.positionUnits,
+        fearvr::Rotate(
+            firstProxy.rotation,
+            {0.0F, -firstNativeCapsule.lengthDownUnits, 0.0F}));
+    const fearvr::TrackingVector nativeTip = PhysicalMeleeAdd(
+        firstProxy.positionUnits,
+        fearvr::Rotate(
+            firstProxy.rotation,
+            {0.0F, firstNativeCapsule.lengthUpUnits, 0.0F}));
+    const fearvr::TrackingVector nativePositiveY = fearvr::Rotate(
+        firstProxy.rotation, {0.0F, 1.0F, 0.0F});
+    if (!firstNativeCapsule.valid || !firstProxy.active ||
+        !Near(firstNativeCapsule.lengthUpUnits, 0.0F) ||
+        !Near(firstNativeCapsule.lengthDownUnits, 100.0F) ||
+        !Near(firstNativeCapsule.radiusUnits, profile.radiusUnits) ||
+        !Near(nativeBase.x, frame.currentBaseUnits.x) ||
+        !Near(nativeBase.y, frame.currentBaseUnits.y) ||
+        !Near(nativeBase.z, frame.currentBaseUnits.z) ||
+        !Near(nativeTip.x, frame.currentTipUnits.x) ||
+        !Near(nativeTip.y, frame.currentTipUnits.y) ||
+        !Near(nativeTip.z, frame.currentTipUnits.z) ||
+        !Near(nativePositiveY.x, 0.0F) ||
+        !Near(nativePositiveY.y, 0.0F) ||
+        !Near(nativePositiveY.z, 1.0F)) {
+        return Fail(
+            "native local-Y capsule must reproduce configured endpoints");
     }
-    if (ResolvePhysicalMeleeWallProxyTransform(frame, false).active) {
-        return Fail("stale wall proxy samples must fail closed");
+    if (ResolvePhysicalMeleeNativeCapsuleShape(
+            frame, false).valid ||
+        ResolvePhysicalMeleeWallProxyTransform(frame, false).active) {
+        return Fail("stale native capsule samples must fail closed");
     }
     PhysicalMeleeFrame invalidProxyFrame = frame;
-    invalidProxyFrame.currentRotation.w =
-        std::numeric_limits<float>::infinity();
-    if (ResolvePhysicalMeleeWallProxyTransform(
+    invalidProxyFrame.currentTipUnits =
+        invalidProxyFrame.currentBaseUnits;
+    if (ResolvePhysicalMeleeNativeCapsuleShape(
+            invalidProxyFrame, true).valid ||
+        ResolvePhysicalMeleeWallProxyTransform(
             invalidProxyFrame, true).active) {
-        return Fail("invalid wall proxy transforms must fail closed");
+        return Fail("degenerate native capsule transforms must fail closed");
+    }
+    if (!Near(
+            ResolvePhysicalMeleeNativeCapsuleProperty(
+                firstNativeCapsule,
+                PhysicalMeleeNativeCapsuleProperty::LengthUp, 99.0F),
+            0.0F) ||
+        !Near(
+            ResolvePhysicalMeleeNativeCapsuleProperty(
+                firstNativeCapsule,
+                PhysicalMeleeNativeCapsuleProperty::LengthDown, 99.0F),
+            100.0F) ||
+        !Near(
+            ResolvePhysicalMeleeNativeCapsuleProperty(
+                firstNativeCapsule,
+                PhysicalMeleeNativeCapsuleProperty::Radius, 99.0F),
+            profile.radiusUnits) ||
+        !Near(
+            ResolvePhysicalMeleeNativeCapsuleProperty(
+                firstNativeCapsule,
+                PhysicalMeleeNativeCapsuleProperty::Retail, 99.0F),
+            99.0F) ||
+        !Near(
+            ResolvePhysicalMeleeNativeCapsuleProperty(
+                PhysicalMeleeNativeCapsuleShape{},
+                PhysicalMeleeNativeCapsuleProperty::Radius, 99.0F),
+            99.0F)) {
+        return Fail(
+            "native capsule properties must override only valid scoped fields");
     }
     if (!PhysicalMeleeCollisionBelongsToEquippedWeapon(
             0x1234U, 0x1234U) ||
@@ -115,6 +171,47 @@ int main() {
         !ShouldDispatchPhysicalMeleeNativeImpact(false, true)) {
         return Fail(
             "wall proxy gate must preserve non-player native impacts");
+    }
+    if (!ShouldDispatchPhysicalMeleeNativeImpact(
+            true, true, true, true) ||
+        ShouldDispatchPhysicalMeleeNativeImpact(
+            true, true, true, false) ||
+        ShouldDispatchPhysicalMeleeNativeImpact(
+            true, true, false, true)) {
+        return Fail(
+            "player native impact must require enabled accepted contact");
+    }
+    if (!ShouldMaintainPhysicalMeleeCollision(
+            true, true, true, true) ||
+        ShouldMaintainPhysicalMeleeCollision(
+            false, true, true, true) ||
+        ShouldMaintainPhysicalMeleeCollision(
+            true, false, true, true) ||
+        ShouldMaintainPhysicalMeleeCollision(
+            true, true, false, true) ||
+        ShouldMaintainPhysicalMeleeCollision(
+            true, true, true, false)) {
+        return Fail(
+            "continuous collision lifetime must fail closed by context");
+    }
+
+    const auto emptyReferenceVector =
+        ResolveRetailMeleeTargetReferenceVectorSpan(0U, 0U, 0U);
+    const auto oneReferenceVector =
+        ResolveRetailMeleeTargetReferenceVectorSpan(
+            0x1000U, 0x1010U, 0x1040U);
+    if (!emptyReferenceVector.valid || emptyReferenceVector.count != 0U ||
+        !oneReferenceVector.valid || oneReferenceVector.count != 1U ||
+        ResolveRetailMeleeTargetReferenceVectorSpan(
+            0x1000U, 0x0FF0U, 0x1040U).valid ||
+        ResolveRetailMeleeTargetReferenceVectorSpan(
+            0x1000U, 0x1008U, 0x1040U).valid ||
+        ResolveRetailMeleeTargetReferenceVectorSpan(
+            0x1000U, 0x1410U, 0x1410U).valid ||
+        ResolveRetailMeleeTargetReferenceVectorSpan(
+            0U, 0U, 0x1040U).valid) {
+        return Fail(
+            "Retail target-reference vectors must be bounded and aligned");
     }
 
     // Held models use an explicit, reusable grip anchor. Solving the model
@@ -370,6 +467,46 @@ int main() {
         return Fail("invalid controller poses must not draw a gizmo");
     }
 
+
+    // The collider diagnostic is a fixed-size swept-volume wireframe. Amber
+    // is an unseeded preview; green means the same volume is backed by a
+    // fresh player-owned Retail collision body.
+    const WeaponGripCalibrationGizmo colliderPreview =
+        BuildPhysicalMeleeColliderGizmo(
+            {0.0F, 0.0F, 100.0F},
+            {0.0F, 0.0F, 175.0F},
+            {0.0F, 0.0F, 175.0F}, 4.0F, false);
+    const WeaponGripCalibrationGizmo colliderLive =
+        BuildPhysicalMeleeColliderGizmo(
+            {0.0F, 0.0F, 100.0F},
+            {0.0F, 0.0F, 175.0F},
+            {0.0F, 0.0F, 175.0F}, 4.0F, true);
+    if (!colliderPreview.valid || colliderPreview.count != 44U ||
+        !colliderLive.valid || colliderLive.count != 44U ||
+        colliderPreview.lines[0].argb != 0xE0FFB040U ||
+        colliderLive.lines[0].argb != 0xE050FF90U) {
+        return Fail(
+            "collider gizmo must distinguish preview and live bodies");
+    }
+    FearVrOverlayLineVertex projectedCollider[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    if (ProjectWeaponGripCalibrationGizmoToNdc(
+            colliderLive, gizmoCamera, projectedCollider,
+            sizeof(projectedCollider) /
+                sizeof(projectedCollider[0])) != 88U) {
+        return Fail(
+            "collider gizmo must project all fixed wireframe lines");
+    }
+    if (BuildPhysicalMeleeColliderGizmo(
+            {}, {}, {}, 4.0F, false).valid ||
+        BuildPhysicalMeleeColliderGizmo(
+            {0.0F, 0.0F, 100.0F},
+            {0.0F, 0.0F, 175.0F},
+            {0.0F, 0.0F, 175.0F},
+            std::numeric_limits<float>::quiet_NaN(), false).valid) {
+        return Fail(
+            "collider gizmo must reject invalid geometry");
+    }
     // The diagnostic visible model keeps its measured animated node-to-model
     // relationship. Moving the solved object must put that node exactly on
     // the same controller endpoint used by the collision proxy.
@@ -424,57 +561,301 @@ int main() {
         return Fail("translation must produce deterministic impact kinematics");
     }
 
+    PhysicalMeleeFrame distanceFrame = frame;
+    distanceFrame.currentBaseUnits = {0.0F, 0.0F, 0.0F};
+    distanceFrame.currentTipUnits = {0.0F, 0.0F, 100.0F};
+    distanceFrame.radiusUnits = 5.0F;
+    distanceFrame.poseValid = true;
+    const PhysicalMeleeContactDistance onCapsule =
+        MeasurePhysicalMeleeContactDistance(
+            distanceFrame, {3.0F, 4.0F, 50.0F}, 100.0F);
+    const PhysicalMeleeContactDistance outsideCapsule =
+        MeasurePhysicalMeleeContactDistance(
+            distanceFrame, {15.0F, 0.0F, 50.0F}, 100.0F);
+    const PhysicalMeleeContactDistance pastTip =
+        MeasurePhysicalMeleeContactDistance(
+            distanceFrame, {0.0F, 0.0F, 120.0F}, 100.0F);
+    if (!onCapsule.valid || !Near(onCapsule.axisFraction, 0.5F) ||
+        !Near(onCapsule.centerlineToContactMeters, 0.05F) ||
+        !Near(onCapsule.capsuleSurfaceGapMeters, 0.0F) ||
+        !outsideCapsule.valid ||
+        !Near(outsideCapsule.capsuleSurfaceGapMeters, 0.10F) ||
+        !pastTip.valid || !Near(pastTip.axisFraction, 1.0F) ||
+        !Near(pastTip.tipToContactMeters, 0.20F) ||
+        !Near(pastTip.capsuleSurfaceGapMeters, 0.15F) ||
+        MeasurePhysicalMeleeContactDistance(
+            distanceFrame, {0.0F, 0.0F, 0.0F}, 0.0F).valid) {
+        return Fail(
+            "contact distance must measure the finite capsule surface gap");
+    }
+
+    PhysicalMeleeContactDistance nearCapsule = onCapsule;
+    nearCapsule.capsuleSurfaceGapMeters = 0.009F;
+    if (!PhysicalMeleeContactWithinConfiguredCollider(onCapsule) ||
+        !PhysicalMeleeContactWithinConfiguredCollider(nearCapsule) ||
+        PhysicalMeleeContactWithinConfiguredCollider(outsideCapsule) ||
+        PhysicalMeleeContactWithinConfiguredCollider(
+            PhysicalMeleeContactDistance{}) ||
+        PhysicalMeleeContactWithinConfiguredCollider(
+            onCapsule, -1.0F) ||
+        PhysicalMeleeContactWithinConfiguredCollider(
+            onCapsule, std::numeric_limits<float>::quiet_NaN())) {
+        return Fail(
+            "configured capsule gate must allow only finite surface overlap");
+    }
+
+    PhysicalMeleeContactState distanceGateState{};
+    PhysicalMeleeContactQualification gatedContact =
+        QualifyPhysicalMeleeContactAtDistance(
+            distanceGateState, 0x1234U, frame, 2U,
+            outsideCapsule, profile, false);
+    if (gatedContact.accepted ||
+        gatedContact.reason !=
+            PhysicalMeleeContactReason::OutsideConfiguredCollider ||
+        distanceGateState.targetCount != 0U ||
+        distanceGateState.haveContact || !distanceGateState.armed) {
+        return Fail(
+            "distant native callback must not latch the Retail target");
+    }
+    gatedContact = QualifyPhysicalMeleeContactAtDistance(
+        distanceGateState, 0x1234U, frame, 2U,
+        onCapsule, profile, false);
+    if (!gatedContact.accepted ||
+        gatedContact.reason != PhysicalMeleeContactReason::Accepted ||
+        distanceGateState.targetCount != 1U) {
+        return Fail(
+            "real configured-capsule overlap must remain accepted");
+    }
+    PhysicalMeleeContactState invalidDistanceState{};
+    gatedContact = QualifyPhysicalMeleeContactAtDistance(
+        invalidDistanceState, 0x1234U, frame, 2U,
+        PhysicalMeleeContactDistance{}, profile, false);
+    if (gatedContact.accepted ||
+        gatedContact.reason != PhysicalMeleeContactReason::InvalidContact ||
+        invalidDistanceState.targetCount != 0U) {
+        return Fail("invalid contact position must fail closed before latch");
+    }
+
     PhysicalMeleeContactState contactState{};
     PhysicalMeleeContactQualification contact =
         QualifyPhysicalMeleeContact(
-            contactState, 0x1234U, frame.currentTipUnits,
-            {1.0F, 0.0F, 0.0F}, frame, 2U, profile);
+            contactState, 0x1234U, frame, 2U, profile);
     if (!contact.accepted ||
         contact.reason != PhysicalMeleeContactReason::Accepted ||
-        !Near(contact.normalSpeedMetersPerSecond, 2.0F) ||
-        !Near(contact.normalEnergyJoules, 4.0F) ||
+        !Near(contact.swingSpeedMetersPerSecond, 2.0F) ||
+        !Near(contact.swingEnergyJoules, 4.0F) ||
         contactState.armed || !contactState.haveContact) {
-        return Fail("qualified normal impact must latch exactly once");
+        return Fail("speed-qualified swing must latch exactly once");
     }
     contact = QualifyPhysicalMeleeContact(
-        contactState, 0x1234U, frame.currentTipUnits,
-        {1.0F, 0.0F, 0.0F}, frame, 2U, profile);
+        contactState, 0x1234U, frame, 2U, profile);
     if (contact.accepted ||
         contact.reason != PhysicalMeleeContactReason::ContactLatched) {
         return Fail("latched contact must reject duplicate callbacks");
     }
-    if (UpdatePhysicalMeleeContactSeparation(
-            contactState,
-            PhysicalMeleeAdd(
-                frame.currentTipUnits, {0.0F, 50.0F, 0.0F}),
-            true, profile) || contactState.armed) {
-        return Fail("tangential wall motion must not re-arm contact");
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x5678U, frame, 2U, profile);
+    if (!contact.accepted || contactState.targetCount != 2U) {
+        return Fail("one sweep must accept each distinct target once");
     }
-    if (!UpdatePhysicalMeleeContactSeparation(
-            contactState,
-            PhysicalMeleeAdd(
-                frame.currentTipUnits, {13.0F, 0.0F, 0.0F}),
-            true, profile) || !contactState.armed ||
-        contactState.haveContact) {
-        return Fail("normal separation must re-arm physical contact");
+    PhysicalMeleeFrame contactRearmFrame = frame;
+    contactRearmFrame.currentTipUnits = PhysicalMeleeAdd(
+        frame.currentTipUnits, {0.0F, 11.0F, 0.0F});
+    PhysicalMeleeContactRearmUpdate contactRearm =
+        UpdatePhysicalMeleeContactRearm(
+            contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed || contactRearm.distanceReached ||
+        contactState.armed) {
+        return Fail("sub-threshold tip travel must not re-arm contact");
     }
-    PhysicalMeleeFrame tangentialFrame = frame;
-    tangentialFrame.tipVelocityUnitsPerSecond = {
+    contactRearmFrame.currentTipUnits = PhysicalMeleeAdd(
+        frame.currentTipUnits, {0.0F, 13.0F, 0.0F});
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed || !contactRearm.distanceReached ||
+        !contactRearm.distanceReachedThisSample ||
+        contactRearm.releaseSampleCount != 0U ||
+        contactState.armed) {
+        return Fail(
+            "fast follow-through must stay latched after rearm travel");
+    }
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, contactRearmFrame, 3U, profile);
+    if (contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::ContactLatched) {
+        return Fail(
+            "same target must remain blocked throughout the fast swing");
+    }
+    PhysicalMeleeFrame transientInvalidFrame = contactRearmFrame;
+    transientInvalidFrame.sweepValid = false;
+    contactState.releaseSampleCount = 2U;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, transientInvalidFrame, true, profile);
+    if (contactRearm.rearmed || !contactRearm.invalidSampleHeld ||
+        !contactRearm.distanceReached ||
+        contactRearm.releaseSampleCount != 0U ||
+        !contactState.haveContact || contactState.armed ||
+        contactState.targetCount != 2U ||
+        contactState.releaseSampleCount != 0U) {
+        return Fail(
+            "transient invalid sample must hold latch and reset dwell");
+    }
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, contactRearmFrame, 4U, profile);
+    if (contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::ContactLatched) {
+        return Fail(
+            "invalid sweep sample must not reopen same-target damage");
+    }
+    contactRearmFrame.impactSpeedMetersPerSecond = 0.5F;
+    contactRearmFrame.damageQualified = false;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed ||
+        contactRearm.releaseSampleCount != 1U ||
+        !Near(contactRearm.releaseSpeedMetersPerSecond, 0.625F)) {
+        return Fail("one low-speed sample must not re-arm contact");
+    }
+    contactRearmFrame.impactSpeedMetersPerSecond = 2.0F;
+    contactRearmFrame.damageQualified = true;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed ||
+        contactRearm.releaseSampleCount != 0U) {
+        return Fail("renewed fast motion must cancel a partial reset");
+    }
+    contactRearmFrame.impactSpeedMetersPerSecond = 0.5F;
+    contactRearmFrame.damageQualified = false;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed ||
+        contactRearm.releaseSampleCount != 1U) {
+        return Fail("release dwell must restart after speed rises");
+    }
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (contactRearm.rearmed ||
+        contactRearm.releaseSampleCount != 2U) {
+        return Fail("release hysteresis must reject a two-sample dip");
+    }
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        contactState, contactRearmFrame, true, profile);
+    if (!contactRearm.rearmed ||
+        contactRearm.releaseSampleCount !=
+            kPhysicalMeleeContactReleaseSampleCount ||
+        !contactState.armed || contactState.haveContact) {
+        return Fail(
+            "completed low-speed reset must re-arm physical contact");
+    }
+    PhysicalMeleeFrame crossSurfaceFrame = frame;
+    crossSurfaceFrame.tipVelocityUnitsPerSecond = {
         0.0F, 200.0F, 0.0F};
     contact = QualifyPhysicalMeleeContact(
-        contactState, 0x1234U, frame.currentTipUnits,
-        {1.0F, 0.0F, 0.0F}, tangentialFrame, 3U, profile);
+        contactState, 0x1234U, crossSurfaceFrame, 3U, profile);
+    if (!contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::Accepted) {
+        return Fail("qualified swing must not depend on contact normal");
+    }
+    ResetPhysicalMeleeContactState(contactState);
+    PhysicalMeleeFrame slowContactFrame = frame;
+    slowContactFrame.damageQualified = false;
+    slowContactFrame.impactSpeedMetersPerSecond = 0.5F;
+    slowContactFrame.impactEnergyJoules = 0.25F;
+    contact = QualifyPhysicalMeleeContact(
+        contactState, 0x1234U, slowContactFrame, 4U, profile);
     if (contact.accepted ||
-        contact.reason != PhysicalMeleeContactReason::BelowNormalSpeed) {
-        return Fail("tangential speed must not qualify as impact energy");
+        contact.reason != PhysicalMeleeContactReason::SwingNotQualified) {
+        return Fail("slow swing must fail contact qualification");
     }
     contact = QualifyPhysicalMeleeContact(
-        contactState, 0x1234U, frame.currentTipUnits,
-        {0.0F, 0.0F, 0.0F}, frame, 3U, profile);
-    if (contact.accepted ||
-        contact.reason != PhysicalMeleeContactReason::InvalidContact) {
-        return Fail("invalid contact normals must fail closed");
+        contactState, 0x1234U, slowContactFrame, 4U, profile, false);
+    if (!contact.accepted ||
+        contact.reason != PhysicalMeleeContactReason::Accepted) {
+        return Fail("overlap-only contact must not require swing force");
     }
+
+    // The first configurable contact gate is intentionally speed-only.
+    // A light weapon at 1.5 m/s carries less than the legacy one-joule
+    // threshold but must still qualify once it clears Hit Speed.
+    PhysicalMeleeProfile speedOnlyProfile = profile;
+    speedOnlyProfile.massKilograms = 0.5F;
+    PhysicalMeleeKinematicsState speedOnlyState{};
+    UpdatePhysicalMeleeKinematics(
+        speedOnlyState, Pose(0.0F, 0.0F, 0.0F), true,
+        5'000'000'000ULL, speedOnlyProfile);
+    const PhysicalMeleeFrame speedOnlyFrame =
+        UpdatePhysicalMeleeKinematics(
+            speedOnlyState, Pose(1.5F, 0.0F, 0.0F), true,
+            5'010'000'000ULL, speedOnlyProfile);
+    PhysicalMeleeContactState speedOnlyContactState{};
+    const PhysicalMeleeContactQualification speedOnlyContact =
+        QualifyPhysicalMeleeContact(
+            speedOnlyContactState, 0x7777U, speedOnlyFrame, 5U,
+            speedOnlyProfile);
+    if (!speedOnlyFrame.damageQualified ||
+        speedOnlyFrame.impactEnergyJoules >=
+            speedOnlyProfile.minimumImpactEnergyJoules ||
+        !speedOnlyContact.accepted) {
+        return Fail(
+            "physical hit qualification must use Hit Speed, not energy");
+    }
+
+    // Rearm Distance is the per-weapon travel guard, but it cannot end an
+    // otherwise continuous fast swing by itself.
+    PhysicalMeleeProfile shortRearmProfile = profile;
+    shortRearmProfile.contactRearmSeparationMeters = 0.05F;
+    PhysicalMeleeContactState shortRearmState{};
+    contact = QualifyPhysicalMeleeContact(
+        shortRearmState, 0x8888U, frame, 6U, shortRearmProfile);
+    contactRearmFrame = frame;
+    contactRearmFrame.currentTipUnits = PhysicalMeleeAdd(
+        frame.currentTipUnits, {0.0F, 4.0F, 0.0F});
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (!contact.accepted || contactRearm.rearmed ||
+        contactRearm.distanceReached) {
+        return Fail(
+            "configured rearm travel must reject a short follow-through");
+    }
+    contactRearmFrame.currentTipUnits = PhysicalMeleeAdd(
+        frame.currentTipUnits, {0.0F, 6.0F, 0.0F});
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (contactRearm.rearmed || !contactRearm.distanceReached) {
+        return Fail(
+            "configured rearm travel must mark the distance guard");
+    }
+    contactRearmFrame.currentTipUnits = PhysicalMeleeAdd(
+        frame.currentTipUnits, {0.0F, 106.0F, 0.0F});
+    contactRearmFrame.impactSpeedMetersPerSecond = 8.0F;
+    contactRearmFrame.damageQualified = true;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (contactRearm.rearmed ||
+        contactRearm.maximumTipDisplacementMeters < 1.0F ||
+        shortRearmState.armed) {
+        return Fail(
+            "one metre of fast follow-through must remain one swing");
+    }
+    contactRearmFrame.impactSpeedMetersPerSecond = 0.5F;
+    contactRearmFrame.damageQualified = false;
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (contactRearm.rearmed) {
+        return Fail("first release sample must keep contact latched");
+    }
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (contactRearm.rearmed) {
+        return Fail("second release sample must keep contact latched");
+    }
+    contactRearm = UpdatePhysicalMeleeContactRearm(
+        shortRearmState, contactRearmFrame, true, shortRearmProfile);
+    if (!contactRearm.rearmed || !shortRearmState.armed) {
+        return Fail(
+            "distance plus a completed swing must re-arm contact");
+    }
+
 
     // Slow motion remains a valid collision sweep but does not qualify for
     // damage.
