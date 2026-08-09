@@ -39,8 +39,8 @@
     Enables the separately guarded M4 right-grip Activate command gate.
 
 .PARAMETER CoreActionsProbe
-    Enables the guarded M4 run, fire, block, weapon-toggle,
-    ammo-check, stun-gun, and flashlight command gate.
+    Enables the guarded M4 run, fire, block, weapon-toggle, ammo-check,
+    stun-gun, flashlight, and forensic-tool command gate.
 
 .PARAMETER HapticsProbe
     Enables bounded M4 Fire, Block, and Activate confirmation pulses.
@@ -144,11 +144,12 @@
     -PhysicalMeleeVisualProxy.
 
 .PARAMETER WeaponTest
-    Applies a complete guarded headset-test preset for a known weapon. `Pipe`
-    enables the accepted M4 controls, one-handed physical-melee proxy, live
-    grip calibration, full arm IK, recentering, and desktop-window workflow.
-    It deliberately leaves two-hand attachment disabled. Equip Retail weapon
-    index 32 (`pipe_lever`) after launch.
+    Applies the complete guarded one-handed melee headset-test preset. The
+    retained `Pipe` switch name identifies the accepted baseline/configuration;
+    mapped one-handed weapons inherit that baseline until they receive their
+    own per-index save. The preset enables the accepted M4 controls, physical-
+    melee proxy, live grip calibration, full arm IK, recentering, and desktop-
+    window workflow. It deliberately leaves two-hand attachment disabled.
 
 .PARAMETER NoHidFpsFix
     Diagnostic rollback that leaves Condemned's redundant Jupiter EX
@@ -1083,8 +1084,11 @@ try {
         Write-Host "Startup:   $StartupImage"
     }
     if ($WeaponTest -eq 'Pipe') {
-        Write-Host ('Pipe combat test: equip pipe_lever (Retail index 32); ' +
-            'live contact damage is ON; two-hand attachment is OFF.') -ForegroundColor Cyan
+        Write-Host ('One-handed combat test (Pipe baseline): equip any mapped ' +
+            'one-handed melee weapon; live contact damage is ON; two-hand ' +
+            'attachment is OFF.') -ForegroundColor Cyan
+        Write-Host ('  Unarmed, ordinary firearms, two-handers, and unknown ' +
+            'weapon indices remain excluded.') -ForegroundColor Cyan
         Write-Host ('  If Retail collision is not seeded yet, one deliberate swing ' +
             'primes it; later contacts are checked continuously.') -ForegroundColor Cyan
         Write-Host ('  Collider wireframe: AMBER = preview waiting for seed; ' +
@@ -1113,6 +1117,14 @@ try {
     Write-Host 'The headset should show the normal desktop image on a stable mono quad.'
     if ($MenuControlsProbe) {
         Write-Host 'VR menu controls: left stick = navigate; A/trigger = accept; B = back.' `
+            -ForegroundColor Cyan
+    }
+    if ($CoreActionsProbe) {
+        Write-Host 'Forensic tool: push the right stick fully UP (75% threshold).' `
+            -ForegroundColor Cyan
+    }
+    if ($MenuProbe) {
+        Write-Host 'Pause menu: Y. VR Tools remains BOTH grips + Y.' `
             -ForegroundColor Cyan
     }
     if ($WeaponGripCalibration) {

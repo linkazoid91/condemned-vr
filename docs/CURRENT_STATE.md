@@ -1,6 +1,6 @@
 # Current state
 
-Snapshot basis: repository working tree and checked-in evidence reviewed on 9
+Snapshot basis: repository working tree and checked-in evidence reviewed on 10
 August 2026. Detailed proof, run IDs, addresses, and historical failures stay in
 the linked milestone documents; re-check against newer evidence before use.
 
@@ -25,8 +25,61 @@ Detailed active evidence: [`CONDEMNED-M5.md`](CONDEMNED-M5.md).
 
 ## Current objective
 
-Correct the pipe collision-body alignment while preserving the now-confirmed
-repeatable enemy damage path after one Retail seed. Live run
+Promote the live-accepted Pipe setup into a temporary, fail-closed baseline for
+the verified one-handed majority while preserving per-weapon tuning isolation.
+The working tree now maps the 26 modeled `WEAP_1HandedDebris` indices plus
+Crowbar, excludes `Unarmed`, normal firearm states, two-handers, and unknown
+indices, and lets an unedited mapped weapon read the Pipe's Melee/Weapon,
+Collider, Grip, and right-hand IK records. The first save for that weapon
+shadows only the corresponding fallback record.
+
+Live run `run-20260809-113629` proves the new path at the engine boundary for
+Retail index 29 (`Pipe`, profile `one_handed_debris`): all four records loaded
+with `source=pipe_baseline`, the native capsule override consumed
+`read_mask=0x7`, and three actor contacts across two targets were accepted and
+native-forwarded at 8.630--12.175 m/s. Headset-visible enemy reaction/damage is
+awaiting the tester's explicit confirmation. Other newly mapped
+collision/damage paths remain automated-only until individually sampled live.
+The same run selected index 0 (`2x4`, profile `plank`): its existing
+Melee/Weapon record loaded from `source=weapon_record`, while Collider, Grip,
+and right-hand IK independently inherited `source=pipe_baseline`. This
+live-verifies per-record precedence/isolation, but not 2x4 collision or damage;
+the 2x4 body was not left seeded for a bounded actor-hit pass.
+The live-tested staged loader SHA-256 is
+`00F120FA5A5F4C5F0B0609E9B20BF1371BA2FACC95891CF42B839DD2126B40A0`;
+the full RelWithDebInfo gate passes 19/19 x86 and 15/15 x64 tests, and the
+PowerShell helper/parser checks pass.
+
+The working tree also adds two independent visibility controls at the top of
+the VR Tools `DEBUG` tab: `DRAW MELEE COLLIDER` and `DRAW CONTROLLERS`. They
+default on and reset on process restart. The gates are draw-only: collision,
+contact damage, controller input, grip/IK calibration, and weapon state continue
+underneath a hidden overlay. Automated transition tests prove that the toggles
+do not affect one another; the complete RelWithDebInfo gate again passes 19/19
+x86 and 15/15 x64. The refreshed staged loader SHA-256 is
+`FF89DA8555392B4312972637053124CB7E346BB435D6CB05F54315FA206FDE2D`.
+Run `run-20260809-124936` live-accepts the UI change. The headset tester
+confirmed both overlays hide and restore correctly, while the ordered menu log
+records independent `1/1 -> 0/1 -> 0/0 -> 0/1 -> 1/1` transitions. The
+collider was then hidden again before contact began. The first actor contact
+was accepted/native-forwarded at 12.139 m/s and the bounded run ended with 32
+accepted/native-forwarded damage dispatches, 28 rearms, three multi-target
+swings, 532/532 clean reference-vector releases, and zero failures. This
+proves collider visibility is independent of collision/damage. Earlier attempts
+`run-20260809-120422` and `run-20260809-120452` stopped before game start only
+because the HMD was unavailable to VirtualDesktopXR.
+
+The 10 August staged build also extends the guarded core controls with Retail's
+Tools command 116 on a deliberate right-stick-up gesture (vertical axis at or
+above 0.75). Plain Y remains the pause-menu control, and both grips + Y remains
+the separate VR Tools chord. The same focus, freshness, playing-state, and
+calibration/menu-capture guards apply. The complete RelWithDebInfo gate passes
+19/19 x86 and 15/15 x64 tests; the new project-local stage loader is
+`C950716B4690A3411C6E0FF18B3CFCCC7FA75D34E307CC65ACB701DD05B6DE94`. This
+control extension remains **implemented, staged, and automated-only** until a
+crime-scene prompt proves the expected forensic tool behavior in-headset.
+
+The earlier Pipe acceptance evidence remains the reference baseline. Live run
 `run-20260808-060131` proved the corrected reference-vector lifecycle at
 callback level: its first 512 callbacks contained 42 accepted contacts, 40
 native forwards, 510 successfully released live references, repeated 0.12 m
@@ -201,13 +254,15 @@ performs the final target/material/damage handoff.
 Only profile data should vary: weapon identity, grip, capsule base/tip/radius,
 mass/thresholds, and optional support-hand settings.
 
-The current executable gate is still deliberately exact-pipe-only (Retail index
-32 and `PhysicalMeleeProfileId::Pipe`). The pipe pass proves the common
-constructor ABI and behavior, but it is not evidence that another weapon is
-already enabled. Each later melee identity must be assigned a verified profile,
-admitted to the shared native-capsule/contact gate, and live-tested once. If a
-weapon does not use the verified Retail constructor path, it must fail closed
-instead of silently inheriting pipe behavior.
+The executable gate now admits only the explicit mapped one-handed
+index/profile pairs. Native replacement still requires the collision owner to
+be the local player's weapon, so enemy-owned instances cannot borrow the
+current player's profile. Index 29 proves that a second identity reaches the
+shared constructor/contact/native-dispatch path; it does not prove the visual
+alignment or Retail lifecycle of every mapped asset. Each remaining identity
+still needs a bounded live sample. If one takes a different Retail path, it
+must be removed or held fail-closed rather than silently retaining the Pipe
+baseline.
 
 ## Known-good and current systems
 
@@ -221,14 +276,14 @@ instead of silently inheriting pipe behavior.
 | Native stereo | **PASS** | M3 live at 100% render scale and 130% coupled FOV; distinct fuseable eyes, state restoration, no repeated simulation |
 | HMD rotation | **PASS** | M3 live full relative yaw/pitch/roll and recenter |
 | HMD translation | **PASS** | M3 live bounded relative translation; current path limits unsafe travel and falls back on stale tracking |
-| Controller transport/input | **PASS** | M4 live poses/actions, loss neutralization, locomotion, turning, interaction, menus, and core actions |
+| Controller transport/input | **PASS** | M4 base controls pass live; right-stick-up forensic command 116 is staged and automated-only pending its focused live gate |
 | Locomotion | **PASS** | M4 live left-stick movement and right-stick turning with keyboard/mouse coexistence |
 | Weapon/fire aiming | **PARTIAL** | Right-controller fire-vector path and HMD-relative view/flashlight exist; representative firearms, recoil, tools, and complete gameplay coverage remain M5 work |
 | Visible weapon pose | **EXPERIMENTAL** | Profile-calibrated Retail model is overridden only during eye renders and restored exactly; no standalone held object yet |
 | Simulated weapon weight | **EXPERIMENTAL** | Bounded player-local damped-spring solver is automated-tested and drives visible/collision pose; it is not collision-constrained physics |
-| Melee collision | **PARTIAL** | Pipe native geometry, continuous overlap, and configurable speed-qualified contact pass live; alternate weapon profiles remain unverified |
+| Melee collision | **PARTIAL** | Pipe reference path and index-29 inherited native geometry/continuous speed-qualified overlap pass live; the other mapped one-handed assets remain unverified |
 | Actor contact qualification | **EXPERIMENTAL** | Pipe ownership, 1 cm overlap, 7.25 m/s Hit Speed, and 0.12 m travel-plus-swing-end rearm pass live with zero same-target reaccepts; the transient-invalid hold is regression-tested but was not naturally invoked in the confirmation run |
-| Native damage handoff | **PARTIAL** | Sixteen speed-qualified pipe contacts native-forwarded in the accepted run with clean lifecycle handling; fire-axe and other-weapon dispatch remain unproven |
+| Native damage handoff | **PARTIAL** | Pipe damage is live-accepted; index 29 produced three clean actor native-forwards across two targets, with explicit headset-visible damage confirmation pending; remaining assets are unproven |
 | Arm/hand IK | **PARTIAL** | Condemned skeleton/chains, callback order, wrist placement, locomotion anchoring, and initial calibrations have live evidence; broad lifecycle/pose regression remains |
 | Haptics | **PARTIAL** | M4 bounded input-confirmation pulses passed live; melee-impact impulse haptics and verified weapon-event feedback are not implemented |
 | HUD/UI | **PARTIAL** | Retail menu/screen comfort panel and controller menu navigation passed live; VR Tools is developer UI; gameplay HUD/effects/cutscene classification lacks representative acceptance |
@@ -262,13 +317,13 @@ player-local bounded weapon-weight solver                   [EXPERIMENTAL]
         Retail registered collision callback                 [VERIFIED / observed live]
                 |
                 v
-        player-owned + fresh pipe context + per-swing target de-dupe
+        player-owned + mapped one-hand context + per-swing target de-dupe
         + configurable tip travel                             [IMPLEMENTED; automated]
         + 3-sample low-speed release                           [PASS; pipe live]
-        + optional Require Swing / Hit Speed gate              [PASS; pipe live]
+        + optional Require Swing / Hit Speed gate              [PASS; pipe + index 29 live]
                 |
                 v
-        Condemned native impact dispatcher                   [PARTIAL; repeat pipe damage live]
+        Condemned native impact dispatcher                   [PARTIAL; pipe + index 29 forwards live]
                 |
                 v
         game-owned damage/material effects/AI/sound          [Retail-owned]
@@ -374,31 +429,34 @@ one record; and impact haptics do not exist. Improve only as an experiment needs
 
 ## Next experiment
 
-**Hypothesis:** the Pipe result represents a shared one-handed melee state
-machine, so the next selected common one-handed weapon should require profile
-data and alignment tuning rather than another collision/damage architecture.
+**Hypothesis:** index 29 proves the shared architecture, but a visually
+different common one-handed asset will need only per-index geometry/grip
+correction rather than another damage implementation.
 
-- **Baseline:** `run-20260809-095447` live-accepts the Pipe at Hit Speed
-  7.25 m/s and Rearm Travel 0.12 m: six forwards, 34 blocked same-swing
-  callbacks, six valid rearms, zero invariant failures, and 60/60 clean Retail
-  reference releases.
-- **Minimal change:** select one additional common one-handed Retail weapon
-  identity, add or tune only its profile, grip, and capsule data, and preserve
-  the shared contact/rearm code unchanged.
-- **Headset procedure:** equip the selected weapon, perform the current
-  seed-only Retail swing if needed, align its collider, then verify slow overlap
-  rejects, fast overlap damages once, continuous follow-through stays latched,
-  and a later deliberate swing rearms naturally.
-- **Diagnostics:** require the correct weapon index/profile, a player-owned
-  seeded collider with `read_mask=0x7`, zero
-  `SameTargetAcceptedBeforeRearm`, clean Retail reference release, and completed
-  `swing_completed` events at `release_samples=3/3`.
-- **Success:** the new weapon damages each distinct target at most once per
-  swing and repeats only after a valid reset, without Pipe-specific code.
-- **Failure interpretation:** identity/geometry failures belong to the new
-  weapon profile; a shared lifecycle invariant failure challenges the common
-  state machine and must also be regressed against the Pipe.
-- **Rollback:** disable the new profile and retain the accepted Pipe path.
+- **Baseline:** `run-20260809-113629` loaded all four Pipe-baseline records for
+  index 29, consumed native `read_mask=0x7`, and produced three clean actor
+  native forwards across two targets. The accepted Pipe reference remains
+  `run-20260809-095447`.
+- **Minimal change:** select a different form factor such as
+  `meat_cleaver` (27), `mannequin_arm` (26), or a 2x4; inspect the inherited
+  pose/collider before saving only that index's required corrections.
+- **Headset procedure:** equip and seed it, verify the inherited settings are
+  visible, align only if needed, then check slow rejection, one fast hit,
+  continuous-follow-through latching, and a later rearmed swing. Relaunch once
+  after any edit.
+- **Diagnostics:** first require four `source=pipe_baseline` events, then
+  `read_mask=0x7`, clean Retail reference release and native forwarding. After
+  an edit/relaunch, require `source=weapon_record` for that record while index
+  32 remains byte-for-byte unchanged.
+- **Success:** the asset aligns and damages each target at most once per swing,
+  repeats only after a valid reset, and keeps its correction isolated from the
+  Pipe and other one-handed weapons.
+- **Failure interpretation:** a fit problem belongs to that index's profile;
+  a missing constructor/callback path means that identity must be removed or
+  held fail-closed. A shared lifecycle invariant failure must also be regressed
+  against the Pipe.
+- **Rollback:** remove only the failing index from the explicit allowlist and
+  retain the accepted Pipe/index-29 paths.
 - **Headset required:** yes.
 
 Do not retune the accepted Pipe collider or 7.25/0.12 hit baseline while
@@ -417,9 +475,9 @@ locations. Exact evidence is in M0–M5, not repeated here.
 
 Still unresolved:
 
-- promotion of the verified exact-pipe native capsule/contact gate to each
-  mapped melee identity, including evidence that the weapon uses the same
-  Retail constructor path and its own profile geometry;
+- representative headset validation and asset-specific grip/collider tuning
+  across the newly mapped one-handed allowlist; only index 29 has crossed the
+  shared constructor/contact/native-forward boundary so far;
 - headset acceptance and final tuning for Hit Speed/Rearm Travel plus future
   impact-energy and per-material scaling;
 - automatic equip-time collision-body seeding with a verified safe lifecycle;

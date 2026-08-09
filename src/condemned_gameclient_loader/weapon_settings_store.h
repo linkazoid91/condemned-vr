@@ -40,6 +40,18 @@ WeaponSettingsStoreResult LoadWeaponToolSettings(
     PhysicalMeleeProfileId expectedProfileId,
     ToolMenuMeleeSettings& settings) noexcept;
 
+// Mapped one-handed weapons without a valid per-index record may temporarily
+// read the accepted Pipe record. These fallback loads never write or copy the
+// record; the first ordinary save for the equipped index shadows only that
+// setting family. Malformed data and ineligible/mismatched identities remain
+// fail-closed.
+WeaponSettingsStoreResult
+LoadWeaponToolSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuMeleeSettings& settings,
+    bool& inheritedPipeBaseline) noexcept;
+
 WeaponSettingsStoreResult SaveWeaponToolSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId profileId,
@@ -51,6 +63,13 @@ WeaponSettingsStoreResult LoadWeaponColliderSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId expectedProfileId,
     ToolMenuColliderSettings& settings) noexcept;
+
+WeaponSettingsStoreResult
+LoadWeaponColliderSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuColliderSettings& settings,
+    bool& inheritedPipeBaseline) noexcept;
 
 WeaponSettingsStoreResult SaveWeaponColliderSettings(
     std::int32_t weaponIndex,
@@ -64,6 +83,13 @@ WeaponSettingsStoreResult LoadWeaponGripSettings(
     PhysicalMeleeProfileId expectedProfileId,
     WeaponGripSettings& settings) noexcept;
 
+WeaponSettingsStoreResult
+LoadWeaponGripSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    WeaponGripSettings& settings,
+    bool& inheritedPipeBaseline) noexcept;
+
 WeaponSettingsStoreResult SaveWeaponGripSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId profileId,
@@ -75,6 +101,13 @@ WeaponSettingsStoreResult LoadWeaponRightHandIkSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId expectedProfileId,
     ToolMenuRightHandIkSettings& settings) noexcept;
+
+WeaponSettingsStoreResult
+LoadWeaponRightHandIkSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuRightHandIkSettings& settings,
+    bool& inheritedPipeBaseline) noexcept;
 
 WeaponSettingsStoreResult SaveWeaponRightHandIkSettings(
     std::int32_t weaponIndex,

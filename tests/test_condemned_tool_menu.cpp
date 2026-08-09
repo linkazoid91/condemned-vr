@@ -87,6 +87,31 @@ int main() {
             "COLLIDER") != 0) {
         return Fail("collider setup must have a dedicated bounded menu tab");
     }
+    if (ToolMenuRowCount(ToolMenuTab::Debug) != 2U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Debug),
+            "DEBUG") != 0) {
+        return Fail(
+            "debug draw visibility must have two independent menu rows");
+    }
+    ToolMenuDebugDrawSettings debugDraw{};
+    if (!debugDraw.colliderVisible ||
+        !debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 0U, 0, true) ||
+        debugDraw.colliderVisible ||
+        !debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 1U, -1, false) ||
+        debugDraw.colliderVisible ||
+        debugDraw.controllerVisible ||
+        UpdateToolMenuDebugDrawSettings(
+            debugDraw, 1U, 0, false) ||
+        UpdateToolMenuDebugDrawSettings(
+            debugDraw, 2U, 1, false)) {
+        return Fail(
+            "debug draw toggles must default visible and remain independent");
+    }
     LiveColliderAlignmentCommand liveCommand{};
     const char* const validLiveCommand =
         "version=1 revision=42 process_id=1234 weapon_index=32 "
@@ -210,9 +235,9 @@ int main() {
     input = {};
     input.previousTab = true;
     transition = UpdateToolMenuState(state, input);
-    if (state.tab != ToolMenuTab::Debug || state.row != 0U ||
+    if (state.tab != ToolMenuTab::Debug || state.row != 1U ||
         !transition.selectionChanged) {
-        return Fail("tool-menu tabs must wrap and clamp their row");
+        return Fail("tool-menu tabs must wrap while retaining a valid row");
     }
     input = {};
     input.nextTab = true;
@@ -223,7 +248,7 @@ int main() {
     input = {};
     input.nextRow = true;
     UpdateToolMenuState(state, input);
-    if (state.row != 1U) {
+    if (state.row != 2U) {
         return Fail("melee rows must advance deterministically");
     }
     input = {};
@@ -299,6 +324,25 @@ int main() {
         std::strcmp(ToolMenuWeaponProfileLabel(pipe.id), "PIPE") != 0) {
         return Fail(
             "pipe_lever must expose its independent one-hand tool profile");
+    }
+    const PhysicalMeleeProfile oneHandedDebris =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(29);
+    if (oneHandedDebris.id !=
+            PhysicalMeleeProfileId::OneHandedDebris ||
+        !ToolMenuProfileSupportsSwingAttack(oneHandedDebris.id) ||
+        !ToolMenuMeleeSettingsFromProfile(
+             oneHandedDebris).swingAttackEnabled ||
+        std::strcmp(
+            ToolMenuWeaponProfileLabel(oneHandedDebris.id),
+            "ONE-HANDED") != 0 ||
+        !Near(
+            oneHandedDebris.modelLocalGripPositionUnits.y,
+            pipe.modelLocalGripPositionUnits.y) ||
+        !Near(
+            oneHandedDebris.handlingWeight,
+            pipe.handlingWeight)) {
+        return Fail(
+            "mapped one-handed debris must expose the temporary pipe baseline");
     }
     ToolMenuColliderSettings collider =
         ToolMenuColliderSettingsFromProfile(pipe);

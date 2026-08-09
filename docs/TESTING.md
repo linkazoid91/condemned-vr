@@ -49,6 +49,22 @@ Run live tests only against the verified `1.0.314.0` Steam build.
 | Save lifecycle | Load, death/respawn and level transition invalidate stale object pointers safely |
 | Exit | Game and host terminate without a hang or persistent system-wide runtime change |
 
+### Forensic tool control gate
+
+At a playable crime-scene prompt with `-CoreActionsProbe` armed:
+
+1. Press plain Y: Retail's pause menu must open and no forensic tool may ready.
+2. Resume, release every control, then push the right stick fully up once: the
+   expected forensic tool must ready exactly once.
+3. Release the stick, repeat the gesture, and confirm Retail accepts a later
+   tool action rather than treating the first edge as permanently held.
+4. Turn fully left and right without a large upward component; the forensic
+   tool must not ready. Both grips + Y must still open VR Tools.
+
+Accept the gate only when `m4_binding_core_action_applied` records command 116
+with `control=right_stick_up` on press and release, command 116 produces the
+headset-visible Retail tool behavior, and both Y paths retain their roles.
+
 ## M5 physical-melee gates
 
 Physical melee is intentionally incremental. Validate each gate separately:
@@ -73,12 +89,14 @@ Physical melee is intentionally incremental. Validate each gate separately:
    corrected Pipe lifecycle at 0.12 m with zero same-target reaccepts. The
    transient-invalid hold itself remains regression-tested because the live
    counter was zero.
-7. Promote additional melee weapons through the same shared state machine one
-   identity at a time. Require a weapon-specific profile, proof that its body
-   reaches the verified constructor path, native override `read_mask=0x7`,
-   accurate slow/fast overlap behavior, de-duplication, rearm, clean Retail
-   references, and visible damage. A pipe pass is architectural evidence, not a
-   test pass for an untested weapon.
+7. The explicit mapped one-handed set now enters the same shared state machine.
+   Index 29 (`Pipe`) has live engine proof for four-record Pipe-baseline
+   inheritance, constructor `read_mask=0x7`, configured overlap, speed
+   qualification, clean Retail references, and native impact forwarding.
+   Treat every other newly mapped asset as implemented/automated-only until it
+   has at least one bounded live pass. Require accurate slow/fast overlap,
+   de-duplication, rearm, clean Retail references, and visible damage; one
+   weapon's pass is architectural evidence, not acceptance for every model.
 
 For the fastest headset loop, use:
 
@@ -86,7 +104,9 @@ For the fastest headset loop, use:
 .\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait
 ```
 
-The Pipe preset automatically starts a hidden weapon-diagnostics watcher. Poll
+The retained `Pipe` preset name identifies the accepted baseline; it enables
+the mapped one-handed allowlist and deliberately leaves two-handed attachment
+off. The preset automatically starts a hidden weapon-diagnostics watcher. Poll
 `weapon-diagnostics-live.json` in the newest session directory while the user
 remains in headset. It gives a direct phase, recommendation, last contact,
 reference-vector result, capsule-to-target contact distance and cumulative
@@ -113,15 +133,40 @@ Read the newest snapshot without modifying it with:
 ```
 
 
-Equip `pipe_lever`, then open the Debug tab's Melee view and confirm
-`CONTACT DAMAGE ON`.
-Confirm the wireframe follows the pipe: amber means it is still waiting for
-the first Retail collision seed, while green means the collision body is live.
+Equip the intended mapped one-handed weapon, then open the Debug tab's Melee
+view. Confirm the exact Retail index/profile and `CONTACT DAMAGE ON`.
+`Unarmed`, ordinary firearm states, two-handers, and unknown indices must
+remain excluded. Confirm the wireframe follows the held weapon: amber means it
+is still waiting for the first Retail collision seed, while green means the
+collision body is live.
 The cross at the tip is the exact proxy origin. The overlay is intentionally
 visible through geometry.
 
+The first two selectable rows in `DEBUG` are visibility-only developer
+controls:
+
+- `DRAW MELEE COLLIDER` hides or restores the amber/green capsule.
+- `DRAW CONTROLLERS` hides or restores the controller/grip calibration
+  wireframes when a calibration tab is active.
+
+Both default to `ON` for each process and are intentionally session-only.
+Turning either row off must not disable the native collider, contact damage,
+controller input, grip/IK calibration, or per-weapon settings. For headset
+acceptance, hide each overlay independently, confirm the other remains
+unchanged, then restore both and land one physical hit with the collider hidden.
+
+Live baseline `run-20260809-124936` completed that checklist. The tester
+confirmed the draw controls work in headset; the ordered loader log records
+independent `1/1 -> 0/1 -> 0/0 -> 0/1 -> 1/1` transitions. A later collider-off
+pass still produced 32 accepted/native-forwarded damage dispatches, 28 rearms,
+three multi-target swings, 532/532 clean Retail reference-vector releases, and
+zero reference failures.
+
 For physical-hit tuning, select `MELEE`. These are per-weapon, auto-saved
-settings:
+settings. A newly mapped one-handed index initially reports
+`source=pipe_baseline` for Melee/Weapon, Collider, Grip, and right-hand IK.
+Editing it creates only that index's record; relaunch and confirm
+`source=weapon_record` for the edited record while the Pipe remains unchanged.
 
 - `Require Swing`: toggle with A or the right stick. Off allows overlap-only
   contact; on requires the physical weapon to clear Hit Speed.
@@ -136,7 +181,7 @@ settings:
 
 Use this acceptance sequence:
 
-1. While the menu is open, move the pipe and confirm Live Speed changes and
+1. While the menu is open, move the held weapon and confirm Live Speed changes and
    Fast Enough flips at the configured threshold.
 2. Close VR Tools before contacting an enemy; damage intentionally fails closed
    while the menu is open.
@@ -161,14 +206,16 @@ native body. Automatic pickup seeding is recorded as deferred work.
 If it is misaligned, open VR Tools with both grips + Y and select `COLLIDER`.
 Use the left stick to choose position, pitch/yaw/roll, length, radius, direction,
 or reset; use the right stick to adjust and A to activate direction/reset.
-Changes preview immediately and auto-save for Retail index 32.
+Changes preview immediately and auto-save for the equipped Retail index.
+Never assume another one-handed model shares the Pipe's visual alignment.
 
 Verify weapon-model alignment persistence separately from collider alignment:
 
 1. Open the `GRIP` tab and confirm the Pipe initially shows the last saved
    position/rotation. The loader must report
-   `m5_weapon_grip_settings_loaded` with `result=ok` and
-   `source=local_app_data`.
+   `m5_weapon_grip_settings_loaded` with `result=ok` and either
+   `source=weapon_record` for its own saved value or
+   `source=pipe_baseline` for an unedited mapped one-handed weapon.
 2. Make one reversible position or rotation adjustment. Require
    `m5_weapon_grip_settings_saved` with `result=ok` and the exact displayed
    values. The menu path auto-saves; `SAVE GRIP SNAPSHOT` forces another save.

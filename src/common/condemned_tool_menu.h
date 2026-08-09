@@ -80,8 +80,9 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
     case ToolMenuTab::Display:
         return 9U;
     case ToolMenuTab::Controls:
-    case ToolMenuTab::Debug:
         return 1U;
+    case ToolMenuTab::Debug:
+        return 2U;
     default:
         return 0U;
     }
@@ -160,6 +161,31 @@ inline ToolMenuTransition UpdateToolMenuState(
     result.valueDelta = input.decrease ? -1 : input.increase ? 1 : 0;
     result.activate = input.activate;
     return result;
+}
+
+struct ToolMenuDebugDrawSettings {
+    bool colliderVisible{true};
+    bool controllerVisible{true};
+};
+
+inline bool UpdateToolMenuDebugDrawSettings(
+    ToolMenuDebugDrawSettings& settings,
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    if (delta == 0 && !activate) {
+        return false;
+    }
+    switch (row) {
+    case 0U:
+        settings.colliderVisible = !settings.colliderVisible;
+        return true;
+    case 1U:
+        settings.controllerVisible = !settings.controllerVisible;
+        return true;
+    default:
+        return false;
+    }
 }
 
 struct ToolMenuMeleeSettings {
@@ -500,7 +526,8 @@ inline bool ToolMenuProfileSupportsSwingAttack(
     return id == PhysicalMeleeProfileId::Pipe ||
         id == PhysicalMeleeProfileId::Crowbar ||
         id == PhysicalMeleeProfileId::FireAxe ||
-        id == PhysicalMeleeProfileId::Plank;
+        id == PhysicalMeleeProfileId::Plank ||
+        id == PhysicalMeleeProfileId::OneHandedDebris;
 }
 
 inline const char* ToolMenuWeaponProfileLabel(
@@ -514,6 +541,8 @@ inline const char* ToolMenuWeaponProfileLabel(
         return "FIRE AXE";
     case PhysicalMeleeProfileId::Plank:
         return "PLANK";
+    case PhysicalMeleeProfileId::OneHandedDebris:
+        return "ONE-HANDED";
     case PhysicalMeleeProfileId::GenericOneHanded:
         return "UNMAPPED WEAPON";
     default:

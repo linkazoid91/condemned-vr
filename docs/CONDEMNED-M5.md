@@ -109,13 +109,25 @@ maximum sweep, contact separation, and sample bounds. A read-only Retail
 database lookup now publishes the equipped record name and `AnimationProperty`
 to the tool menu and loader log. `pipe_lever` is verified as player-weapon
 index 32 with `WEAP_1HandedDebris`; it owns the first provisional one-hand pipe
-record. The Retail catalog probe also verifies the one-handed 2x4 family as
-indices 0 (`2x4`), 1 (`2x4_nails`), 64 (`2x4_burn`), and 65 (`2x4_Burned`),
-all using `WEAP_1HandedDebris`. Those four records deliberately share the
-accepted pipe grip, handling, and swing defaults for their first control pass.
-Crowbar, fire axe, and later weapons continue to share the pose, visual
-calibration, collision, qualification, damage, and haptic adapters without
-being forced into that preset.
+record. Live catalog probe `run-20260809-110503` resolved 79 stable Retail
+records and 27 `WEAP_1HandedDebris` entries. The explicit physical-weapon
+allowlist contains 26 of them: indices
+`0, 1, 5, 15, 16, 19, 26--36, 43, 44, 49, 50, 59, 62--65`.
+Index 61 (`Unarmed`) is deliberately excluded because it has no weapon model.
+Index 11 (`crowbar`) is the one extra weapon-specific pose admitted as
+verified one-handed melee. This covers the 2x4 family, clothes rack, firearm
+melee/broken-melee assets that Retail itself classifies as one-handed debris,
+fireplace poker, mannequin arm, meat cleaver, paper cutter, Pipe/pipe variants,
+rebar variants, subway handrail, and both Watcher sticks. Ordinary firearm
+states, Fire Axe, Shovel, Sledgehammer, two-handed debris, and unknown indices
+remain outside the gate.
+
+Until an allowed weapon has its own saved value, its Melee/Weapon, Collider,
+Grip, and right-hand IK records read the current `pipe_lever` record as a
+temporary baseline. The fallback is read-only: the first edit/save writes only
+that Retail index and shadows the corresponding Pipe value thereafter. A
+valid per-index record always wins; malformed values still fail closed rather
+than being hidden by the fallback.
 
 ## Live weapon-grip calibration
 
@@ -168,10 +180,13 @@ rotation correction, support-grip enable/offset, and grab radius share the
 record because both tabs edit one calibration slot.
 
 Each record contains the stable Retail weapon index and resolved profile
-identity. A profile mismatch, malformed value, or unsafe range fails closed to
-the authored profile values. Those authored base values remain immutable in
-the live slot, so RESET restores a known default and persists that reset rather
-than changing the profile itself. Successful loads and saves are reported as
+identity. For an explicitly mapped one-handed weapon, a missing record or a
+stale pre-mapping profile identity inherits the matching Pipe record; the
+loader reports `source=pipe_baseline`. A malformed value, unsafe range,
+excluded identity, or unavailable Pipe record still fails closed to authored
+profile values. Those authored base values remain immutable in the live slot,
+so RESET restores a known default and persists that reset rather than changing
+the profile itself. Successful loads and saves are reported as
 `m5_weapon_grip_settings_loaded` and
 `m5_weapon_grip_settings_saved`; failures have an explicit
 `m5_weapon_grip_settings_save_failed` event.
@@ -219,15 +234,39 @@ collision and damage state machine:
 
 Weapon-specific code should therefore select data and eligibility, not create a
 different hit algorithm. Firearms and non-melee tools are outside this contract.
-The current implementation still admits only `pipe_lever` (Retail index 32,
-`PhysicalMeleeProfileId::Pipe`) to native replacement and contact damage. The
-pipe result proves the shared constructor ABI, but it does not automatically
-enable or live-validate the fire axe, 2x4 family, crowbar, or other melee
-assets. Promote them one identity at a time: verify their profile and constructor
-path, require a seed event with `read_mask=0x7`, then repeat the slow-contact,
-fast-contact, de-duplication, rearm, and visible-damage acceptance checks. Any
-weapon that takes a different Retail path fails closed until that path is
-separately verified.
+The current implementation admits the explicit one-handed allowlist above to
+native replacement and contact damage. Runtime eligibility requires both the
+stable Retail index and its resolved profile identity; the native-capsule hook
+also retains the local-player collision-owner check. `Unarmed`, normal
+firearms, two-handers, enemy-owned instances, and unknown or mismatched
+identities therefore remain fail-closed.
+
+This broader mapping is not blanket live acceptance for every asset. Run
+`run-20260809-113629` is the first non-`pipe_lever` proof. Retail index 29
+(`Pipe`) resolved as `one_handed_debris`; all four settings loaders reported
+`result=ok source=pipe_baseline`. Its collision constructor consumed the
+configured 10-unit by 2.5-unit-radius capsule with `read_mask=0x7`.
+Three actor-candidate contacts across two target pointers qualified at
+8.630, 12.175, and 9.081 m/s, were inside the configured capsule, cleared their
+Retail reference vectors, and produced `accepted=1 native_forwarded=1`.
+This is live engine evidence for inherited settings, native capsule creation,
+continuous contact, speed qualification, and native damage handoff on index
+29. Headset-visible enemy reaction/damage remains a separate tester
+confirmation at the time of this note. All other newly admitted
+collision/damage paths are automated-tested but still require a bounded live
+asset check; any weapon that takes a different Retail path must be removed or
+held fail-closed.
+The same session also selected index 0 (`2x4`, profile `plank`). Its existing
+per-index Melee/Weapon record correctly won with `source=weapon_record`, while
+Collider, Grip, and right-hand IK independently reported
+`source=pipe_baseline`. That is live evidence that precedence is per record
+family rather than all-or-nothing; editing one category does not freeze or copy
+the other three.
+The live-tested staged loader SHA-256 is
+`00F120FA5A5F4C5F0B0609E9B20BF1371BA2FACC95891CF42B839DD2126B40A0`.
+The full RelWithDebInfo gate passes 19/19 x86 and 15/15 x64 tests, including
+catalog mapping, persistence fallback/isolation, profile mismatch migration,
+and fail-closed exclusions.
 
 After building and refreshing the M2 mono stage, start its guarded headset
 configuration with:
@@ -236,12 +275,13 @@ configuration with:
 .\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait
 ```
 
-The preset expands the accepted M4 controller gates plus physical-melee
-telemetry, wall and visual proxies, grip calibration, full arm IK, recentering,
-desktop-window support, and pipe-only `-PhysicalMeleeContactDamage`. It
-deliberately leaves `-TwoHandedMelee` off. Equip `pipe_lever` and confirm the
-Debug tab reports Retail index 32 before judging alignment, inertia, sweep
-speed, or collision behavior.
+The retained `-WeaponTest Pipe` name selects the accepted Pipe baseline, but
+the preset now exercises any mapped one-handed weapon. It expands the accepted
+M4 controller gates plus physical-melee telemetry, wall and visual proxies,
+grip calibration, full arm IK, recentering, desktop-window support, and
+one-handed contact damage. It deliberately leaves `-TwoHandedMelee` off.
+Confirm the Debug tab reports the intended Retail index/profile before judging
+alignment, inertia, sweep speed, or collision behavior.
 
 The damage gate reuses Retail's verified melee collision body, so Retail must
 create that body once. If `CONTACT DAMAGE ON` is shown but `CALLBACKS` stays
@@ -265,6 +305,25 @@ transform. This developer overlay is intentionally visible through geometry.
 The VR Tools `COLLIDER` tab edits controller-local position, pitch/yaw/roll,
 length, radius, and forward/reverse direction with immediate preview. Values
 are stored independently per stable Retail weapon index.
+
+The `DEBUG` tab now begins with two independent, session-only visibility
+toggles: `DRAW MELEE COLLIDER` and `DRAW CONTROLLERS`. Both default on. Their
+gates exist only inside the two overlay-render functions; hiding the capsule
+does not stop the collider snapshot or native contact path, and hiding the
+controller wireframes does not pause grip calibration, controller input, IK,
+or weapon pose publication. Menu-change diagnostics include
+`collider_draw=0|1` and `controller_draw=0|1`. The full automated gate passes
+19/19 x86 and 15/15 x64 tests with staged loader SHA-256
+`FF89DA8555392B4312972637053124CB7E346BB435D6CB05F54315FA206FDE2D`.
+
+Run `run-20260809-124936` live-accepts both controls. The headset tester
+confirmed the overlays hide and restore correctly. The ordered menu log proves
+independent `1/1 -> 0/1 -> 0/0 -> 0/1 -> 1/1` state transitions. During a
+later pass the collider draw remained off while contact processing continued:
+the first hidden-draw actor contact was accepted/native-forwarded at 12.139 m/s
+with a -0.0117 m capsule-surface gap. The bounded run snapshot ended with 32
+accepted/native-forwarded damage dispatches, 28 rearms, three multi-target
+swings, 532/532 clean Retail reference-vector releases, and zero failures.
 
 The 9 August working tree exposes actual physical-hit settings in the VR Tools
 `MELEE` tab:

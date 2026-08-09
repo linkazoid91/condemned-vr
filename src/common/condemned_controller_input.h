@@ -18,10 +18,12 @@ constexpr std::uint32_t kCondemnedToggleMeleeCommand = 60U;
 constexpr std::uint32_t kCondemnedAmmoCheckCommand = 61U;
 constexpr std::uint32_t kCondemnedStunGunCommand = 62U;
 constexpr std::uint32_t kCondemnedFlashlightCommand = 114U;
+constexpr std::uint32_t kCondemnedToolsCommand = 116U;
 constexpr float kCondemnedTurnDeadzone = 0.22F;
 constexpr float kCondemnedActivateSqueezeThreshold = 0.65F;
 constexpr float kCondemnedActionTriggerThreshold = 0.55F;
 constexpr float kCondemnedActionSqueezeThreshold = 0.65F;
+constexpr float kCondemnedToolsAxisThreshold = 0.75F;
 constexpr float kWeaponGripCalibrationChordThreshold = 0.75F;
 constexpr float kWeaponGripCalibrationAxisDeadzone = 0.25F;
 constexpr int kCondemnedGameStateUndefined = 0;
@@ -142,6 +144,8 @@ inline int CondemnedCoreActionIndex(std::uint32_t command) noexcept {
         return 5;
     case kCondemnedFlashlightCommand:
         return 6;
+    case kCondemnedToolsCommand:
+        return 7;
     default:
         return -1;
     }
@@ -164,6 +168,8 @@ inline const char* CondemnedCoreActionControlName(
         return "left_stick";
     case kCondemnedFlashlightCommand:
         return "left_primary";
+    case kCondemnedToolsCommand:
+        return "right_stick_up";
     default:
         return "unmapped";
     }
@@ -215,6 +221,10 @@ inline CoreActionValue ResolveCoreActionValue(
     case kCondemnedFlashlightCommand:
         active = leftActive &&
             (state.buttons & FEARVR_IB_LEFT_PRIMARY) != 0;
+        break;
+    case kCondemnedToolsCommand:
+        active = rightActive && std::isfinite(state.turnY) &&
+            state.turnY >= kCondemnedToolsAxisThreshold;
         break;
     default:
         break;

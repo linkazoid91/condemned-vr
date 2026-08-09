@@ -1015,6 +1015,78 @@ int main() {
         return Fail(
             "weapon index 32 must resolve the provisional one-hand pipe profile");
     }
+    for (const std::int32_t oneHandedIndex :
+         kCondemnedOneHandedDebrisWeaponIndices) {
+        const PhysicalMeleeProfile oneHandedProfile =
+            ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+                oneHandedIndex);
+        const PhysicalMeleeProfileId expectedId =
+            oneHandedIndex == kCondemnedPipeLeverWeaponIndex
+                ? PhysicalMeleeProfileId::Pipe
+                : IsCondemned2x4WeaponIndex(oneHandedIndex)
+                    ? PhysicalMeleeProfileId::Plank
+                    : PhysicalMeleeProfileId::OneHandedDebris;
+        if (!PhysicalMeleeProfileIsValid(oneHandedProfile) ||
+            oneHandedProfile.id != expectedId ||
+            !PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+                oneHandedIndex, expectedId) ||
+            !oneHandedProfile.swingAttackEnabled ||
+            oneHandedProfile.secondaryGripEnabled ||
+            !Near(
+                oneHandedProfile.localTipOffsetUnits.z,
+                pipeProfile.localTipOffsetUnits.z) ||
+            !Near(
+                oneHandedProfile.modelLocalGripPositionUnits.y,
+                pipeProfile.modelLocalGripPositionUnits.y) ||
+            !Near(
+                oneHandedProfile.modelLocalGripRotation.x,
+                pipeProfile.modelLocalGripRotation.x) ||
+            !Near(
+                oneHandedProfile.handlingWeight,
+                pipeProfile.handlingWeight) ||
+            (oneHandedIndex != kCondemnedPipeLeverWeaponIndex &&
+             !ShouldInheritPipeOneHandedSettings(
+                 oneHandedIndex, expectedId))) {
+            return Fail(
+                "every Retail one-handed debris index must share the pipe baseline");
+        }
+    }
+    const PhysicalMeleeProfile crowbarProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            kCondemnedCrowbarWeaponIndex);
+    if (crowbarProfile.id != PhysicalMeleeProfileId::Crowbar ||
+        !PhysicalMeleeProfileIsValid(crowbarProfile) ||
+        !PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+            kCondemnedCrowbarWeaponIndex,
+            PhysicalMeleeProfileId::Crowbar) ||
+        !ShouldInheritPipeOneHandedSettings(
+            kCondemnedCrowbarWeaponIndex,
+            PhysicalMeleeProfileId::Crowbar) ||
+        !Near(
+            crowbarProfile.modelLocalGripPositionUnits.y,
+            pipeProfile.modelLocalGripPositionUnits.y) ||
+        !Near(
+            crowbarProfile.handlingWeight,
+            pipeProfile.handlingWeight)) {
+        return Fail(
+            "the weapon-specific crowbar must share the one-hand pipe baseline");
+    }
+    if (ShouldInheritPipeOneHandedSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe)) {
+        return Fail("pipe must not recursively inherit its own saved record");
+    }
+    constexpr std::int32_t excludedOneHandedIndices[] = {
+        7, 12, 17, 18, 51, 52, 61, 66, 999};
+    for (const std::int32_t excludedIndex : excludedOneHandedIndices) {
+        if (IsCondemnedOneHandedMeleeWeaponIndex(excludedIndex) ||
+            PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+                excludedIndex, ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+                    excludedIndex).id)) {
+            return Fail(
+                "unarmed, firearms, two-handers, and unknown indices must fail closed");
+        }
+    }
     const PhysicalMeleeProfile axeProfile =
         ResolvePhysicalMeleeProfileForRetailWeaponIndex(
             kCondemnedFireAxeWeaponIndex);

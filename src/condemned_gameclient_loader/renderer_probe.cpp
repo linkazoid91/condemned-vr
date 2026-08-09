@@ -197,9 +197,11 @@ volatile LONG g_physicalMeleeVisualActiveLogged = 0;
 volatile LONG g_physicalMeleeVisualRestoreFailed = 0;
 volatile LONG g_weaponGripControllerGizmoActiveLogged = 0;
 volatile LONG g_weaponGripControllerGizmoFailureLogged = 0;
+volatile LONG g_weaponGripControllerDebugDrawVisible = 1;
 volatile LONG g_physicalMeleeColliderPreviewLogged = 0;
 volatile LONG g_physicalMeleeColliderLiveLogged = 0;
 volatile LONG g_physicalMeleeColliderFailureLogged = 0;
+volatile LONG g_physicalMeleeColliderDebugDrawVisible = 1;
 volatile LONG g_twoHandedMeleeEnabled = 0;
 volatile LONG g_physicalMeleeSecondaryGripAttached = 0;
 SRWLOCK g_physicalMeleeSecondaryGripTelemetryLock = SRWLOCK_INIT;
@@ -677,9 +679,11 @@ std::int32_t FindOrCreateWeaponGripCalibrationSlot(
     const fearvr::TrackingQuaternion& baseRotation,
     const PhysicalMeleeProfile& profile,
     WeaponSettingsStoreResult& persistentLoadResult,
-    bool& persistentLoadAttempted) noexcept {
+    bool& persistentLoadAttempted,
+    bool& inheritedPipeBaseline) noexcept {
     persistentLoadResult = WeaponSettingsStoreResult::NotFound;
     persistentLoadAttempted = false;
+    inheritedPipeBaseline = false;
     if (weaponIndex < 0) {
         return -1;
     }
@@ -721,8 +725,10 @@ std::int32_t FindOrCreateWeaponGripCalibrationSlot(
         profile.secondaryGripEnabled;
     WeaponGripSettings persisted{};
     persistentLoadAttempted = true;
-    persistentLoadResult = LoadWeaponGripSettings(
-        weaponIndex, profile.id, persisted);
+    persistentLoadResult =
+        LoadWeaponGripSettingsWithPipeOneHandedFallback(
+            weaponIndex, profile.id, persisted,
+            inheritedPipeBaseline);
     if (persistentLoadResult == WeaponSettingsStoreResult::Ok) {
         slot.calibration.positionUnits = persisted.positionUnits;
         slot.calibration.localRotationDegrees =
@@ -1184,6 +1190,7 @@ ToolMenuMeleeSettings CopyToolMenuMeleeSettings(
     WeaponSettingsStoreResult loadResult =
         WeaponSettingsStoreResult::NotFound;
     bool loadAttempted = false;
+    bool inheritedPipeBaseline = false;
     AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
     ToolMenuWeaponSettingsSlot* slot =
         ResolveToolMenuWeaponSettingsSlot(
@@ -1193,8 +1200,10 @@ ToolMenuMeleeSettings CopyToolMenuMeleeSettings(
         if (!slot->persistentLoadAttempted) {
             slot->persistentLoadAttempted = true;
             ToolMenuMeleeSettings persisted{};
-            loadResult = LoadWeaponToolSettings(
-                weaponIndex, baseProfile.id, persisted);
+            loadResult =
+                LoadWeaponToolSettingsWithPipeOneHandedFallback(
+                    weaponIndex, baseProfile.id, persisted,
+                    inheritedPipeBaseline);
             if (loadResult == WeaponSettingsStoreResult::Ok) {
                 slot->settings = persisted;
             }
@@ -1212,7 +1221,9 @@ ToolMenuMeleeSettings CopyToolMenuMeleeSettings(
             PhysicalMeleeProfileName(baseProfile.id),
             WeaponSettingsStoreResultName(loadResult),
             loadResult == WeaponSettingsStoreResult::Ok
-                ? "local_app_data" : "profile_defaults");
+                ? inheritedPipeBaseline
+                    ? "pipe_baseline" : "weapon_record"
+                : "profile_defaults");
         g_passThroughLog("m5_weapon_settings_loaded", detail);
     }
     return settings;
@@ -1273,6 +1284,7 @@ ToolMenuColliderSettings CopyToolMenuColliderSettings(
     WeaponSettingsStoreResult loadResult =
         WeaponSettingsStoreResult::NotFound;
     bool loadAttempted = false;
+    bool inheritedPipeBaseline = false;
     AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
     ToolMenuWeaponSettingsSlot* slot =
         ResolveToolMenuWeaponSettingsSlot(
@@ -1282,8 +1294,10 @@ ToolMenuColliderSettings CopyToolMenuColliderSettings(
         if (!slot->colliderPersistentLoadAttempted) {
             slot->colliderPersistentLoadAttempted = true;
             ToolMenuColliderSettings persisted{};
-            loadResult = LoadWeaponColliderSettings(
-                weaponIndex, baseProfile.id, persisted);
+            loadResult =
+                LoadWeaponColliderSettingsWithPipeOneHandedFallback(
+                    weaponIndex, baseProfile.id, persisted,
+                    inheritedPipeBaseline);
             if (loadResult == WeaponSettingsStoreResult::Ok) {
                 slot->colliderSettings = persisted;
             }
@@ -1301,7 +1315,9 @@ ToolMenuColliderSettings CopyToolMenuColliderSettings(
             PhysicalMeleeProfileName(baseProfile.id),
             WeaponSettingsStoreResultName(loadResult),
             loadResult == WeaponSettingsStoreResult::Ok
-                ? "local_app_data" : "profile_defaults");
+                ? inheritedPipeBaseline
+                    ? "pipe_baseline" : "weapon_record"
+                : "profile_defaults");
         g_passThroughLog("m5_collider_settings_loaded", detail);
     }
     return settings;
@@ -1572,6 +1588,7 @@ ToolMenuRightHandIkSettings CopyToolMenuRightHandIkSettings(
     WeaponSettingsStoreResult loadResult =
         WeaponSettingsStoreResult::NotFound;
     bool loadAttempted = false;
+    bool inheritedPipeBaseline = false;
     AcquireSRWLockExclusive(&g_toolMenuSettingsLock);
     ToolMenuWeaponSettingsSlot* slot =
         ResolveToolMenuWeaponSettingsSlot(
@@ -1581,8 +1598,10 @@ ToolMenuRightHandIkSettings CopyToolMenuRightHandIkSettings(
         if (!slot->rightHandIkPersistentLoadAttempted) {
             slot->rightHandIkPersistentLoadAttempted = true;
             ToolMenuRightHandIkSettings persisted{};
-            loadResult = LoadWeaponRightHandIkSettings(
-                weaponIndex, baseProfile.id, persisted);
+            loadResult =
+                LoadWeaponRightHandIkSettingsWithPipeOneHandedFallback(
+                    weaponIndex, baseProfile.id, persisted,
+                    inheritedPipeBaseline);
             if (loadResult == WeaponSettingsStoreResult::Ok) {
                 slot->rightHandIkSettings = persisted;
             }
@@ -1600,7 +1619,9 @@ ToolMenuRightHandIkSettings CopyToolMenuRightHandIkSettings(
             PhysicalMeleeProfileName(baseProfile.id),
             WeaponSettingsStoreResultName(loadResult),
             loadResult == WeaponSettingsStoreResult::Ok
-                ? "local_app_data" : "zero_offsets");
+                ? inheritedPipeBaseline
+                    ? "pipe_baseline" : "weapon_record"
+                : "zero_offsets");
         g_passThroughLog("m5_right_hand_ik_settings_loaded", detail);
     }
     return settings;
@@ -1736,10 +1757,11 @@ void LogToolMenuState(const char* action) noexcept {
             telemetry.weaponIndex);
     const ToolMenuMeleeSettings settings =
         CopyToolMenuMeleeSettings(telemetry.weaponIndex);
-    char detail[640]{};
+    char detail[704]{};
     std::snprintf(
         detail, sizeof(detail),
         "action=%s open=%u tab=%s row=%u weapon_index=%ld profile=%s "
+        "collider_draw=%u controller_draw=%u "
         "swing_enabled=%u trigger_mps=%.2f rearm_mps=%.2f "
         "pulse_ms=%u cooldown_ms=%u mass_kg=%.2f "
         "handling_weight=%.2f positional_follow=%.2f "
@@ -1754,6 +1776,12 @@ void LogToolMenuState(const char* action) noexcept {
         g_toolMenuState.row,
         static_cast<long>(telemetry.weaponIndex),
         PhysicalMeleeProfileName(profile.id),
+        InterlockedCompareExchange(
+            &g_physicalMeleeColliderDebugDrawVisible, 0, 0) != 0
+            ? 1U : 0U,
+        InterlockedCompareExchange(
+            &g_weaponGripControllerDebugDrawVisible, 0, 0) != 0
+            ? 1U : 0U,
         settings.swingAttackEnabled ? 1U : 0U,
         settings.swingTriggerSpeedMetersPerSecond,
         settings.swingRearmSpeedMetersPerSecond,
@@ -2419,6 +2447,35 @@ bool ApplyToolMenuDisplayAdjustment(
     return changed;
 }
 
+bool ApplyVrToolMenuDebugDrawAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    ToolMenuDebugDrawSettings settings{
+        InterlockedCompareExchange(
+            &g_physicalMeleeColliderDebugDrawVisible, 0, 0) != 0,
+        InterlockedCompareExchange(
+            &g_weaponGripControllerDebugDrawVisible, 0, 0) != 0};
+    if (!UpdateToolMenuDebugDrawSettings(
+            settings, row, delta, activate)) {
+        return false;
+    }
+    InterlockedExchange(
+        &g_physicalMeleeColliderDebugDrawVisible,
+        settings.colliderVisible ? 1 : 0);
+    InterlockedExchange(
+        &g_weaponGripControllerDebugDrawVisible,
+        settings.controllerVisible ? 1 : 0);
+    if (row == 0U && settings.colliderVisible) {
+        InterlockedExchange(
+            &g_physicalMeleeColliderFailureLogged, 0);
+    } else if (row == 1U && settings.controllerVisible) {
+        InterlockedExchange(
+            &g_weaponGripControllerGizmoFailureLogged, 0);
+    }
+    return true;
+}
+
 struct ToolMenuButtonLatch {
     bool releaseRequired{true};
     bool wasDown{false};
@@ -2608,6 +2665,10 @@ void HandleVrToolMenuControls() noexcept {
             transition.activate);
     } else if (g_toolMenuState.tab == ToolMenuTab::Display) {
         valueChanged = ApplyToolMenuDisplayAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
+    } else if (g_toolMenuState.tab == ToolMenuTab::Debug) {
+        valueChanged = ApplyVrToolMenuDebugDrawAdjustment(
             g_toolMenuState.row, transition.valueDelta,
             transition.activate);
     }
@@ -3101,49 +3162,55 @@ void DrawVrToolMenuOverlay(
         break;
     case ToolMenuTab::Debug:
         std::snprintf(rowText, sizeof(rowText),
-            "WEAPON NAME                   %s",
-            telemetry.weaponName[0] != '\0'
-                ? telemetry.weaponName : "UNKNOWN");
-        AddToolMenuRow(overlay, 0U, rowText, false);
+            "DRAW MELEE COLLIDER           %s",
+            InterlockedCompareExchange(
+                &g_physicalMeleeColliderDebugDrawVisible, 0, 0) != 0
+                ? "ON" : "OFF");
+        Row(0U, rowText);
         std::snprintf(rowText, sizeof(rowText),
-            "RETAIL INDEX                  %ld",
+            "DRAW CONTROLLERS              %s",
+            InterlockedCompareExchange(
+                &g_weaponGripControllerDebugDrawVisible, 0, 0) != 0
+                ? "ON" : "OFF");
+        Row(1U, rowText);
+        std::snprintf(rowText, sizeof(rowText),
+            "WEAPON %s   INDEX %ld",
+            telemetry.weaponName[0] != '\0'
+                ? telemetry.weaponName : "UNKNOWN",
             static_cast<long>(telemetry.weaponIndex));
-        AddToolMenuRow(overlay, 1U, rowText, false);
+        AddToolMenuRow(overlay, 2U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "ANIMATION PROPERTY            %s",
             telemetry.weaponAnimationProperty[0] != '\0'
                 ? telemetry.weaponAnimationProperty : "UNKNOWN");
-        AddToolMenuRow(overlay, 2U, rowText, false);
+        AddToolMenuRow(overlay, 3U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "RETAIL POSE FAMILY            %s",
             RetailWeaponPoseFamilyLabel(
                 telemetry.weaponPoseFamily));
-        AddToolMenuRow(overlay, 3U, rowText, false);
+        AddToolMenuRow(overlay, 4U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "SWING %s  SPEED %.2F M/S",
             telemetry.trackingFresh ? "FRESH" : "STALE",
             telemetry.swingSpeedMetersPerSecond);
-        AddToolMenuRow(overlay, 4U, rowText, false);
+        AddToolMenuRow(overlay, 5U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "CALLBACKS %u  DAMAGE %s  HITS %u",
             telemetry.contactCallbackCount,
             telemetry.contactDamageEnabled ? "ON" : "OFF",
             telemetry.damageDispatchCount);
-        AddToolMenuRow(overlay, 5U, rowText, false);
+        AddToolMenuRow(overlay, 6U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
             "PROXY W %s  MODEL %s  COLLIDER %s",
             telemetry.wallProxyEnabled ? "ON" : "OFF",
             telemetry.visualProxyEnabled ? "ON" : "OFF",
             !telemetry.colliderDebugEnabled ? "OFF" :
                 telemetry.collisionBodyLive ? "LIVE" : "PREVIEW");
-        AddToolMenuRow(overlay, 6U, rowText, false);
-        std::snprintf(rowText, sizeof(rowText),
-            "VR TWO HAND %s  SUPPORT %s",
-            telemetry.twoHandedEnabled ? "ON" : "OFF",
-            telemetry.secondaryGripAttached ? "ATTACHED" : "FREE");
         AddToolMenuRow(overlay, 7U, rowText, false);
         std::snprintf(rowText, sizeof(rowText),
-            "SUPPORT HAND %.2F M  ERROR %.2F M",
+            "2-HAND %s  SUPPORT %s  HAND %.2F M  ERR %.2F M",
+            telemetry.twoHandedEnabled ? "ON" : "OFF",
+            telemetry.secondaryGripAttached ? "ATTACHED" : "FREE",
             telemetry.secondaryGripDistanceMeters,
             telemetry.secondaryGripAnchorErrorMeters);
         AddToolMenuRow(overlay, 8U, rowText, false);
@@ -3194,7 +3261,9 @@ bool DrawWeaponGripCalibrationControllerGizmo(
     bool secondaryAttached,
     float horizontalFovRadians,
     float verticalFovRadians) noexcept {
-    if (g_drawOverlayLines == nullptr ||
+    if (InterlockedCompareExchange(
+            &g_weaponGripControllerDebugDrawVisible, 0, 0) == 0 ||
+        g_drawOverlayLines == nullptr ||
         InterlockedCompareExchange(
             &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
         InterlockedCompareExchange(
@@ -3272,7 +3341,9 @@ bool DrawPhysicalMeleeColliderGizmo(
     const RigidTransformAbi& eyeCamera,
     float horizontalFovRadians,
     float verticalFovRadians) noexcept {
-    if (g_drawOverlayLines == nullptr) {
+    if (InterlockedCompareExchange(
+            &g_physicalMeleeColliderDebugDrawVisible, 0, 0) == 0 ||
+        g_drawOverlayLines == nullptr) {
         return false;
     }
     PhysicalMeleeColliderDebugSnapshot snapshot{};
@@ -6242,6 +6313,7 @@ bool PublishEquippedWeaponVisualProxySource(
     WeaponSettingsStoreResult gripLoadResult =
         WeaponSettingsStoreResult::NotFound;
     bool gripLoadAttempted = false;
+    bool gripLoadInheritedPipeBaseline = false;
     AcquireSRWLockExclusive(&g_physicalMeleeVisualLock);
     sourceChanged =
         equippedWeaponReference !=
@@ -6272,7 +6344,8 @@ bool PublishEquippedWeaponVisualProxySource(
                 equippedWeapon, equippedWeaponIndex, modelObject,
                 localGripPosition, localGripRotation,
                 weaponProfile, gripLoadResult,
-                gripLoadAttempted);
+                gripLoadAttempted,
+                gripLoadInheritedPipeBaseline);
     }
     if (calibrationEnabled &&
         g_activeWeaponGripCalibrationSlot >= 0 &&
@@ -6313,7 +6386,9 @@ bool PublishEquippedWeaponVisualProxySource(
             PhysicalMeleeProfileName(weaponProfile.id),
             WeaponSettingsStoreResultName(gripLoadResult),
             gripLoadResult == WeaponSettingsStoreResult::Ok
-                ? "local_app_data" : "profile_defaults");
+                ? gripLoadInheritedPipeBaseline
+                    ? "pipe_baseline" : "weapon_record"
+                : "profile_defaults");
         g_passThroughLog(
             "m5_weapon_grip_settings_loaded", detail);
     }

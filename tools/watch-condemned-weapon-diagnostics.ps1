@@ -492,9 +492,12 @@ function Observe-Entry([object]$Entry) {
 }
 
 function Write-Snapshot([bool]$GameRunning) {
-    $phase = 'equip_pipe'
-    $recommendation = 'Equip pipe_lever (Retail index 32).'
-    if ($script:profile -eq 'pipe' -and -not $script:colliderSeeded) {
+    $oneHandedProfiles = @(
+        'pipe', 'crowbar', 'plank', 'one_handed_debris')
+    $oneHandedEquipped = $oneHandedProfiles -contains $script:profile
+    $phase = 'equip_one_handed_melee'
+    $recommendation = 'Equip any mapped one-handed melee weapon.'
+    if ($oneHandedEquipped -and -not $script:colliderSeeded) {
         $phase = 'awaiting_seed'
         $recommendation = 'Perform one Retail attack to create the reusable collider.'
     } elseif ($script:targetReferenceFailureCount -gt 0 -or

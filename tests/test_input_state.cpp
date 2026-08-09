@@ -268,6 +268,7 @@ int main() {
     actions.squeeze[FEARVR_HAND_LEFT] = 0.65F;
     actions.trigger[FEARVR_HAND_RIGHT] = 0.55F;
     actions.trigger[FEARVR_HAND_LEFT] = 0.55F;
+    actions.turnY = 0.75F;
     actions.buttons = FEARVR_IB_RIGHT_PRIMARY |
         FEARVR_IB_RIGHT_SECONDARY |
         FEARVR_IB_LEFT_STICK |
@@ -279,7 +280,8 @@ int main() {
         condemnedvr::kCondemnedToggleMeleeCommand,
         condemnedvr::kCondemnedAmmoCheckCommand,
         condemnedvr::kCondemnedStunGunCommand,
-        condemnedvr::kCondemnedFlashlightCommand};
+        condemnedvr::kCondemnedFlashlightCommand,
+        condemnedvr::kCondemnedToolsCommand};
     for (const std::uint32_t command : coreCommands) {
         const condemnedvr::CoreActionValue action =
             condemnedvr::ResolveCoreActionValue(actions, true, command);
@@ -318,6 +320,11 @@ int main() {
             condemnedvr::kCondemnedFireCommand).active) {
         return Fail("an inactive right hand must not fire");
     }
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedToolsCommand).active) {
+        return Fail("an inactive right hand must not ready forensic tools");
+    }
     actions.activeHands = FEARVR_HAND_MASK_RIGHT;
     if (condemnedvr::ResolveCoreActionValue(
             actions, true,
@@ -326,6 +333,19 @@ int main() {
     }
     actions.activeHands =
         FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT;
+    actions.turnY = 0.74F;
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedToolsCommand).active) {
+        return Fail("forensic tools must require a deliberate stick-up gesture");
+    }
+    actions.turnY = 0.0F;
+    actions.turnX = 1.0F;
+    if (condemnedvr::ResolveCoreActionValue(
+            actions, true,
+            condemnedvr::kCondemnedToolsCommand).active) {
+        return Fail("ordinary right-stick turning must not ready forensic tools");
+    }
     if (condemnedvr::CondemnedCoreActionIndex(999U) != -1 ||
         condemnedvr::ResolveCoreActionValue(
             actions, true, 999U).active ||

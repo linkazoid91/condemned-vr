@@ -250,8 +250,8 @@ the playing state, and a stronger physical Retail value is preserved.
 Manual crouch was deliberately excluded. Command 14 exists in the inherited
 engine command namespace, but the live Condemned binding evaluator never
 queries it and Retail exposes no manual crouch control. A diagnostic mapping
-produced no command-14 telemetry and was removed; right-stick vertical input
-therefore remains free.
+produced no command-14 telemetry and was removed. That gate left right-stick
+vertical input free.
 
 `-HapticsProbe` enables short confirmation pulses only when VR wins a rising
 Retail binding edge: Fire uses 35 ms at 0.25 on the right hand, Block uses
@@ -264,3 +264,24 @@ The corrected layout passed live on 1 August 2026. The tester confirmed that
 all mapped controls work and accepted the haptic behavior. Both launcher
 gates armed without rejection, the bridge exported the existing OpenXR haptic
 transport, and automated tests pass 19/19 on x86 and 16/16 on x64.
+
+### Forensic tools extension
+
+Static analysis of the same Retail control-registration constructor confirms
+that `IDS_CONTROL_TOOLS` is command 116. The 10 August 2026 working tree maps
+a deliberate right-stick-up gesture (at least 0.75 on the vertical axis) to
+that command through the existing guarded binding evaluator. This preserves
+Retail's keyboard binding and stronger Retail input; it performs no command
+writes and no system-key injection.
+
+Plain Y remains the separately release-gated pause-menu control. Both grips +
+Y remains the VR Tools chord. Horizontal right-stick turning cannot activate
+command 116, and stale, unfocused, non-playing, calibration-captured, or
+tool-menu-captured samples remain neutral through the existing gates.
+
+This extension is **implemented, staged, and automated-only**. The complete
+RelWithDebInfo gate passes 19/19 x86 and 15/15 x64 tests. The staged loader is
+`C950716B4690A3411C6E0FF18B3CFCCC7FA75D34E307CC65ACB701DD05B6DE94`.
+Live acceptance still requires a crime-scene prompt to prove that one upward
+gesture readies the expected forensic tool, release permits a later action,
+ordinary turning does not ready it, and both Y chords retain their behavior.

@@ -323,7 +323,7 @@ volatile LONG g_locomotionEnabled = 0;
 volatile LONG g_interactionEnabled = 0;
 volatile LONG g_coreActionsEnabled = 0;
 volatile LONG g_lastInteractionActive = 0;
-volatile LONG g_lastCoreActionActive[7]{};
+volatile LONG g_lastCoreActionActive[8]{};
 alignas(8) volatile LONG64 g_hapticRequestId = 0;
 volatile LONG g_hapticsEnabled = 0;
 volatile LONG g_hapticFailureReported = 0;
@@ -966,13 +966,12 @@ bool PhysicalMeleeContactDamageContextActive() noexcept {
         return false;
     }
     AcquireSRWLockShared(&g_physicalMeleeLock);
-    const bool pipeEquipped =
-        g_physicalMeleeProfileWeaponIndex ==
-            kCondemnedPipeLeverWeaponIndex &&
-        g_physicalMeleeProfile.id ==
-            PhysicalMeleeProfileId::Pipe;
+    const bool supportedOneHandedEquipped =
+        PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+            g_physicalMeleeProfileWeaponIndex,
+            g_physicalMeleeProfile.id);
     ReleaseSRWLockShared(&g_physicalMeleeLock);
-    return pipeEquipped;
+    return supportedOneHandedEquipped;
 }
 
 bool CapturePhysicalMeleeNativeCapsuleOverride(
@@ -993,13 +992,12 @@ bool CapturePhysicalMeleeNativeCapsuleOverride(
         return false;
     }
     AcquireSRWLockShared(&g_physicalMeleeLock);
-    const bool pipeEquipped =
-        g_physicalMeleeProfileWeaponIndex ==
-            kCondemnedPipeLeverWeaponIndex &&
-        g_physicalMeleeProfile.id ==
-            PhysicalMeleeProfileId::Pipe;
+    const bool supportedOneHandedEquipped =
+        PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+            g_physicalMeleeProfileWeaponIndex,
+            g_physicalMeleeProfile.id);
     ReleaseSRWLockShared(&g_physicalMeleeLock);
-    if (!pipeEquipped) {
+    if (!supportedOneHandedEquipped) {
         return false;
     }
     shape = ResolvePhysicalMeleeNativeCapsuleShape(frame, true);
@@ -3686,10 +3684,11 @@ bool InstallBindingCoreActionsHook(
     log(
         "m4_binding_core_actions_armed",
         "target=GameOrig+0x000095F0 "
-        "commands=16,17,28,60,61,62,114 "
+        "commands=16,17,28,60,61,62,114,116 "
         "controls=left_squeeze,right_trigger,left_trigger,"
         "right_primary,right_secondary,left_stick,"
-        "left_primary state=playing path=retail_binding_value "
+        "left_primary,right_stick_up state=playing "
+        "path=retail_binding_value "
         "binding_size=60 direct_command_writes=0 system_input=0");
     return true;
 }

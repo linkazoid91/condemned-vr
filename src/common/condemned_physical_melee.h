@@ -37,7 +37,8 @@ enum class PhysicalMeleeProfileId : std::uint8_t {
     Pipe,
     Crowbar,
     FireAxe,
-    Plank
+    Plank,
+    OneHandedDebris
 };
 
 inline const char* PhysicalMeleeProfileName(
@@ -53,6 +54,8 @@ inline const char* PhysicalMeleeProfileName(
         return "fire_axe";
     case PhysicalMeleeProfileId::Plank:
         return "plank";
+    case PhysicalMeleeProfileId::OneHandedDebris:
+        return "one_handed_debris";
     default:
         return "invalid";
     }
@@ -119,14 +122,36 @@ struct PhysicalMeleeProfile {
     std::uint64_t maximumSampleGapNs{100'000'000ULL};
 };
 
-// Live database telemetry identified player-weapon index 32 as pipe_lever,
-// indices 0/1/64/65 as the complete 2x4 family, and index 17 as fireaxe.
-// Keep these mappings in the data layer so rendering, collision, and the
-// future standalone weapon body consume the same records.
+// The 2026-08-09 Retail catalog probe identified these stable indices as
+// WEAP_1HandedDebris. Index 61 (Unarmed) is deliberately excluded because it
+// has no physical weapon model. Crowbar uses a weapon-specific Retail pose but
+// is the one additional verified one-handed melee weapon. Keep the allowlist
+// explicit and fail closed so ordinary firearms, two-handed debris, enemy-owned
+// instances, and unknown indices cannot acquire a damaging VR capsule.
 constexpr std::int32_t kCondemnedPipeLeverWeaponIndex = 32;
+constexpr std::int32_t kCondemnedCrowbarWeaponIndex = 11;
 constexpr std::int32_t kCondemnedFireAxeWeaponIndex = 17;
+constexpr std::array<std::int32_t, 26U>
+    kCondemnedOneHandedDebrisWeaponIndices{{
+        0, 1, 5, 15, 16, 19, 26, 27, 28, 29, 30, 31, 32,
+        33, 34, 35, 36, 43, 44, 49, 50, 59, 62, 63, 64, 65}};
 constexpr std::array<std::int32_t, 4U>
     kCondemned2x4WeaponIndices{{0, 1, 64, 65}};
+
+inline bool IsCondemnedOneHandedDebrisWeaponIndex(
+    std::int32_t weaponIndex) noexcept {
+    return std::find(
+               kCondemnedOneHandedDebrisWeaponIndices.begin(),
+               kCondemnedOneHandedDebrisWeaponIndices.end(),
+               weaponIndex) !=
+        kCondemnedOneHandedDebrisWeaponIndices.end();
+}
+
+inline bool IsCondemnedOneHandedMeleeWeaponIndex(
+    std::int32_t weaponIndex) noexcept {
+    return weaponIndex == kCondemnedCrowbarWeaponIndex ||
+        IsCondemnedOneHandedDebrisWeaponIndex(weaponIndex);
+}
 
 inline bool IsCondemned2x4WeaponIndex(
     std::int32_t weaponIndex) noexcept {
@@ -140,16 +165,19 @@ inline PhysicalMeleeProfile
 ResolvePhysicalMeleeProfileForRetailWeaponIndex(
     std::int32_t weaponIndex) noexcept {
     PhysicalMeleeProfile profile{};
-    if (weaponIndex == kCondemnedPipeLeverWeaponIndex ||
-        IsCondemned2x4WeaponIndex(weaponIndex)) {
+    if (IsCondemnedOneHandedMeleeWeaponIndex(weaponIndex)) {
         profile.id = weaponIndex == kCondemnedPipeLeverWeaponIndex
             ? PhysicalMeleeProfileId::Pipe
-            : PhysicalMeleeProfileId::Plank;
+            : IsCondemned2x4WeaponIndex(weaponIndex)
+                ? PhysicalMeleeProfileId::Plank
+                : weaponIndex == kCondemnedCrowbarWeaponIndex
+                    ? PhysicalMeleeProfileId::Crowbar
+                    : PhysicalMeleeProfileId::OneHandedDebris;
         profile.localTipOffsetUnits = {0.0F, 0.0F, 75.0F};
-        // Promoted from the accepted 2026-08-04 pipe_lever snapshot. The
-        // complete 2x4 family deliberately shares this grip preset at the
-        // tester's request; an asset-specific correction can still split a
-        // catalog record later without changing the shared solver.
+        // Temporary one-hand baseline promoted from the accepted pipe_lever
+        // setup. Every weapon still has a separate Retail-index settings
+        // record, so asset-specific corrections can diverge without changing
+        // the shared solver or another weapon's saved values.
         profile.modelLocalGripPositionUnits = {0.0F, 3.0F, -5.5F};
         profile.modelLocalGripRotation = {
             -0.319308F, 0.423837F, 0.162696F, 0.831826F};
@@ -192,6 +220,24 @@ ResolvePhysicalMeleeProfileForRetailWeaponIndex(
     profile.dampingRatio = 0.55F;
     profile.swingAttackEnabled = true;
     return profile;
+}
+
+inline bool PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId) noexcept {
+    if (!IsCondemnedOneHandedMeleeWeaponIndex(weaponIndex)) {
+        return false;
+    }
+    return ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+               weaponIndex).id == profileId;
+}
+
+inline bool ShouldInheritPipeOneHandedSettings(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId profileId) noexcept {
+    return weaponIndex != kCondemnedPipeLeverWeaponIndex &&
+        PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
+            weaponIndex, profileId);
 }
 
 struct PhysicalMeleeKinematicsState {
@@ -991,7 +1037,8 @@ inline bool PhysicalMeleeProfileIsValid(
         profile.id == PhysicalMeleeProfileId::Pipe ||
         profile.id == PhysicalMeleeProfileId::Crowbar ||
         profile.id == PhysicalMeleeProfileId::FireAxe ||
-        profile.id == PhysicalMeleeProfileId::Plank;
+        profile.id == PhysicalMeleeProfileId::Plank ||
+        profile.id == PhysicalMeleeProfileId::OneHandedDebris;
     const float modelGripRotationLengthSquared =
         profile.modelLocalGripRotation.x *
             profile.modelLocalGripRotation.x +

@@ -130,6 +130,16 @@ bool WeaponGripSettingsAreValid(
             kMaximumGrabRadiusMeters;
 }
 
+bool CanInheritPipeOneHandedSettings(
+    WeaponSettingsStoreResult result,
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId) noexcept {
+    return (result == WeaponSettingsStoreResult::NotFound ||
+            result == WeaponSettingsStoreResult::ProfileMismatch) &&
+        ShouldInheritPipeOneHandedSettings(
+            weaponIndex, expectedProfileId);
+}
+
 } // namespace
 
 WeaponSettingsStoreResult LoadWeaponToolSettings(
@@ -202,6 +212,31 @@ WeaponSettingsStoreResult LoadWeaponToolSettings(
     }
     settings = loaded;
     return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult
+LoadWeaponToolSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuMeleeSettings& settings,
+    bool& inheritedPipeBaseline) noexcept {
+    inheritedPipeBaseline = false;
+    const WeaponSettingsStoreResult localResult =
+        LoadWeaponToolSettings(
+            weaponIndex, expectedProfileId, settings);
+    if (!CanInheritPipeOneHandedSettings(
+            localResult, weaponIndex, expectedProfileId)) {
+        return localResult;
+    }
+    const WeaponSettingsStoreResult pipeResult =
+        LoadWeaponToolSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe, settings);
+    if (pipeResult == WeaponSettingsStoreResult::Ok) {
+        inheritedPipeBaseline = true;
+        return WeaponSettingsStoreResult::Ok;
+    }
+    return localResult;
 }
 
 WeaponSettingsStoreResult SaveWeaponToolSettings(
@@ -304,6 +339,31 @@ WeaponSettingsStoreResult LoadWeaponColliderSettings(
     return WeaponSettingsStoreResult::Ok;
 }
 
+WeaponSettingsStoreResult
+LoadWeaponColliderSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuColliderSettings& settings,
+    bool& inheritedPipeBaseline) noexcept {
+    inheritedPipeBaseline = false;
+    const WeaponSettingsStoreResult localResult =
+        LoadWeaponColliderSettings(
+            weaponIndex, expectedProfileId, settings);
+    if (!CanInheritPipeOneHandedSettings(
+            localResult, weaponIndex, expectedProfileId)) {
+        return localResult;
+    }
+    const WeaponSettingsStoreResult pipeResult =
+        LoadWeaponColliderSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe, settings);
+    if (pipeResult == WeaponSettingsStoreResult::Ok) {
+        inheritedPipeBaseline = true;
+        return WeaponSettingsStoreResult::Ok;
+    }
+    return localResult;
+}
+
 WeaponSettingsStoreResult SaveWeaponColliderSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId profileId,
@@ -401,6 +461,31 @@ WeaponSettingsStoreResult LoadWeaponGripSettings(
     return WeaponSettingsStoreResult::Ok;
 }
 
+WeaponSettingsStoreResult
+LoadWeaponGripSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    WeaponGripSettings& settings,
+    bool& inheritedPipeBaseline) noexcept {
+    inheritedPipeBaseline = false;
+    const WeaponSettingsStoreResult localResult =
+        LoadWeaponGripSettings(
+            weaponIndex, expectedProfileId, settings);
+    if (!CanInheritPipeOneHandedSettings(
+            localResult, weaponIndex, expectedProfileId)) {
+        return localResult;
+    }
+    const WeaponSettingsStoreResult pipeResult =
+        LoadWeaponGripSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe, settings);
+    if (pipeResult == WeaponSettingsStoreResult::Ok) {
+        inheritedPipeBaseline = true;
+        return WeaponSettingsStoreResult::Ok;
+    }
+    return localResult;
+}
+
 WeaponSettingsStoreResult SaveWeaponGripSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId profileId,
@@ -489,6 +574,31 @@ WeaponSettingsStoreResult LoadWeaponRightHandIkSettings(
     }
     settings = loaded;
     return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult
+LoadWeaponRightHandIkSettingsWithPipeOneHandedFallback(
+    std::int32_t weaponIndex,
+    PhysicalMeleeProfileId expectedProfileId,
+    ToolMenuRightHandIkSettings& settings,
+    bool& inheritedPipeBaseline) noexcept {
+    inheritedPipeBaseline = false;
+    const WeaponSettingsStoreResult localResult =
+        LoadWeaponRightHandIkSettings(
+            weaponIndex, expectedProfileId, settings);
+    if (!CanInheritPipeOneHandedSettings(
+            localResult, weaponIndex, expectedProfileId)) {
+        return localResult;
+    }
+    const WeaponSettingsStoreResult pipeResult =
+        LoadWeaponRightHandIkSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe, settings);
+    if (pipeResult == WeaponSettingsStoreResult::Ok) {
+        inheritedPipeBaseline = true;
+        return WeaponSettingsStoreResult::Ok;
+    }
+    return localResult;
 }
 
 WeaponSettingsStoreResult SaveWeaponRightHandIkSettings(

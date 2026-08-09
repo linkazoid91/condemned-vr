@@ -214,6 +214,124 @@ int main() {
             "right-hand IK settings must reject a changed profile identity");
     }
 
+    constexpr std::int32_t inheritedWeaponIndex = 29;
+    const PhysicalMeleeProfile inheritedProfile =
+        ResolvePhysicalMeleeProfileForRetailWeaponIndex(
+            inheritedWeaponIndex);
+    if (inheritedProfile.id !=
+            PhysicalMeleeProfileId::OneHandedDebris) {
+        return Fail("one-handed fallback fixture must be mapped");
+    }
+    bool inheritedPipeBaseline = false;
+    ToolMenuMeleeSettings inheritedMelee{};
+    if (LoadWeaponToolSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedMelee, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        inheritedMelee.swingAttackEnabled ||
+        inheritedMelee.requireSwingForContactDamage ||
+        !Near(inheritedMelee.hitSpeedMetersPerSecond, 2.75F) ||
+        !Near(inheritedMelee.contactRearmDistanceMeters, 0.22F) ||
+        !Near(inheritedMelee.handlingWeight, 2.75F)) {
+        return Fail(
+            "new one-handed melee settings must inherit the saved pipe record");
+    }
+    ToolMenuColliderSettings inheritedCollider{};
+    if (LoadWeaponColliderSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedCollider, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        !Near(inheritedCollider.positionOffsetUnits.x, 1.0F) ||
+        !Near(inheritedCollider.lengthUnits, 84.5F) ||
+        !Near(inheritedCollider.radiusUnits, 5.5F) ||
+        !inheritedCollider.reversed) {
+        return Fail(
+            "new one-handed collider settings must inherit the saved pipe record");
+    }
+    WeaponGripSettings inheritedGrip{};
+    if (LoadWeaponGripSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedGrip, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        !Near(inheritedGrip.positionUnits.x, 2.0F) ||
+        !Near(inheritedGrip.positionUnits.y, 2.5F) ||
+        !Near(inheritedGrip.localRotationDegrees.x, -25.0F) ||
+        !Near(inheritedGrip.secondaryGripGrabRadiusMeters, 0.18F)) {
+        return Fail(
+            "new one-handed grip settings must inherit the saved pipe record");
+    }
+    ToolMenuRightHandIkSettings inheritedHandIk{};
+    if (LoadWeaponRightHandIkSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedHandIk, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        !Near(inheritedHandIk.positionOffsetUnits.x, 1.25F) ||
+        !Near(inheritedHandIk.rotationOffsetDegrees.y, -30.0F)) {
+        return Fail(
+            "new one-handed hand IK must inherit the saved pipe record");
+    }
+
+    inheritedPipeBaseline = true;
+    if (LoadWeaponToolSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, PhysicalMeleeProfileId::Plank,
+            inheritedMelee, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::NotFound ||
+        inheritedPipeBaseline) {
+        return Fail(
+            "a mismatched target profile must not borrow pipe settings");
+    }
+    if (LoadWeaponToolSettingsWithPipeOneHandedFallback(
+            7, PhysicalMeleeProfileId::GenericOneHanded,
+            inheritedMelee, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::NotFound ||
+        inheritedPipeBaseline) {
+        return Fail(
+            "ordinary firearms must not borrow one-handed melee settings");
+    }
+
+    ToolMenuMeleeSettings localOneHanded = expected;
+    localOneHanded.hitSpeedMetersPerSecond = 6.5F;
+    localOneHanded.handlingWeight = 3.25F;
+    if (SaveWeaponToolSettings(
+            inheritedWeaponIndex, inheritedProfile.id,
+            localOneHanded) != WeaponSettingsStoreResult::Ok ||
+        LoadWeaponToolSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedMelee, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        inheritedPipeBaseline ||
+        !Near(inheritedMelee.hitSpeedMetersPerSecond, 6.5F) ||
+        !Near(inheritedMelee.handlingWeight, 3.25F)) {
+        return Fail(
+            "a weapon-specific save must replace only that inherited record");
+    }
+    ToolMenuMeleeSettings unchangedPipe{};
+    if (LoadWeaponToolSettings(
+            kCondemnedPipeLeverWeaponIndex,
+            PhysicalMeleeProfileId::Pipe, unchangedPipe) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(unchangedPipe.hitSpeedMetersPerSecond, 2.75F) ||
+        !Near(unchangedPipe.handlingWeight, 2.75F)) {
+        return Fail(
+            "editing an inherited weapon must leave the pipe record unchanged");
+    }
+    if (SaveWeaponToolSettings(
+            30, PhysicalMeleeProfileId::GenericOneHanded,
+            localOneHanded) != WeaponSettingsStoreResult::Ok ||
+        LoadWeaponToolSettingsWithPipeOneHandedFallback(
+            30, PhysicalMeleeProfileId::OneHandedDebris,
+            inheritedMelee, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        !Near(inheritedMelee.hitSpeedMetersPerSecond, 2.75F)) {
+        return Fail(
+            "a stale generic profile record must migrate through the pipe fallback");
+    }
+
     fearvr::ArmIkTuning expectedArmIk{};
     expectedArmIk.elbowOutward = 1.35F;
     expectedArmIk.elbowDown = 0.60F;
