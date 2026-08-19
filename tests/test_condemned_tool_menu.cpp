@@ -65,13 +65,20 @@ bool FitsCompleteMenuOverlay(
     const bool placed = ApplyToolMenuPanelTransform(
         overlay, transform);
     vertexCount = overlay.count;
-    return placed && !overlay.overflowed && overlay.count > 0U;
+    return placed && !overlay.overflowed && overlay.count > 0U &&
+        overlay.count <=
+            FEARVR_OVERLAY_TRIANGLE_MAX_INPUT_VERTICES;
 }
 
 } // namespace
 
 int main() {
     using namespace condemnedvr;
+
+    static_assert(
+        kToolMenuMaximumTriangleVertices ==
+            FEARVR_OVERLAY_TRIANGLE_MAX_INPUT_VERTICES,
+        "tool menu and D3D9 bridge must share one triangle-vertex cap");
 
     if (ToolMenuRowCount(ToolMenuTab::Melee) != 4U ||
         std::strcmp(
@@ -80,6 +87,21 @@ int main() {
         return Fail(
             "physical-hit tuning must have four bounded Melee rows");
     }
+    if (ToolMenuRowCount(ToolMenuTab::Block) != 7U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Block),
+            "BLOCK") != 0) {
+        return Fail(
+            "guard setup must expose pose and timing controls");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::Grip) != 10U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Grip),
+            "GRIP") != 0) {
+        return Fail(
+            "Grip setup must expose primary and advanced alignment rows");
+    }
+
 
     if (ToolMenuRowCount(ToolMenuTab::Collider) != 10U ||
         std::strcmp(
@@ -87,30 +109,91 @@ int main() {
             "COLLIDER") != 0) {
         return Fail("collider setup must have a dedicated bounded menu tab");
     }
-    if (ToolMenuRowCount(ToolMenuTab::Debug) != 2U ||
+    if (ToolMenuRowCount(ToolMenuTab::BlockCollider) != 10U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::BlockCollider),
+            "BLOCK COL") != 0) {
+        return Fail(
+            "block geometry must have a dedicated bounded menu tab");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::Debug) != 3U ||
         std::strcmp(
             ToolMenuTabName(ToolMenuTab::Debug),
             "DEBUG") != 0) {
         return Fail(
-            "debug draw visibility must have two independent menu rows");
+            "debug draw visibility must have three independent menu rows");
     }
     ToolMenuDebugDrawSettings debugDraw{};
-    if (!debugDraw.colliderVisible ||
-        !debugDraw.controllerVisible ||
+    if (debugDraw.colliderVisible ||
+        debugDraw.blockColliderVisible ||
+        debugDraw.controllerVisible ||
         !UpdateToolMenuDebugDrawSettings(
             debugDraw, 0U, 0, true) ||
-        debugDraw.colliderVisible ||
-        !debugDraw.controllerVisible ||
+        !debugDraw.colliderVisible ||
+        debugDraw.blockColliderVisible ||
+        debugDraw.controllerVisible ||
         !UpdateToolMenuDebugDrawSettings(
             debugDraw, 1U, -1, false) ||
+        !debugDraw.colliderVisible ||
+        !debugDraw.blockColliderVisible ||
+        debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 2U, 1, false) ||
+        !debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 0U, 1, false) ||
         debugDraw.colliderVisible ||
+        !debugDraw.blockColliderVisible ||
+        !debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 1U, 0, true) ||
+        debugDraw.colliderVisible ||
+        debugDraw.blockColliderVisible ||
+        !debugDraw.controllerVisible ||
+        !UpdateToolMenuDebugDrawSettings(
+            debugDraw, 2U, 0, true) ||
         debugDraw.controllerVisible ||
         UpdateToolMenuDebugDrawSettings(
-            debugDraw, 1U, 0, false) ||
+            debugDraw, 2U, 0, false) ||
         UpdateToolMenuDebugDrawSettings(
-            debugDraw, 2U, 1, false)) {
+            debugDraw, 3U, 1, false)) {
         return Fail(
-            "debug draw toggles must default visible and remain independent");
+            "debug draw toggles must default hidden and remain independent");
+    }
+    ToolMenuBlockTimingSettings blockTiming{};
+    if (!ToolMenuBlockTimingSettingsAreValid(blockTiming) ||
+        blockTiming.overrideEnabled ||
+        blockTiming.collisionWindowMilliseconds != 450U ||
+        !UpdateToolMenuBlockTimingSettings(
+            blockTiming, 0U, 0, true) ||
+        !blockTiming.overrideEnabled ||
+        !UpdateToolMenuBlockTimingSettings(
+            blockTiming, 1U, 2, false) ||
+        blockTiming.collisionWindowMilliseconds != 500U ||
+        UpdateToolMenuBlockTimingSettings(
+            blockTiming, 1U, 0, true) ||
+        UpdateToolMenuBlockTimingSettings(
+            blockTiming, 2U, 1, false)) {
+        return Fail(
+            "block timing must preserve Retail by default and tune in bounded steps");
+    }
+    bool blockWindowOverrideApplied = false;
+    if (!Near(ResolveToolMenuBlockWindowSeconds(
+                  blockTiming, 0.43F,
+                  blockWindowOverrideApplied),
+              0.50F) ||
+        !blockWindowOverrideApplied) {
+        return Fail(
+            "enabled block timing must resolve the configured native window");
+    }
+    blockTiming.overrideEnabled = false;
+    if (!Near(ResolveToolMenuBlockWindowSeconds(
+                  blockTiming, 0.43F,
+                  blockWindowOverrideApplied),
+              0.43F) ||
+        blockWindowOverrideApplied) {
+        return Fail(
+            "disabled block timing must preserve the Retail native window");
     }
     LiveColliderAlignmentCommand liveCommand{};
     const char* const validLiveCommand =
@@ -165,6 +248,7 @@ int main() {
         return Fail("two-hand setup must have a dedicated bounded menu tab");
     }
     if (ToolMenuRowCount(ToolMenuTab::HandIk) != 9U ||
+        ToolMenuRowCount(ToolMenuTab::HandIk, true) != 2U ||
         std::strcmp(
             ToolMenuTabName(ToolMenuTab::HandIk),
             "HAND IK") != 0) {
@@ -262,6 +346,32 @@ int main() {
     transition = UpdateToolMenuState(state, input);
     if (state.open || !transition.closed) {
         return Fail("tool-menu back must close the overlay");
+    }
+
+    ToolMenuState emptyHandMenuState{
+        ToolMenuTab::HandIk, 1U, true};
+    ToolMenuInputEvent emptyHandMenuInput{};
+    emptyHandMenuInput.nextRow = true;
+    UpdateToolMenuState(
+        emptyHandMenuState, emptyHandMenuInput, true);
+    if (emptyHandMenuState.row != 0U) {
+        return Fail(
+            "empty-hand Hand IK next row must wrap across two actions");
+    }
+    emptyHandMenuInput = {};
+    emptyHandMenuInput.previousRow = true;
+    UpdateToolMenuState(
+        emptyHandMenuState, emptyHandMenuInput, true);
+    if (emptyHandMenuState.row != 1U) {
+        return Fail(
+            "empty-hand Hand IK previous row must wrap across two actions");
+    }
+    emptyHandMenuState.row = 8U;
+    UpdateToolMenuState(
+        emptyHandMenuState, ToolMenuInputEvent{}, true);
+    if (emptyHandMenuState.row != 1U) {
+        return Fail(
+            "entering empty-hand Hand IK must clamp a weapon-page row");
     }
 
     ToolMenuMeleeSettings settings{};
@@ -367,6 +477,31 @@ int main() {
         !Near(configuredPipe.radiusUnits, 5.0F)) {
         return Fail("collider settings must resolve in controller-local space");
     }
+    const PhysicalMeleePose weightedGripPose{
+        {100.0F, 200.0F, 300.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F}};
+    PhysicalMeleeFrame sourceColliderFrame{};
+    sourceColliderFrame.currentRotation = weightedGripPose.rotation;
+    sourceColliderFrame.currentBaseUnits = PhysicalMeleeEndpoint(
+        weightedGripPose, pipe.localBaseOffsetUnits);
+    sourceColliderFrame.currentTipUnits = PhysicalMeleeEndpoint(
+        weightedGripPose, pipe.localTipOffsetUnits);
+    sourceColliderFrame.radiusUnits = pipe.radiusUnits;
+    sourceColliderFrame.poseValid = true;
+    PhysicalMeleeFrame blockColliderFrame{};
+    if (!ResolveToolMenuColliderFrameAtCurrentPose(
+            sourceColliderFrame, pipe, collider,
+            blockColliderFrame) ||
+        !Near(blockColliderFrame.currentBaseUnits.x, 101.0F) ||
+        !Near(blockColliderFrame.currentBaseUnits.y, 202.0F) ||
+        !Near(blockColliderFrame.currentBaseUnits.z, 303.0F) ||
+        !Near(blockColliderFrame.currentTipUnits.x, 181.0F) ||
+        !Near(blockColliderFrame.currentTipUnits.y, 202.0F) ||
+        !Near(blockColliderFrame.currentTipUnits.z, 303.0F) ||
+        !Near(blockColliderFrame.radiusUnits, 5.0F)) {
+        return Fail(
+            "block geometry must reproject onto the attack frame's exact weighted grip pose");
+    }
     collider.reversed = true;
     ApplyToolMenuColliderSettings(collider, configuredPipe);
     if (!Near(configuredPipe.localTipOffsetUnits.x, -79.0F)) {
@@ -434,13 +569,20 @@ int main() {
         axeSlot == genericSlot || !axeSlot->settings.swingAttackEnabled ||
         !Near(axeSlot->settings.massKilograms, 4.5F) ||
         !Near(axeSlot->colliderSettings.lengthUnits, 82.0F) ||
+        !Near(axeSlot->blockColliderSettings.lengthUnits, 82.0F) ||
+        !axeSlot->blockColliderUsesAttackFallback ||
+        axeSlot->blockTimingSettings.overrideEnabled ||
         !Near(genericSlot->colliderSettings.lengthUnits, 75.0F) ||
+        !Near(genericSlot->blockColliderSettings.lengthUnits, 75.0F) ||
         genericSlot->settings.swingAttackEnabled ||
         !Near(genericSlot->settings.massKilograms, 1.5F)) {
         return Fail(
             "each Retail weapon index must receive isolated profile defaults");
     }
     axeSlot->settings.swingTriggerSpeedMetersPerSecond = 5.25F;
+    axeSlot->blockPoseSettings.captured = true;
+    axeSlot->blockPoseSettings.enabled = true;
+    axeSlot->blockPoseSettings.headRelativePositionMeters.x = 0.25F;
     axeSlot->rightHandIkSettings.positionOffsetUnits.x = 2.5F;
     axeSlot->colliderSettings.reversed = true;
     genericSlot->settings.massKilograms = 2.75F;
@@ -451,9 +593,16 @@ int main() {
     if (axeSlot == nullptr || genericSlot == nullptr ||
         !Near(axeSlot->settings.swingTriggerSpeedMetersPerSecond, 5.25F) ||
         !Near(axeSlot->settings.massKilograms, 4.5F) ||
+        !axeSlot->blockPoseSettings.captured ||
+        !axeSlot->blockPoseSettings.enabled ||
+        !Near(
+            axeSlot->blockPoseSettings.headRelativePositionMeters.x,
+            0.25F) ||
         !Near(axeSlot->rightHandIkSettings.positionOffsetUnits.x, 2.5F) ||
         !axeSlot->colliderSettings.reversed ||
         !Near(genericSlot->settings.massKilograms, 2.75F) ||
+        genericSlot->blockPoseSettings.captured ||
+        genericSlot->blockPoseSettings.enabled ||
         !Near(genericSlot->rightHandIkSettings.positionOffsetUnits.x, 0.0F) ||
         genericSlot->colliderSettings.reversed ||
         std::strcmp(
@@ -477,6 +626,25 @@ int main() {
     if (ToolMenuToggleChordDown(controller, true) ||
         ToolMenuToggleChordDown(controller, false)) {
         return Fail("loose grips or stale input must reject the menu chord");
+    }
+    if (ShouldActivateToolMenuShortcut(false, false, true) ||
+        !ShouldActivateToolMenuShortcut(false, true, true) ||
+        !ShouldActivateToolMenuShortcut(true, false, true) ||
+        ShouldActivateToolMenuShortcut(false, true, false)) {
+        return Fail(
+            "Developer Tools must gate opening but preserve an open-menu close");
+    }
+    if (ShouldCaptureToolMenuShortcutInput(
+            false, false, false, true) ||
+        !ShouldCaptureToolMenuShortcutInput(
+            false, false, true, true) ||
+        !ShouldCaptureToolMenuShortcutInput(
+            true, false, false, false) ||
+        !ShouldCaptureToolMenuShortcutInput(
+            false, true, false, false)) {
+        return Fail(
+            "disabled shortcuts must not capture their chord, while active "
+            "menu release capture remains safe");
     }
 
     ToolMenuOverlay overlay{};
@@ -535,7 +703,9 @@ int main() {
         "ROTATION Z                    -180.00 DEG",
         "ADJUSTMENT STEP               10.00",
         "RESET CURRENT GRIP",
-        "SAVE GRIP SNAPSHOT"};
+        "ALIGN HAND + WEAPON TO CONTROLLER",
+        "CANCEL ADVANCED FROZEN ALIGNMENT",
+        "READY  APPLIED, SAVE FAILED  G PATH_UNAVAILABLE H WRITE_FAILED C OK"};
     std::size_t completeVertexCount = 0U;
     if (!FitsCompleteMenuOverlay(
             gripRows, sizeof(gripRows) / sizeof(gripRows[0]),
@@ -545,6 +715,83 @@ int main() {
             "complete grip menu exceeded its %zu-vertex budget at %zu\n",
             kToolMenuMaximumTriangleVertices, completeVertexCount);
         return 1;
+    }
+    const char* blockRows[] = {
+        "POSE BLOCKING                 NOT SET",
+        "CAPTURE CURRENT GUARD POSE",
+        "POSITION TOLERANCE            1.00 M",
+        "ANGLE TOLERANCE               90.0 DEG",
+        "CUSTOM BLOCK WINDOW           OFF (RETAIL)",
+        "BLOCK WINDOW                  2000 MS",
+        "CLEAR SAVED GUARD POSE",
+        "LIVE IN GUARD POSE            CAPTURE FIRST",
+        "ERROR  POSITION 1.00 M   ANGLE 180.0 DEG",
+        "ENTER POSE = AUTO BLOCK   NO TRIGGER REQUIRED",
+        "GAMEPLAY ACTIVE YES   ACTIVATIONS 4294967295",
+        "NATIVE BLOCK LIVE  RETAIL 10000 MS  APPLIED 2000 MS"};
+    if (!FitsCompleteMenuOverlay(
+            blockRows, sizeof(blockRows) / sizeof(blockRows[0]),
+            completeVertexCount)) {
+        std::fprintf(
+            stderr,
+            "complete block menu exceeded the bridge cap at %zu vertices\n",
+            completeVertexCount);
+        return 1;
+    }
+    const std::size_t blockVertexCount = completeVertexCount;
+
+    const char* blockColliderRows[] = {
+        "POSITION X                    -200.00 U",
+        "POSITION Y                    -200.00 U",
+        "POSITION Z                    -200.00 U",
+        "PITCH X                       -180.0 DEG",
+        "YAW Y                         -180.0 DEG",
+        "ROLL Z                        -180.0 DEG",
+        "LENGTH                        250.0 U",
+        "RADIUS                        25.0 U",
+        "DIRECTION                     REVERSED",
+        "COPY CURRENT ATTACK COLLIDER",
+        "SOURCE ATTACK COLLIDER - FOLLOWS UNTIL FIRST EDIT"};
+    if (!FitsCompleteMenuOverlay(
+            blockColliderRows,
+            sizeof(blockColliderRows) / sizeof(blockColliderRows[0]),
+            completeVertexCount)) {
+        std::fprintf(
+            stderr,
+            "complete block-collider menu exceeded the bridge cap at %zu vertices\n",
+            completeVertexCount);
+        return 1;
+    }
+    const std::size_t blockColliderVertexCount =
+        completeVertexCount;
+
+    const char* debugRows[] = {
+        "DRAW ATTACK COLLIDER          OFF",
+        "DRAW BLOCK COLLIDER           OFF",
+        "DRAW CONTROLLERS              OFF",
+        "WEAPON PIPE_LEVER   INDEX 32",
+        "ANIMATION PROPERTY            MELEEWEAPON",
+        "RETAIL POSE FAMILY            ONE HANDED MELEE",
+        "SWING FRESH  SPEED 10.00 M/S",
+        "CALLBACKS 4294967295  DAMAGE ON  HITS 4294967295",
+        "PROXY W ON  MODEL ON  ATTACK PREVIEW  BLOCK LIVE",
+        "2-HAND OFF  SUPPORT FREE  HAND 10.00 M  ERR 10.00 M"};
+    if (!FitsCompleteMenuOverlay(
+            debugRows, sizeof(debugRows) / sizeof(debugRows[0]),
+            completeVertexCount)) {
+        std::fprintf(
+            stderr,
+            "complete debug menu exceeded the bridge cap at %zu vertices\n",
+            completeVertexCount);
+        return 1;
+    }
+    const std::size_t debugVertexCount = completeVertexCount;
+    constexpr std::size_t kRejectedLegacyBridgeCap = 24576U;
+    if (blockVertexCount <= kRejectedLegacyBridgeCap ||
+        debugVertexCount <= kRejectedLegacyBridgeCap ||
+        blockColliderVertexCount > kRejectedLegacyBridgeCap) {
+        return Fail(
+            "menu fixtures must reproduce the live Block/Debug cap rejection");
     }
 
     return 0;

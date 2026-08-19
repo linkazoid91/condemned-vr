@@ -35,12 +35,28 @@
     right trigger accepts, and B goes back. Requires -MenuProbe. Keyboard and
     mouse menu input remain available.
 
+.PARAMETER RetailVrSettingsProbe
+    Adds an opt-in `VR Settings` row to Retail's Options screen through the
+    native CLTGUI control factory. The current isolated base-screen host
+    bypasses the unsuitable dormant Game Options content and requires live
+    acceptance before its diagnostic category rows can mutate settings.
+    Requires -MenuProbe and -MenuControlsProbe.
+
 .PARAMETER InteractionProbe
     Enables the separately guarded M4 right-grip Activate command gate.
 
 .PARAMETER CoreActionsProbe
     Enables the guarded M4 run, fire, block, weapon-toggle, ammo-check,
     stun-gun, flashlight, and forensic-tool command gate.
+    Includes the signature-checked forensic target ray for verified Scanner
+    index 46 and Item Camera index 3, each sourced from its matching fresh
+    Retail Camera socket used by the white arrows/live preview. Missing/stale
+    matching poses and every unmapped index fall back to Retail.
+
+.PARAMETER ForensicMemoryProbe
+    Enables an observation-only Scanner/DigitalCamera memory trace around
+    Tool, Fire, and Activate edges. Requires -CoreActionsProbe and -MenuProbe.
+    No game-memory writes or video capture are performed.
 
 .PARAMETER HapticsProbe
     Enables bounded M4 Fire, Block, and Activate confirmation pulses.
@@ -76,8 +92,10 @@
     -PhysicalMeleeProbe and cannot be combined with -MeleeAimProbe.
 
 .PARAMETER PhysicalMeleeContactDamage
-    Enables the pipe-only live damage acceptance gate. Once Retail has seeded
-    its verified collision body, that body is checked continuously. The current
+    Enables the mapped one-handed live damage acceptance gate. A guarded
+    equip-time Retail pulse automatically requests and verifies its native
+    collision body; one manual Retail attack remains a bounded fallback. The
+    verified body is then checked continuously. The current
     lifecycle-validation build forwards one fresh, de-duplicated Retail-valid
     overlap, then rearms only after separation; speed and energy are diagnostic
     until that lifecycle passes live. Requires -PhysicalMeleeWallProxy and fails
@@ -123,8 +141,8 @@
     Enables the first guarded arm-IK mutation gate. It installs one callback
     on Right_hand and solves the authored RightHand socket onto the same
     weighted VR weapon pose used for rendering and collision. Upper arm and
-    forearm animation remain untouched. Requires -StereoTuning and
-    -HeadAimProbe.
+    forearm animation remain untouched. Requires -StereoTuning,
+    -HeadAimProbe, and -MenuProbe for save/load lifecycle observation.
 
 .PARAMETER ArmIkRightArm
     Enables the second guarded arm-IK mutation gate. It retains exact
@@ -132,7 +150,8 @@
     Right_arml with the measured two-bone chain, then mirrors the complete
     measured solve onto Left_armu, Left_arml, Left_hand, and LeftHand. The
     legacy switch name is retained for launch compatibility. Requires
-    -StereoTuning and -HeadAimProbe. It is mutually exclusive with
+    -StereoTuning, -HeadAimProbe, and -MenuProbe; the latter supplies the
+    verified Retail save/load lifecycle. It is mutually exclusive with
     -ArmIkRightHandProof so the hand-only build remains an explicit A/B
     fallback.
 
@@ -187,8 +206,10 @@ param(
     [switch]$TurningProbe,
     [switch]$MenuProbe,
     [switch]$MenuControlsProbe,
+    [switch]$RetailVrSettingsProbe,
     [switch]$InteractionProbe,
     [switch]$CoreActionsProbe,
+    [switch]$ForensicMemoryProbe,
     [switch]$HapticsProbe,
     [switch]$HeadAimProbe,
     [switch]$AimPathProbe,
@@ -272,6 +293,10 @@ if ($WeaponTest -eq 'Pipe') {
     $DesktopWindow = $true
 }
 
+if ($ForensicMemoryProbe) {
+    $WeaponCatalogProbe = $true
+}
+
 if ($RecenterProbe -and -not $StereoTuning) {
     throw '-RecenterProbe requires -StereoTuning.'
 }
@@ -279,18 +304,29 @@ if ($ArmIkDiscovery -and -not $StereoTuning) {
     throw '-ArmIkDiscovery requires -StereoTuning.'
 }
 if ($ArmIkRightHandProof -and
-    -not ($StereoTuning -and $HeadAimProbe)) {
-    throw '-ArmIkRightHandProof requires -StereoTuning and -HeadAimProbe.'
+    -not ($StereoTuning -and $HeadAimProbe -and $MenuProbe)) {
+    throw ('-ArmIkRightHandProof requires -StereoTuning, -HeadAimProbe, ' +
+        'and -MenuProbe.')
 }
 if ($ArmIkRightArm -and
-    -not ($StereoTuning -and $HeadAimProbe)) {
-    throw '-ArmIkRightArm requires -StereoTuning and -HeadAimProbe.'
+    -not ($StereoTuning -and $HeadAimProbe -and $MenuProbe)) {
+    throw ('-ArmIkRightArm requires -StereoTuning, -HeadAimProbe, ' +
+        'and -MenuProbe.')
 }
 if ($ArmIkRightArm -and $ArmIkRightHandProof) {
     throw '-ArmIkRightArm and -ArmIkRightHandProof are mutually exclusive.'
 }
 if ($MenuControlsProbe -and -not $MenuProbe) {
     throw '-MenuControlsProbe requires -MenuProbe.'
+}
+if ($RetailVrSettingsProbe -and
+    -not ($MenuProbe -and $MenuControlsProbe)) {
+    throw ('-RetailVrSettingsProbe requires -MenuProbe and ' +
+        '-MenuControlsProbe.')
+}
+if ($ForensicMemoryProbe -and
+    -not ($CoreActionsProbe -and $MenuProbe)) {
+    throw '-ForensicMemoryProbe requires -CoreActionsProbe and -MenuProbe.'
 }
 if ($HapticsProbe -and
     -not ($CoreActionsProbe -or $InteractionProbe)) {
@@ -356,65 +392,7 @@ function Read-LiveLog([string]$Path) {
     }
 }
 
-if (-not ('CondemnedVrLauncherWindow' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class CondemnedVrLauncherWindow {
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsIconic(IntPtr window);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ShowWindowAsync(IntPtr window, int command);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetForegroundWindow(IntPtr window);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(
-        IntPtr window, out uint processId);
-
-    public static bool Focus(IntPtr window, uint expectedProcessId) {
-        if (window == IntPtr.Zero || expectedProcessId == 0) {
-            return false;
-        }
-        if (IsIconic(window)) {
-            ShowWindowAsync(window, 9); // SW_RESTORE
-        }
-        SetForegroundWindow(window);
-        uint foregroundProcessId;
-        GetWindowThreadProcessId(
-            GetForegroundWindow(), out foregroundProcessId);
-        return foregroundProcessId == expectedProcessId;
-    }
-}
-'@
-}
-
-function Set-CondemnedVrForegroundWindow(
-    [Diagnostics.Process]$Process) {
-    if ($null -eq $Process) {
-        return $false
-    }
-    try {
-        $Process.Refresh()
-        if ($Process.HasExited -or $Process.MainWindowHandle -eq 0) {
-            return $false
-        }
-        return [CondemnedVrLauncherWindow]::Focus(
-            $Process.MainWindowHandle,
-            [uint32]$Process.Id)
-    } catch {
-        return $false
-    }
-}
+. (Join-Path $PSScriptRoot '_condemnedvr-window-focus.ps1')
 $deploymentPath = Assert-UnderCondemnedVrProjectRoot (
     Join-Path $cfg.ProjectRoot (
         'stage\condemned-m2-mono\m2-mono-deployment.json'))
@@ -607,6 +585,9 @@ if ($InteractionProbe) {
 if ($CoreActionsProbe) {
     $gameArguments += '-condemnedvr-m4-core-actions'
 }
+if ($ForensicMemoryProbe) {
+    $gameArguments += '-condemnedvr-m5-forensic-memory-probe'
+}
 if ($HapticsProbe) {
     $gameArguments += '-condemnedvr-m4-haptics'
 }
@@ -667,6 +648,9 @@ if ($MenuProbe) {
 if ($MenuControlsProbe) {
     $gameArguments += '-condemnedvr-m6-menu-controls'
 }
+if ($RetailVrSettingsProbe) {
+    $gameArguments += '-condemnedvr-m6-retail-vr-settings'
+}
 if ($RecenterProbe) {
     $gameArguments += '-condemnedvr-m4-recenter'
 }
@@ -699,7 +683,7 @@ try {
             $previousLiveColliderCommandPath
     }
     $gameFocusAttempted = $false
-    $gameFocusRestored = $false
+    $initialGameFocus = $null
 
     $inspectorPowerShell = Join-Path $env:WINDIR (
         'SysWOW64\WindowsPowerShell\v1.0\powershell.exe')
@@ -722,7 +706,7 @@ try {
         if (-not $gameFocusAttempted -and
             $game.MainWindowHandle -ne 0) {
             $gameFocusAttempted = $true
-            $gameFocusRestored =
+            $initialGameFocus =
                 Set-CondemnedVrForegroundWindow $game
         }
         $inspectionJson = & $inspectorPowerShell -NoProfile `
@@ -783,6 +767,16 @@ try {
                 '"event":"m4_binding_core_actions_rejected"')) {
             throw 'The guarded M4 core-action hook was rejected.'
         }
+        if ($CoreActionsProbe -and
+            $loaderText.Contains(
+                '"event":"m5_forensic_camera_socket_ray_rejected"')) {
+            throw 'The guarded M5 forensic Camera-socket ray hook was rejected.'
+        }
+        if ($ForensicMemoryProbe -and
+            $loaderText.Contains(
+                '"event":"m5_forensic_memory_probe_rejected"')) {
+            throw 'The guarded M5 forensic memory probe was rejected.'
+        }
         if ($HapticsProbe -and
             $loaderText.Contains(
                 '"event":"m4_controller_haptics_rejected"')) {
@@ -797,6 +791,11 @@ try {
             $loaderText.Contains(
                 '"event":"m5_head_aim_rejected"')) {
             throw 'The guarded M5 head-aim path was rejected.'
+        }
+        if ($HeadAimProbe -and $PhysicalMeleeVisualProxy -and
+            $loaderText.Contains(
+                '"event":"m5_handgun_muzzle_aim_rejected"')) {
+            throw 'The guarded M5 handgun muzzle-aim path was rejected.'
         }
         if ($HeadAimProbe -and
             $loaderText.Contains(
@@ -883,6 +882,16 @@ try {
                 '"event":"m4_menu_render_state_failed"')) {
             throw 'The guarded M4 headset menu-state publisher failed.'
         }
+        if ($RetailVrSettingsProbe -and
+            $loaderText.Contains(
+                '"event":"m6_retail_vr_settings_rejected"')) {
+            throw 'The guarded Retail VR Settings menu probe was rejected.'
+        }
+        if ($RetailVrSettingsProbe -and
+            $loaderText.Contains(
+                '"event":"m6_retail_vr_settings_row_failed"')) {
+            throw 'Retail could not create or own the VR Settings menu row.'
+        }
         $bridgeReady =
             $proxyText.Contains('"event":"late_hooks_installed"') -and
             $proxyText.Contains('"event":"adapter_match"') -and
@@ -913,6 +922,14 @@ try {
         $coreActionsReady = -not $CoreActionsProbe -or
             $loaderText.Contains(
                 '"event":"m4_binding_core_actions_armed"')
+        $forensicCameraSocketRayReady = -not $CoreActionsProbe -or
+            $loaderText.Contains(
+                '"event":"m5_forensic_camera_socket_ray_armed"')
+        $forensicMemoryReady = -not $ForensicMemoryProbe -or
+            ($loaderText.Contains(
+                 '"event":"m5_forensic_memory_probe_armed"') -and
+             $loaderText.Contains(
+                 '"event":"m5_forensic_observers_armed"'))
         $hapticsReady = -not $HapticsProbe -or
             $loaderText.Contains(
                 '"event":"m4_controller_haptics_armed"')
@@ -921,6 +938,10 @@ try {
                  '"event":"m5_head_aim_armed"') -and
              $loaderText.Contains(
                  '"event":"m5_head_camera_transform_armed"'))
+        $handgunMuzzleAimReady =
+            -not ($HeadAimProbe -and $PhysicalMeleeVisualProxy) -or
+            $loaderText.Contains(
+                '"event":"m5_handgun_muzzle_aim_armed"')
         $aimPathReady = -not $AimPathProbe -or
             $loaderText.Contains(
                 '"event":"m5_aim_path_probe_armed"')
@@ -972,11 +993,17 @@ try {
         $menuControlsReady = -not $MenuControlsProbe -or
             $loaderText.Contains(
                 '"event":"m6_menu_controls_armed"')
+        $retailVrSettingsReady = -not $RetailVrSettingsProbe -or
+            $loaderText.Contains(
+                '"event":"m6_retail_vr_settings_armed"')
         $inputHooksReady =
             $locomotionReady -and $turningReady -and $menuReady -and
-            $menuControlsReady -and
-            $interactionReady -and $coreActionsReady -and $hapticsReady -and
-            $headAimReady -and $aimPathReady -and $meleeAimReady -and
+            $menuControlsReady -and $retailVrSettingsReady -and
+            $interactionReady -and $coreActionsReady -and
+            $forensicCameraSocketRayReady -and
+            $forensicMemoryReady -and $hapticsReady -and
+            $headAimReady -and $handgunMuzzleAimReady -and
+            $aimPathReady -and $meleeAimReady -and
             $physicalMeleeReady -and $physicalMeleeWallProxyReady -and
             $physicalMeleeContactDamageReady -and
             $physicalMeleeColliderDebugReady -and
@@ -1012,9 +1039,8 @@ try {
     if ($asiModules.Count -ne 0) {
         throw 'M2 mono unexpectedly loaded an ASI module.'
     }
-    $gameFocusRestored =
-        (Set-CondemnedVrForegroundWindow $game) -or
-        $gameFocusRestored
+    $readyGameFocus = Set-CondemnedVrForegroundWindow $game `
+        -TimeoutMilliseconds 1000
 
     $reportPath = Assert-UnderCondemnedVrProjectRoot (
         Join-Path $runLogDirectory 'm2-mono-live.json')
@@ -1042,8 +1068,10 @@ try {
             Turning = [bool]$TurningProbe
             Menu = [bool]$MenuProbe
             MenuControls = [bool]$MenuControlsProbe
+            RetailVrSettings = [bool]$RetailVrSettingsProbe
             Interaction = [bool]$InteractionProbe
             CoreActions = [bool]$CoreActionsProbe
+            ForensicMemory = [bool]$ForensicMemoryProbe
             Haptics = [bool]$HapticsProbe
             HeadAim = [bool]$HeadAimProbe
             AimPath = [bool]$AimPathProbe
@@ -1065,16 +1093,16 @@ try {
         BackgroundRenderingEnabled = $backgroundRenderRequired
         XrFramePacingEnabled = -not [bool]$NoXrFramePacing
         PerformanceProbe = [bool]$PerformanceProbe
-        GameWindowFocusRestored = [bool]$gameFocusRestored
+        GameWindowFocusRestored = $false
+        GameWindowFocus = [pscustomobject][ordered]@{
+            InitialAttempt = $initialGameFocus
+            ReadinessHandoff = $readyGameFocus
+            FinalHandoff = $null
+        }
         StartupImage = $StartupImage
         OpenXrEnabled = $true
         StereoEnabled = $false
     }
-    [IO.File]::WriteAllText(
-        $reportPath,
-        ($report | ConvertTo-Json -Depth 8) + [Environment]::NewLine,
-        (New-Object Text.UTF8Encoding($false)))
-
     Write-Host 'Condemned M2 mono OpenXR transport is live.' -ForegroundColor Green
     Write-Host "Game PID: $($game.Id)  Host PID: $($hostProcess.Id)"
     Write-Host "Host log:  $($hostLog.FullName)"
@@ -1089,9 +1117,12 @@ try {
             'attachment is OFF.') -ForegroundColor Cyan
         Write-Host ('  Unarmed, ordinary firearms, two-handers, and unknown ' +
             'weapon indices remain excluded.') -ForegroundColor Cyan
-        Write-Host ('  If Retail collision is not seeded yet, one deliberate swing ' +
-            'primes it; later contacts are checked continuously.') -ForegroundColor Cyan
-        Write-Host ('  Collider wireframe: AMBER = preview waiting for seed; ' +
+        Write-Host ('  A stable mapped pickup automatically requests and verifies ' +
+            'its reusable Retail collider.') -ForegroundColor Cyan
+        Write-Host ('  Seed damage and action haptics are blocked; one manual ' +
+            'Retail attack remains only as a failed-retry fallback.') `
+            -ForegroundColor Cyan
+        Write-Host ('  Collider wireframe: AMBER = automatic seed pending; ' +
             'GREEN = the Retail collision body is live.') -ForegroundColor Cyan
         Write-Host ('  Configure it in VR Tools > COLLIDER: left stick selects, ' +
             'right stick adjusts, A toggles direction/reset; changes auto-save.') `
@@ -1119,8 +1150,34 @@ try {
         Write-Host 'VR menu controls: left stick = navigate; A/trigger = accept; B = back.' `
             -ForegroundColor Cyan
     }
+    if ($RetailVrSettingsProbe) {
+        Write-Host ('Retail Options probe: verify VR Settings appears between ' +
+            'SOUND and PERFORMANCE, then select it once.') `
+            -ForegroundColor Cyan
+        Write-Host ('  It should open a Retail-native VR Settings page; ' +
+            'verify B/Escape returns to Options.') `
+            -ForegroundColor Cyan
+        Write-Host ('  Display, VR Features, Comfort, and Developer Tools are ' +
+            'diagnostic-only in this lifecycle gate; do not select them.') `
+            -ForegroundColor Yellow
+    }
     if ($CoreActionsProbe) {
         Write-Host 'Forensic tool: push the right stick fully UP (75% threshold).' `
+            -ForegroundColor Cyan
+    }
+    if ($ForensicMemoryProbe) {
+        Write-Host ('Forensic state observers are active: no video capture and ' +
+            'no game-memory writes.') -ForegroundColor Cyan
+        Write-Host ('  Scanner: reach the UV target. Item Camera index 3: ' +
+            'continue from the shown camera stage.') `
+            -ForegroundColor Cyan
+        Write-Host '  Aim using the white alignment arrows and live camera screen.' `
+            -ForegroundColor Cyan
+        Write-Host ('  Wait for the green light/beep, then pull the VR trigger ' +
+            'once. The target trace now follows Retail''s Camera socket.') `
+            -ForegroundColor Cyan
+        Write-Host ('  Stay in VR if it fails; the new socket/query diagnostics ' +
+            'will preserve the evidence automatically.') `
             -ForegroundColor Cyan
     }
     if ($MenuProbe) {
@@ -1167,13 +1224,34 @@ try {
             '-Run', ('"{0}"' -f $runLogDirectory),
             '-GameProcessId', $game.Id.ToString(
                 [Globalization.CultureInfo]::InvariantCulture))
-        Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList $watcherArguments | Out-Null
+        $performanceWatcher = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList $watcherArguments `
+            -PassThru
+        $performanceWatcherDeadline = [DateTime]::UtcNow.AddSeconds(1)
+        do {
+            $performanceWatcher.Refresh()
+            if ($performanceWatcher.HasExited -or
+                $performanceWatcher.MainWindowHandle -ne 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $performanceWatcherDeadline)
         Write-Host 'Live performance telemetry opened in a separate window.' `
             -ForegroundColor Cyan
     }
-    if (-not (Set-CondemnedVrForegroundWindow $game)) {
-        Write-Warning 'Condemned was ready, but Windows refused the foreground focus handoff.'
+    $finalGameFocus = Set-CondemnedVrForegroundWindow $game `
+        -TimeoutMilliseconds 1000 `
+        -AllowAttachedInput
+    $report.GameWindowFocusRestored = [bool]$finalGameFocus.Focused
+    $report.GameWindowFocus.FinalHandoff = $finalGameFocus
+    [IO.File]::WriteAllText(
+        $reportPath,
+        ($report | ConvertTo-Json -Depth 8) + [Environment]::NewLine,
+        (New-Object Text.UTF8Encoding($false)))
+    if (-not $finalGameFocus.Focused) {
+        Write-Warning (
+            'Condemned was ready, but Windows refused the foreground focus ' +
+            ('handoff ({0}).' -f $finalGameFocus.Detail))
     }
 } catch {
     if ($null -ne $game) {

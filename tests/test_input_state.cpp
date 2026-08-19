@@ -5,6 +5,7 @@
 
 #include "input_state.h"
 #include "condemned_controller_input.h"
+#include "condemned_forensic_trace.h"
 #include "condemned_locomotion.h"
 
 namespace {
@@ -783,6 +784,93 @@ int main() {
         handed.handGripPose[FEARVR_HAND_LEFT].pz !=
             original.handGripPose[FEARVR_HAND_LEFT].pz) {
         return Fail("mirroring twice must restore the original state");
+    }
+
+    if (condemnedvr::CondemnedForensicTraceCommandIndex(
+            condemnedvr::kCondemnedToolsCommand) != 0 ||
+        condemnedvr::CondemnedForensicTraceCommandIndex(
+            condemnedvr::kCondemnedFireCommand) != 1 ||
+        condemnedvr::CondemnedForensicTraceCommandIndex(
+            condemnedvr::kCondemnedActivateCommand) != 2 ||
+        condemnedvr::CondemnedForensicTraceCommandIndex(999U) != -1 ||
+        std::strcmp(
+            condemnedvr::CondemnedForensicTraceCommandName(
+                condemnedvr::kCondemnedToolsCommand),
+            "tools") != 0 ||
+        std::strcmp(
+            condemnedvr::CondemnedForensicTraceCommandName(999U),
+            "unmapped") != 0) {
+        return Fail("forensic trace command mapping is incorrect");
+    }
+    if (condemnedvr::ForensicTraceCommandValueActive(0.49F) ||
+        !condemnedvr::ForensicTraceCommandValueActive(-0.5F) ||
+        condemnedvr::ForensicTraceCommandValueActive(
+            std::numeric_limits<float>::quiet_NaN())) {
+        return Fail("forensic trace edge threshold must fail closed");
+    }
+
+    std::size_t forensicSampleIndex = 0U;
+    for (std::uint32_t frame = 0U; frame <= 256U; ++frame) {
+        const bool expected = forensicSampleIndex <
+                condemnedvr::kForensicMemoryTraceSampleFrames.size() &&
+            frame ==
+                condemnedvr::kForensicMemoryTraceSampleFrames[
+                    forensicSampleIndex];
+        if (condemnedvr::ConsumeForensicMemoryTraceSampleFrame(
+                frame, forensicSampleIndex) != expected) {
+            return Fail("forensic trace sample schedule is incorrect");
+        }
+    }
+    if (forensicSampleIndex !=
+            condemnedvr::kForensicMemoryTraceSampleFrames.size() ||
+        condemnedvr::ConsumeForensicMemoryTraceSampleFrame(
+            257U, forensicSampleIndex)) {
+        return Fail("forensic trace schedule must stop after frame 256");
+    }
+
+    constexpr unsigned char kAbc[] = {'a', 'b', 'c'};
+    if (condemnedvr::ForensicMemoryFnv1a(kAbc, sizeof(kAbc)) !=
+            0x1A47E90BU ||
+        condemnedvr::ForensicMemoryFnv1a(nullptr, 0U) !=
+            2166136261U ||
+        condemnedvr::ForensicMemoryFnv1a(nullptr, 1U) != 0U) {
+        return Fail("forensic trace snapshot hashes are not deterministic");
+    }
+    const condemnedvr::ForensicControllerRay forensicRay =
+        condemnedvr::BuildForensicControllerRay(
+            {10.0F, 20.0F, 30.0F},
+            {10.0F, 20.0F, 130.0F},
+            {1.0F, 2.0F, 3.0F},
+            {0.0F, 0.0F, 2.0F});
+    if (!forensicRay.valid ||
+        !Near(forensicRay.rangeUnits, 100.0F) ||
+        !Near(forensicRay.start.x, 1.0F) ||
+        !Near(forensicRay.start.y, 2.0F) ||
+        !Near(forensicRay.start.z, 3.0F) ||
+        !Near(forensicRay.end.x, 1.0F) ||
+        !Near(forensicRay.end.y, 2.0F) ||
+        !Near(forensicRay.end.z, 103.0F)) {
+        return Fail(
+            "forensic redirected ray must preserve Retail range");
+    }
+    if (condemnedvr::BuildForensicControllerRay(
+            {1.0F, 1.0F, 1.0F},
+            {1.0F, 1.0F, 1.0F},
+            {0.0F, 0.0F, 0.0F},
+            {0.0F, 0.0F, 1.0F}).valid ||
+        condemnedvr::BuildForensicControllerRay(
+            {0.0F, 0.0F, 0.0F},
+            {0.0F, 0.0F, 10.0F},
+            {0.0F, 0.0F, 0.0F},
+            {0.0F, 0.0F, 0.0F}).valid ||
+        condemnedvr::BuildForensicControllerRay(
+            {0.0F, 0.0F, 0.0F},
+            {0.0F, 0.0F, 10.0F},
+            {std::numeric_limits<float>::quiet_NaN(),
+             0.0F, 0.0F},
+            {0.0F, 0.0F, 1.0F}).valid) {
+        return Fail(
+            "forensic redirected ray must fail closed on invalid geometry");
     }
 
     std::puts("test_input_state: OK");

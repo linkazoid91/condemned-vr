@@ -55,6 +55,8 @@ add_library(condemnedvr-gameclient-loader SHARED
   dllmain.cpp
   renderer_probe.cpp
   renderer_probe.h
+  retail_menu_integration.cpp
+  retail_menu_integration.h
   weapon_identity_reader.cpp
   weapon_identity_reader.h
 )
@@ -72,6 +74,23 @@ target_link_libraries(condemnedvr-gameclient-loader PRIVATE
 set_target_properties(condemnedvr-gameclient-loader PROPERTIES
   OUTPUT_NAME "GameClient"
   PREFIX ""
+)
+
+set(CONDEMNEDVR_DEFAULT_SETTINGS_FILE
+  "${CMAKE_SOURCE_DIR}/config/condemnedvr-defaults.ini"
+)
+if(NOT EXISTS "${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}")
+  message(FATAL_ERROR
+    "Packaged defaults missing at ${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}.")
+endif()
+add_custom_command(TARGET condemnedvr-gameclient-loader POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}"
+    "$<TARGET_FILE_DIR:condemnedvr-gameclient-loader>/condemnedvr-defaults.ini"
+  VERBATIM
+)
+set_property(TARGET condemnedvr-gameclient-loader APPEND PROPERTY
+  LINK_DEPENDS "${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}"
 )
 
 add_executable(verify-condemned-gameclient
@@ -111,6 +130,10 @@ if(CONDEMNEDVR_BUILD_TESTS)
     test-condemned-weapon-settings-store PRIVATE
     condemnedvr-weapon-settings-store
     fearvr-warnings
+  )
+  add_dependencies(
+    test-condemned-weapon-settings-store
+    condemnedvr-gameclient-loader
   )
   add_test(
     NAME condemned_weapon_settings_store

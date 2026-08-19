@@ -12,8 +12,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "arm_ik.h"
+#include "condemned_arm_ik_lifecycle.h"
 #include "condemned_physical_melee.h"
 #include "head_tracking_math.h"
 #include "weapon_settings_store.h"
@@ -29,6 +31,8 @@ using ModelResult = std::uint32_t;
 constexpr ModelResult kModelOk = 0U;
 constexpr ModelHandle kInvalidModelHandle = 0xFFFFFFFFU;
 constexpr ULONGLONG kTargetFreshnessMilliseconds = 250U;
+constexpr ULONGLONG kCallbackHeartbeatFreshnessMilliseconds = 1000U;
+constexpr std::uint64_t kCallbackHeartbeatLogInterval = 600U;
 
 constexpr std::uintptr_t kPlayerBodyManagerInstanceRva = 0x00002EA0U;
 constexpr std::uintptr_t kPlayerBodyManagerRva = 0x00167A50U;
@@ -132,6 +136,9 @@ struct RightHandControlState {
     fearvr::TrackingVector solvedElbowWorld{};
     PhysicalMeleeRigidTransform lastModelWorld{};
     std::uint64_t solvedSampleId{0U};
+    std::uint64_t callbackHeartbeat{0U};
+    ULONGLONG lastCallbackTick{0U};
+    std::uint32_t lifecycleGeneration{1U};
     ULONGLONG solvedTick{0U};
     bool lastModelWorldValid{false};
     bool previousBendValid{false};
@@ -169,6 +176,8 @@ SRWLOCK g_leftControlLock = SRWLOCK_INIT;
 RightHandControlState g_leftControl{};
 SRWLOCK g_leftTargetLock = SRWLOCK_INIT;
 TrackedRightHandTarget g_leftTarget{};
+SRWLOCK g_lifecycleLock = SRWLOCK_INIT;
+ArmIkLifecycleState g_lifecycleState{};
 volatile LONG g_enabled = 0;
 volatile LONG g_fullArmMode = 0;
 volatile LONG g_modelGlobalValidated = 0;
@@ -233,6 +242,18 @@ const char* ArmIkModeEvent(
     const char* fullArmEvent) noexcept {
     return InterlockedCompareExchange(&g_fullArmMode, 0, 0) != 0
         ? fullArmEvent : handOnlyEvent;
+}
+
+ArmIkLifecycleState CopyArmIkLifecycleState() noexcept {
+    ArmIkLifecycleState lifecycle{};
+    AcquireSRWLockShared(&g_lifecycleLock);
+    lifecycle = g_lifecycleState;
+    ReleaseSRWLockShared(&g_lifecycleLock);
+    return lifecycle;
+}
+
+bool CurrentArmIkLifecycleAllowsInstall() noexcept {
+    return ArmIkLifecycleAllowsInstall(CopyArmIkLifecycleState());
 }
 
 bool IsExecutableAddress(const void* address) noexcept {
@@ -478,12 +499,16 @@ void __cdecl ArmNodeControl(
     AcquireSRWLockShared(&controlLock);
     control = *controlState;
     ReleaseSRWLockShared(&controlLock);
+    const ArmIkLifecycleState lifecycle =
+        CopyArmIkLifecycleState();
     const bool registeredNode = data.node == control.handNode ||
         (control.fullArm &&
          (data.node == control.upperArmNode ||
           data.node == control.forearmNode));
     if (!control.installed || !registeredNode ||
         data.model != control.playerBody ||
+        control.lifecycleGeneration != lifecycle.generation ||
+        !ArmIkLifecycleAllowsInstall(lifecycle) ||
         !PlayerBodyIsLive(control.playerBody)) {
         return;
     }
@@ -700,17 +725,51 @@ void __cdecl ArmNodeControl(
         desiredNodeObject.rotation.w;
     InterlockedExchange(&TargetWaitingLogFor(left), 0);
 
-    if (InterlockedCompareExchange(
+    std::uint64_t heartbeat = 0U;
+    const ULONGLONG callbackTick = GetTickCount64();
+    AcquireSRWLockExclusive(&controlLock);
+    if (controlState->installed &&
+        controlState->playerBody == control.playerBody &&
+        controlState->handNode == control.handNode &&
+        controlState->lifecycleGeneration ==
+            control.lifecycleGeneration) {
+        controlState->callbackHeartbeat =
+            controlState->callbackHeartbeat ==
+                std::numeric_limits<std::uint64_t>::max()
+            ? 1U : controlState->callbackHeartbeat + 1U;
+        controlState->lastCallbackTick = callbackTick;
+        heartbeat = controlState->callbackHeartbeat;
+    }
+    ReleaseSRWLockExclusive(&controlLock);
+    if (heartbeat != 0U &&
+        (heartbeat == 1U ||
+         heartbeat % kCallbackHeartbeatLogInterval == 0U) &&
+        g_log != nullptr) {
+        char heartbeatDetail[256]{};
+        std::snprintf(
+            heartbeatDetail, sizeof(heartbeatDetail),
+            "side=%s player_body=%p generation=%lu "
+            "heartbeat=%llu sample_id=%llu",
+            left ? "left" : "right", control.playerBody,
+            static_cast<unsigned long>(
+                control.lifecycleGeneration),
+            static_cast<unsigned long long>(heartbeat),
+            static_cast<unsigned long long>(target.sampleId));
+        g_log("arm_ik_callback_heartbeat", heartbeatDetail);
+    }
+
+    if (heartbeat != 0U &&
+        InterlockedCompareExchange(
             &CallbackActiveLogFor(left), 1, 0) == 0 &&
         g_log != nullptr) {
-        char detail[384]{};
+        char detail[512]{};
         std::snprintf(
             detail, sizeof(detail),
             "player_body=%p node=%lu sample_id=%llu "
             "target_position=(%.4f,%.4f,%.4f) "
             "side=%s mode=%s upper_length=%.3f lower_length=%.3f "
             "upper_solve_current=%u target_clamped=%u "
-            "locomotion_anchor=%s",
+            "locomotion_anchor=%s generation=%lu heartbeat=%llu",
             control.playerBody,
             static_cast<unsigned long>(control.handNode),
             static_cast<unsigned long long>(target.sampleId),
@@ -726,7 +785,10 @@ void __cdecl ArmNodeControl(
                 control.solvedSampleId == target.sampleId ? 1U : 0U,
             control.targetClamped ? 1U : 0U,
             target.bodyRelativeValid
-                ? "player_body_local" : "world_fallback");
+                ? "player_body_local" : "world_fallback",
+            static_cast<unsigned long>(
+                control.lifecycleGeneration),
+            static_cast<unsigned long long>(heartbeat));
         g_log(
             left
                 ? "arm_ik_left_arm_active"
@@ -787,7 +849,18 @@ void RollBackNodeControls(
     }
 }
 
-void ClearArmControl(bool left, bool attemptRemove) noexcept {
+struct ArmControlReleaseSummary {
+    void* playerBody{nullptr};
+    std::uint64_t callbackHeartbeat{0U};
+    std::uint32_t lifecycleGeneration{1U};
+    std::uint32_t removeCount{0U};
+    std::uint32_t removeFailures{0U};
+    bool installed{false};
+    bool removeAttempted{false};
+};
+
+ArmControlReleaseSummary ClearArmControl(
+    bool left, bool attemptRemove) noexcept {
     SRWLOCK& controlLock = ControlLockFor(left);
     RightHandControlState& controlState = ControlFor(left);
     RightHandControlState oldControl{};
@@ -799,40 +872,47 @@ void ClearArmControl(bool left, bool attemptRemove) noexcept {
     InterlockedExchange(&TargetWaitingLogFor(left), 0);
     InterlockedExchange(&CallbackOrderWaitingLogFor(left), 0);
 
-    bool removeAttempted = false;
-    std::uint32_t removeCount = 0U;
-    std::uint32_t removeFailures = 0U;
+    ArmControlReleaseSummary summary{};
+    summary.playerBody = oldControl.playerBody;
+    summary.callbackHeartbeat = oldControl.callbackHeartbeat;
+    summary.lifecycleGeneration = oldControl.lifecycleGeneration;
+    summary.installed = oldControl.installed;
     if (attemptRemove && oldControl.installed &&
         g_removeNodeControlSpecific != nullptr &&
         ModelObjectLooksLive(oldControl.playerBody)) {
-        removeAttempted = true;
+        summary.removeAttempted = true;
         const ModelHandle nodes[3]{
             oldControl.handNode,
             oldControl.forearmNode,
             oldControl.upperArmNode};
         const std::size_t nodeCount = oldControl.fullArm ? 3U : 1U;
         for (std::size_t index = 0U; index < nodeCount; ++index) {
-            ++removeCount;
+            ++summary.removeCount;
             if (SafeRemoveNodeControl(
                     oldControl.playerBody, nodes[index],
                     &controlState) != kModelOk) {
-                ++removeFailures;
+                ++summary.removeFailures;
             }
         }
     }
     if (oldControl.installed && g_log != nullptr) {
-        char detail[320]{};
+        char detail[448]{};
         std::snprintf(
             detail, sizeof(detail),
             "player_body=%p mode=%s remove_attempted=%d "
-            "remove_count=%lu remove_failures=%lu",
+            "remove_count=%lu remove_failures=%lu "
+            "generation=%lu heartbeat=%llu",
             oldControl.playerBody,
             oldControl.fullArm
                 ? (left ? "full_left_arm" : "full_right_arm")
                 : "right_hand_socket_only",
-            removeAttempted ? 1 : 0,
-            static_cast<unsigned long>(removeCount),
-            static_cast<unsigned long>(removeFailures));
+            summary.removeAttempted ? 1 : 0,
+            static_cast<unsigned long>(summary.removeCount),
+            static_cast<unsigned long>(summary.removeFailures),
+            static_cast<unsigned long>(
+                oldControl.lifecycleGeneration),
+            static_cast<unsigned long long>(
+                oldControl.callbackHeartbeat));
         g_log(
             left
                 ? "arm_ik_left_arm_released"
@@ -841,6 +921,7 @@ void ClearArmControl(bool left, bool attemptRemove) noexcept {
                 : "arm_ik_right_hand_proof_released",
             detail);
     }
+    return summary;
 }
 
 bool InstallArmControlUnchecked(
@@ -962,6 +1043,13 @@ bool InstallArmControlUnchecked(
         return false;
     }
 
+    const ArmIkLifecycleState lifecycle =
+        CopyArmIkLifecycleState();
+    if (!ArmIkLifecycleAllowsInstall(lifecycle)) {
+        g_installPhase = "lifecycle_not_playing";
+        return false;
+    }
+
     RightHandControlState next{};
     next.playerBody = playerBody;
     next.upperArmNode = upperArmNode;
@@ -970,6 +1058,7 @@ bool InstallArmControlUnchecked(
     next.handSocket = handSocket;
     next.socketFromNode = socketFromNode;
     next.fullArm = fullArm;
+    next.lifecycleGeneration = lifecycle.generation;
 
     if (fullArm) {
         const PhysicalMeleeRigidTransform upperArm =
@@ -1042,6 +1131,16 @@ bool InstallArmControlUnchecked(
     }
     registeredNodes[registeredCount++] = handNode;
 
+    const ArmIkLifecycleState lifecycleAfterRegistration =
+        CopyArmIkLifecycleState();
+    if (!ArmIkLifecycleAllowsInstall(lifecycleAfterRegistration) ||
+        lifecycleAfterRegistration.generation !=
+            next.lifecycleGeneration) {
+        g_installPhase = "lifecycle_changed_during_install";
+        RollBackNodeControls(
+            playerBody, registeredNodes, registeredCount, &controlState);
+        return false;
+    }
     next.installed = true;
     AcquireSRWLockExclusive(&controlLock);
     controlState = next;
@@ -1059,7 +1158,8 @@ bool InstallArmControlUnchecked(
             "hand_from_forearm_position=(%.4f,%.4f,%.4f) "
             "socket_from_node_position=(%.4f,%.4f,%.4f) "
             "socket_from_node_rotation=(%.6f,%.6f,%.6f,%.6f) "
-            "node_control_slot=%lu registered_nodes=%lu",
+            "node_control_slot=%lu registered_nodes=%lu "
+            "generation=%lu",
             playerBody,
             fullArm
                 ? (left ? "full_left_arm" : "full_right_arm")
@@ -1083,7 +1183,9 @@ bool InstallArmControlUnchecked(
             socketFromNode.rotation.z,
             socketFromNode.rotation.w,
             static_cast<unsigned long>(kAddNodeControlSpecificSlot),
-            static_cast<unsigned long>(registeredCount));
+            static_cast<unsigned long>(registeredCount),
+            static_cast<unsigned long>(
+                next.lifecycleGeneration));
         g_log(
             left
                 ? "arm_ik_left_arm_installed"
@@ -1309,6 +1411,9 @@ bool InstallArmIkMode(
         reinterpret_cast<RemoveNodeControlSpecificFunction>(
             vtable[kRemoveNodeControlSpecificSlot]);
     g_failedPlayerBody = nullptr;
+    AcquireSRWLockExclusive(&g_lifecycleLock);
+    g_lifecycleState = {};
+    ReleaseSRWLockExclusive(&g_lifecycleLock);
     fearvr::ArmIkTuning loadedTuning{};
     const WeaponSettingsStoreResult tuningLoadResult =
         LoadArmIkTuning(loadedTuning);
@@ -1347,7 +1452,9 @@ bool InstallArmIkMode(
         "model_interface=%p player_body_manager=%p "
         "model_global=%p model_global_ready=%d "
         "add_slot=%lu remove_slot=%lu "
-        "mode=%s mutation=opt_in",
+        "mode=%s mutation=opt_in "
+        "lifecycle=retail_loading_generation "
+        "active_status=fresh_callback_heartbeat",
         model, playerBodyManager, retailModelGlobal,
         retailModelGlobal == model ? 1 : 0,
         static_cast<unsigned long>(kAddNodeControlSpecificSlot),
@@ -1379,6 +1486,9 @@ bool InstallArmIkRightArm(
 
 void SampleArmIkRightHandProof() noexcept {
     if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+        return;
+    }
+    if (!CurrentArmIkLifecycleAllowsInstall()) {
         return;
     }
     const LONG sample = InterlockedIncrement(&g_sampleCount);
@@ -1557,15 +1667,111 @@ void InvalidateArmIkLeftHandTarget() noexcept {
     InvalidateArmIkTarget(true);
 }
 
+void NotifyArmIkRetailGameState(int gameState) noexcept {
+    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+        return;
+    }
+
+    ArmIkLifecycleTransition transition{};
+    AcquireSRWLockExclusive(&g_lifecycleLock);
+    transition = ObserveArmIkGameState(
+        g_lifecycleState, gameState);
+    ReleaseSRWLockExclusive(&g_lifecycleLock);
+    if (transition.action == ArmIkLifecycleAction::None) {
+        return;
+    }
+
+    g_failedPlayerBody = nullptr;
+    InterlockedExchange(&g_sampleCount, 0);
+    if (transition.action ==
+        ArmIkLifecycleAction::ResumeAfterLoad) {
+        if (g_log != nullptr) {
+            char detail[256]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "previous_state=%d current_state=%d generation=%lu "
+                "reinstall=next_render_sample same_body_address_allowed=1",
+                transition.previousGameState,
+                transition.currentGameState,
+                static_cast<unsigned long>(
+                    transition.generation));
+            g_log("arm_ik_lifecycle_resume_pending", detail);
+        }
+        return;
+    }
+
+    InvalidateArmIkTarget(false);
+    InvalidateArmIkTarget(true);
+    const ArmControlReleaseSummary right =
+        ClearArmControl(false, true);
+    const ArmControlReleaseSummary left =
+        ClearArmControl(true, true);
+    if (g_log != nullptr) {
+        char detail[896]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "previous_state=%d current_state=%d generation=%lu "
+            "right_body=%p right_installed=%u "
+            "right_generation=%lu right_heartbeat=%llu "
+            "right_remove_attempted=%u right_remove_count=%lu "
+            "right_remove_failures=%lu "
+            "left_body=%p left_installed=%u "
+            "left_generation=%lu left_heartbeat=%llu "
+            "left_remove_attempted=%u left_remove_count=%lu "
+            "left_remove_failures=%lu targets_invalidated=1",
+            transition.previousGameState,
+            transition.currentGameState,
+            static_cast<unsigned long>(transition.generation),
+            right.playerBody, right.installed ? 1U : 0U,
+            static_cast<unsigned long>(
+                right.lifecycleGeneration),
+            static_cast<unsigned long long>(
+                right.callbackHeartbeat),
+            right.removeAttempted ? 1U : 0U,
+            static_cast<unsigned long>(right.removeCount),
+            static_cast<unsigned long>(right.removeFailures),
+            left.playerBody, left.installed ? 1U : 0U,
+            static_cast<unsigned long>(
+                left.lifecycleGeneration),
+            static_cast<unsigned long long>(
+                left.callbackHeartbeat),
+            left.removeAttempted ? 1U : 0U,
+            static_cast<unsigned long>(left.removeCount),
+            static_cast<unsigned long>(left.removeFailures));
+        g_log("arm_ik_lifecycle_invalidated", detail);
+    }
+}
+
+namespace {
+
+bool ArmControlHasFreshHeartbeat(
+    bool left, bool requireFullArm) noexcept {
+    const ArmIkLifecycleState lifecycle =
+        CopyArmIkLifecycleState();
+    if (!ArmIkLifecycleAllowsInstall(lifecycle)) {
+        return false;
+    }
+    RightHandControlState control{};
+    SRWLOCK& controlLock = ControlLockFor(left);
+    AcquireSRWLockShared(&controlLock);
+    control = ControlFor(left);
+    ReleaseSRWLockShared(&controlLock);
+    return control.installed && control.playerBody != nullptr &&
+        (!requireFullArm || control.fullArm) &&
+        control.lifecycleGeneration == lifecycle.generation &&
+        control.callbackHeartbeat != 0U &&
+        control.lastCallbackTick != 0U &&
+        GetTickCount64() - control.lastCallbackTick <=
+            kCallbackHeartbeatFreshnessMilliseconds;
+}
+
+} // namespace
+
 bool ArmIkRightHandProofIsActive() noexcept {
     if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
         return false;
     }
-    bool active = false;
-    AcquireSRWLockShared(&g_controlLock);
-    active = g_control.installed && g_control.playerBody != nullptr;
-    ReleaseSRWLockShared(&g_controlLock);
-    return active;
+    return ArmControlHasFreshHeartbeat(false, false);
 }
 
 bool ArmIkLeftHandIsActive() noexcept {
@@ -1573,12 +1779,7 @@ bool ArmIkLeftHandIsActive() noexcept {
         InterlockedCompareExchange(&g_fullArmMode, 0, 0) == 0) {
         return false;
     }
-    bool active = false;
-    AcquireSRWLockShared(&g_leftControlLock);
-    active = g_leftControl.installed && g_leftControl.fullArm &&
-        g_leftControl.playerBody != nullptr;
-    ReleaseSRWLockShared(&g_leftControlLock);
-    return active;
+    return ArmControlHasFreshHeartbeat(true, true);
 }
 
 fearvr::ArmIkTuning ReadArmIkTuning() noexcept {
@@ -1616,12 +1817,8 @@ bool ArmIkRightArmIsActive() noexcept {
         InterlockedCompareExchange(&g_fullArmMode, 0, 0) == 0) {
         return false;
     }
-    bool active = false;
-    AcquireSRWLockShared(&g_controlLock);
-    active = g_control.installed && g_control.fullArm &&
-        g_control.playerBody != nullptr;
-    ReleaseSRWLockShared(&g_controlLock);
-    return active && ArmIkLeftHandIsActive();
+    return ArmControlHasFreshHeartbeat(false, true) &&
+        ArmIkLeftHandIsActive();
 }
 
 } // namespace condemnedvr

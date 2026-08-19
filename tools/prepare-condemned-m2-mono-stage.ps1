@@ -31,6 +31,8 @@ $x86Root = Assert-UnderCondemnedVrProjectRoot (
     Join-Path $cfg.ProjectRoot 'build\condemned-x86-vs\src')
 $loaderSource = Join-Path $x86Root (
     'condemned_gameclient_loader\RelWithDebInfo\GameClient.dll')
+$defaultsSource = Join-Path $x86Root (
+    'condemned_gameclient_loader\RelWithDebInfo\condemnedvr-defaults.ini')
 $bridgeSource = Join-Path $x86Root (
     'condemned_proxy32\RelWithDebInfo\condemnedvr-d3d9.dll')
 $clientVerifier = Join-Path $x86Root (
@@ -44,7 +46,7 @@ $hostSource = Assert-UnderCondemnedVrProjectRoot (
 $originalSource = Join-Path $retailRoot 'Game\GameClient.dll'
 $retailExe = Join-Path $retailRoot 'Condemned.exe'
 foreach ($required in @(
-        $loaderSource, $bridgeSource, $clientVerifier, $exeVerifier,
+        $loaderSource, $defaultsSource, $bridgeSource, $clientVerifier, $exeVerifier,
         $hostSource, $originalSource, $retailExe)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required M2 mono input is missing: $required"
@@ -71,7 +73,7 @@ $deploymentPath = Assert-UnderCondemnedVrProjectRoot (
 New-Item -ItemType Directory -Force -Path @(
     $stageRoot, $moduleDirectory, $userDirectory, $logDirectory) | Out-Null
 $allowedNames = @(
-    'GameClient.dll', 'GameOrig.dll', 'condemnedvr-d3d9.dll',
+    'GameClient.dll', 'GameOrig.dll', 'condemnedvr-defaults.ini', 'condemnedvr-d3d9.dll',
     'condemnedvr-loader.log')
 $existing = @(Get-ChildItem -LiteralPath $moduleDirectory -Force)
 $unexpected = @($existing | Where-Object {
@@ -86,6 +88,7 @@ if ($existing.Count -gt 0 -and -not $Refresh) {
 
 $stagedFiles = [ordered]@{
     'GameClient.dll' = $loaderSource
+    'condemnedvr-defaults.ini' = $defaultsSource
     'GameOrig.dll' = $originalSource
     'condemnedvr-d3d9.dll' = $bridgeSource
 }

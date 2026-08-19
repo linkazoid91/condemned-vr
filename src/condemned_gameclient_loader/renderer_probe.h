@@ -36,9 +36,25 @@ bool InstallRendererPassThroughProbe(
 bool ReadTrackedHeadAimRotation(float (&rotation)[4]) noexcept;
 bool TrackedHeadAimIsFresh() noexcept;
 
+// Returns the same fresh world-space HMD camera position and rotation used by
+// head aim. Combat diagnostics consume position read-only to measure XZ
+// stand-off from a Retail contact point; it never drives collision.
+bool ReadTrackedHeadWorldPose(
+    float (&position)[3],
+    float (&rotation)[4]) noexcept;
+
 // Returns the separately tracked right-controller aim rotation in the same
 // world basis. Weapon fire vectors use this snapshot, never the HMD snapshot.
 bool ReadTrackedControllerAimRotation(float (&rotation)[4]) noexcept;
+
+// Returns the coherent OpenXR right-aim position and rotation transformed to
+// LithTech world space. Forensic target acquisition uses this ray, while
+// physical melee continues to use the separately published grip position.
+bool ReadTrackedControllerAimWorldPose(
+    float (&position)[3],
+    float (&rotation)[4],
+    std::uint64_t& sampleId,
+    std::uint64_t& timestampNs) noexcept;
 
 // Returns the coherent held-weapon pose used by physical melee: position is
 // the OpenXR grip attachment point and rotation is the OpenXR aim direction.
@@ -100,23 +116,43 @@ void SetWeaponGripCalibrationEnabled(bool enabled) noexcept;
 // stick/button input is not also injected as gameplay input.
 bool WeaponGripCalibrationAcceptsControllerInput() noexcept;
 
-// The always-available stereo developer menu centralizes current VR tuning.
-// It captures controller bindings while open and also captures its deliberate
-// two-grip + Y toggle chord before that chord can leak into Retail input.
+// The stereo developer menu centralizes current VR tuning. Its opening
+// shortcuts (both grips + Y and F12) are controlled by the persisted Retail
+// VR Settings Developer Tools toggle. An already-open menu retains its close
+// path and release capture even if the preference changes.
 bool VrToolMenuCapturesControllerInput(
     const FearVrInputState& input,
     bool sampleFresh) noexcept;
 bool VrToolMenuIsOpen() noexcept;
+bool ReadVrToolMenuShortcutEnabled(bool& enabled) noexcept;
+bool SetVrToolMenuShortcutEnabled(bool enabled) noexcept;
 // Returns the isolated session settings for one stable Retail weapon index.
 // Unknown indices use conservative handling defaults and cannot inherit a
 // verified melee profile's enabled swing adapter.
 ToolMenuMeleeSettings ReadVrToolMenuMeleeSettings(
     std::int32_t weaponIndex) noexcept;
 
+// Returns the saved head-yaw-relative guard pose for the equipped weapon.
+// Missing mapped one-handed records may read the accepted Pipe baseline;
+// unconfigured and unsupported identities remain disabled.
+PhysicalMeleeBlockPoseSettings ReadVrToolMenuBlockPoseSettings(
+    std::int32_t weaponIndex) noexcept;
+
+// Returns the optional finite native block-window override. Disabled is the
+// release-safe default and leaves Retail's authored duration untouched.
+ToolMenuBlockTimingSettings ReadVrToolMenuBlockTimingSettings(
+    std::int32_t weaponIndex) noexcept;
+
 // Returns the persistent per-weapon swept-capsule calibration used by both
 // the collision solver and its stereo wireframe.
 ToolMenuColliderSettings ReadVrToolMenuColliderSettings(
     std::int32_t weaponIndex) noexcept;
+
+// A missing dedicated record follows the weapon's current attack collider;
+// the optional flag makes that fallback visible to the tool menu.
+ToolMenuColliderSettings ReadVrToolMenuBlockColliderSettings(
+    std::int32_t weaponIndex,
+    bool* usesAttackColliderFallback = nullptr) noexcept;
 
 // Publishes the current local-player weapon and its engine-owned model
 // reference. Both references are validated during every render, so switching
@@ -130,6 +166,19 @@ bool PublishEquippedWeaponVisualProxySource(
     void* modelObject,
     const float (&modelLocalGripPositionUnits)[3],
     const float (&modelLocalGripRotation)[4]) noexcept;
+
+// Returns one lifetime-validated snapshot of the exact equipped model and
+// model-local grip calibration used by the temporary stereo visual override.
+// The expected weapon must still be current through both engine-owned
+// references. Firearm aiming combines this with the separately published
+// weighted held-weapon pose; a switch/drop/load race fails closed.
+bool ReadEquippedWeaponVisualSourceForFire(
+    const void* expectedWeapon,
+    std::int32_t& weaponIndex,
+    void*& modelObject,
+    float (&modelLocalGripPositionUnits)[3],
+    float (&modelLocalGripRotation)[4],
+    std::uint64_t& sourceGeneration) noexcept;
 
 // Drops the retained model calibration without disabling the feature. Used
 // at menu/load transitions; the equipped-weapon observer can arm it again on

@@ -139,6 +139,24 @@ foreach ($target in $targets) {
     }
 }
 
+
+if (-not $SkipTests) {
+    Write-Host (
+        '--- PowerShell: launcher focus handoff ---') `
+        -ForegroundColor Cyan
+    & "$PSScriptRoot\test-condemned-window-focus.ps1"
+
+    Write-Host (
+        '--- PowerShell: game-window screenshot helper ---') `
+        -ForegroundColor Cyan
+    & "$PSScriptRoot\capture-condemned-window.ps1" -ValidateOnly
+
+    Write-Host (
+        '--- PowerShell: weapon diagnostics watcher ---') `
+        -ForegroundColor Cyan
+    & "$PSScriptRoot\test-condemned-weapon-diagnostics.ps1"
+}
+
 $artifactCandidates = [ordered]@{
     'GameClient.dll (project loader, x86)' =
         "build\condemned-x86-vs\src\condemned_gameclient_loader\$Configuration\GameClient.dll"

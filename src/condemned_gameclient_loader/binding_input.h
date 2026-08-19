@@ -38,11 +38,20 @@ bool InstallBindingInteractionHook(
 // Overlays the verified Retail run, fire, block, melee-toggle, ammo-check,
 // stun-gun, and flashlight bindings. Every command remains
 // state-gated and Retail retains command-edge and callback ownership.
+// While the verified Scanner or Item Camera is equipped, its desktop target-
+// query callsites borrow the matching fresh Retail Camera-socket segment
+// geometry used by the white alignment arrows and live preview. Retail keeps
+// the original range, collision filter, result classification, and action
+// dispatch; a missing or stale matching pose falls back to the untouched
+// desktop query.
+// The optional forensic-memory probe observes bounded Scanner/Camera object
+// spans after Tool, Fire, and Activate edges; it never writes game memory.
 bool InstallBindingCoreActionsHook(
     void* masterDatabase,
     HMODULE gameClientModule,
     HMODULE bridgeModule,
-    RendererProbeLogFunction log) noexcept;
+    RendererProbeLogFunction log,
+    bool forensicMemoryProbe = false) noexcept;
 
 // Enables short OpenXR confirmation pulses for VR-applied Fire, Block, and
 // Activate edges. This is not a weapon-impact or per-shot haptic path.
@@ -51,9 +60,17 @@ bool InstallControllerHaptics(
     RendererProbeLogFunction log) noexcept;
 
 // Suppresses Retail mouse pitch/yaw only while a fresh HMD look snapshot is
-// available and redirects the verified weapon fire-vector path to a separate
-// freshness-gated right-controller world-space aim basis.
+// available. The first verified handgun candidate derives its fire basis from
+// the visible model: Breach -> Flash when both sockets exist, otherwise the
+// authored Flash-socket +Z axis used by Flash-only Retail handguns. The saved
+// grip transform is applied first. Other weapons and any failed runtime gate
+// retain the freshness-gated controller basis. Retail owns the fire origin.
+// Automatic guard-pose entry uses command 28. Verified Retail has no
+// command-28 off action, so Retail's finite block window owns pose exit. The
+// physical-melee lifetime extension is limited to positively classified
+// attack records and never extends block records.
 bool InstallHeadAimHooks(
+    void* masterDatabase,
     HMODULE gameClientModule,
     RendererProbeLogFunction log,
     bool aimPathProbe = false,
@@ -87,7 +104,8 @@ void ReadPhysicalMeleeToolTelemetry(
 // Coherent renderer-facing view of the configured swept weapon volume and
 // the exact proxy origin currently supplied to Retail's collision transform.
 // A body is live only while the player-owned collision record remains fresh;
-// before the first Retail seed the same geometry is an explicit preview.
+// while automatic equip-time verification is pending the same geometry is an
+// explicit preview.
 struct PhysicalMeleeColliderDebugSnapshot {
     fearvr::TrackingVector baseUnits{};
     fearvr::TrackingVector tipUnits{};
@@ -100,5 +118,10 @@ struct PhysicalMeleeColliderDebugSnapshot {
 };
 
 bool ReadPhysicalMeleeColliderDebugSnapshot(
+    PhysicalMeleeColliderDebugSnapshot& snapshot) noexcept;
+
+// Returns the same weighted pose reprojected through the dedicated block
+// capsule. Its live flag is role-specific and never borrows an attack record.
+bool ReadPhysicalMeleeBlockColliderDebugSnapshot(
     PhysicalMeleeColliderDebugSnapshot& snapshot) noexcept;
 } // namespace condemnedvr

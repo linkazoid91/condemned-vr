@@ -100,6 +100,35 @@ recorded `GameWindowFocusRestored: true`. The tester confirmed the title art,
 clean game-frame handoff, centred initial panel, and foreground focus all
 worked in-headset.
 
+On 13 August 2026 the tester reported that a later fresh launch did not start
+focused. This does not invalidate the accepted observation above, but it does
+show that the original handoff was not reliable across launches. Code
+inspection found two bounded launcher defects: each handoff made one
+`SetForegroundWindow` request and checked it immediately, and
+`GameWindowFocusRestored` latched an earlier success even though the report was
+written before the launcher's actual last focus attempt.
+
+The replacement is **implemented and automated-tested, awaiting live
+validation**. Normal focus requests are retried for at most one second. If the
+last handoff is still refused, the launcher temporarily attaches its input
+queue to the current foreground and target game threads, restores and raises
+the game window, requests foreground/active/keyboard focus, and detaches every
+queue in a `finally` path. It accepts success only when the exact target
+root-owner window and expected game PID own the foreground and every temporary
+attachment was released. The final handoff occurs after optional diagnostics
+windows have appeared, and `m2-mono-live.json` is written only afterward.
+`GameWindowFocus` preserves the initial, readiness, and final attempt details,
+including attempt count, standard-request result, attached-input attempt,
+cleanup result, final foreground PID, and outcome; the compatibility field
+`GameWindowFocusRestored` now describes only the final verified state.
+
+`tools/test-condemned-window-focus.ps1` covers missing, invalid, exited, and
+windowless targets plus bounded standard retries and the attached-input
+fallback/cleanup contract without launching the game. It cannot prove live
+Windows focus policy, keyboard state, or headset input. The required live gate
+is a fresh canonical launch followed by first-menu input and the existing
+Alt-Tab/return regression.
+
 ## OpenXR startup availability
 
 `XR_ERROR_FORM_FACTOR_UNAVAILABLE` is temporary by definition, so the shared

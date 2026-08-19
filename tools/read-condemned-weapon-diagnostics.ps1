@@ -100,6 +100,32 @@ Write-Host ("Profile: {0} ({1})  Collider: {2} {3}" -f
     $snapshot.Profile.Name, $snapshot.Profile.WeaponIndex,
     $(if ($snapshot.Collider.Seeded) { 'GREEN' } else { 'AMBER' }),
     $snapshot.Collider.CollisionObject)
+if ($null -ne $snapshot.Collider.StateEventsObserved) {
+    Write-Host ("Collider telemetry: observed {0}, recorded {1}, suppressed {2}" -f
+        $snapshot.Collider.StateEventsObserved,
+        $snapshot.Collider.StateEventsRecorded,
+        $snapshot.Collider.StateEventsSuppressed)
+}
+$automaticSeed = $snapshot.Collider.AutomaticSeed
+if ($null -ne $automaticSeed) {
+    Write-Host ((
+        'Automatic seed: phase={0}, attempt {1}/{2}; ' +
+        'starts/confirmed/ready/failed {3}/{4}/{5}/{6}; ' +
+        'seed impacts blocked {7}') -f
+        $automaticSeed.Phase,
+        $automaticSeed.Attempts,
+        $automaticSeed.MaximumAttempts,
+        $automaticSeed.StartsObserved,
+        $automaticSeed.ConfirmationsObserved,
+        $automaticSeed.ReadyEventsObserved,
+        $automaticSeed.FailuresObserved,
+        $automaticSeed.SeedImpactsBlocked)
+    if ($automaticSeed.ManualAttackFallback) {
+        Write-Host (
+            'Automatic seed retries were exhausted; one manual Retail ' +
+            'attack remains the fallback.') -ForegroundColor Yellow
+    }
+}
 $alignment = $snapshot.Collider.LiveAlignment
 if ($null -ne $alignment -and $alignment.Available) {
     $direction = if ($alignment.Reversed) { 'REVERSE' } else { 'FORWARD' }
@@ -126,6 +152,98 @@ if ($null -ne $alignmentError) {
 Write-Host ("Contacts: {0} callbacks, {1} accepted, {2} forwarded, {3} duplicate" -f
     $counters.Callbacks, $counters.AcceptedContacts,
     $counters.NativeForwards, $counters.DuplicateCallbacksBlocked)
+$combat = $snapshot.Combat
+if ($null -ne $combat) {
+    $automaticSwingAttackTriggers = $combat.AutomaticSwingAttackTriggers
+    if ($null -eq $automaticSwingAttackTriggers) {
+        $automaticSwingAttackTriggers = $combat.AttackTelegraphTriggers
+    }
+    Write-Host ((
+        'Combat: {0} actor hits, {1} world/prop hits; ' +
+        '{2} automatic swing-attack triggers; accepted with/without/unknown {3}/{4}/{5}') -f
+        $combat.AcceptedActorHits, $combat.AcceptedWorldOrPropHits,
+        $automaticSwingAttackTriggers,
+        $combat.AcceptedWithAttackTelegraph,
+        $combat.AcceptedWithoutAttackTelegraph,
+        $combat.AcceptedAttackTelegraphUnknown)
+    if ($null -ne $combat.RetailAttackCommandDownEdges) {
+        Write-Host ('Retail attack command: down/up edges {0}/{1}' -f
+            $combat.RetailAttackCommandDownEdges,
+            $combat.RetailAttackCommandUpEdges)
+    }
+    if ($null -ne $combat.MinimumActorHeadHorizontalDistanceMeters) {
+        Write-Host (
+            'Minimum HMD-to-actor-contact horizontal distance: {0:F3} m' -f
+            [double]$combat.MinimumActorHeadHorizontalDistanceMeters)
+    }
+    if ($null -ne $combat.PlayerVitals) {
+        $healthWhileCommandActive =
+            $combat.HealthDecreasesWhileBlockCommandActive
+        if ($null -eq $healthWhileCommandActive) {
+            $healthWhileCommandActive = $combat.HealthDecreasesWhileBlocked
+        }
+        $healthWhileCommandInactive =
+            $combat.HealthDecreasesWhileBlockCommandInactive
+        if ($null -eq $healthWhileCommandInactive) {
+            $healthWhileCommandInactive =
+                $combat.HealthDecreasesWhileNotBlocked
+        }
+        $lastActivationDuration =
+            $combat.LastBlockCommandActivationDurationMilliseconds
+        if ($null -eq $lastActivationDuration) {
+            $lastActivationDuration =
+                $combat.LastBlockHoldDurationMilliseconds
+        }
+        $maximumActivationDuration =
+            $combat.MaximumBlockCommandActivationDurationMilliseconds
+        if ($null -eq $maximumActivationDuration) {
+            $maximumActivationDuration =
+                $combat.MaximumBlockHoldDurationMilliseconds
+        }
+        Write-Host (
+            'Player health: {0}/{1} ({2:P0}), delta {3}; decreases {4}' -f
+            [long]$combat.PlayerVitals.Current,
+            [long]$combat.PlayerVitals.Maximum,
+            [double]$combat.PlayerVitals.Fraction,
+            [long]$combat.PlayerVitals.Delta,
+            [long]$combat.PlayerHealthDecreaseEvents)
+        Write-Host (("Block command: active={0}, down/up edges {1}/{2}; " +
+            "health decreases while command active/inactive {3}/{4}") -f
+            $combat.BlockCommandActive, $combat.BlockCommandDownEdges,
+            $combat.BlockCommandUpEdges,
+            $healthWhileCommandActive,
+            $healthWhileCommandInactive)
+        if ($null -ne $maximumActivationDuration) {
+            Write-Host (
+                'Block command activation: last {0} ms, maximum {1} ms' -f
+                $lastActivationDuration,
+                $maximumActivationDuration)
+        }
+        if ($null -ne $combat.AutomaticBlockPose) {
+            $pose = $combat.AutomaticBlockPose
+            Write-Host ((
+                'Automatic block pose: configured={0}, active={1}, ' +
+                'entries/exits {2}/{3}, tracking fresh={4}') -f
+                $pose.Configured, $pose.Active,
+                $pose.Activations, $pose.Exits,
+                $pose.TrackingFresh)
+            if ($null -ne $pose.PositionErrorMeters) {
+                Write-Host ((
+                    'Guard error: {0:F3}/{1:F3} m, ' +
+                    '{2:F1}/{3:F1} deg; reason={4}; seed required={5}') -f
+                    [double]$pose.PositionErrorMeters,
+                    [double]$pose.PositionToleranceMeters,
+                    [double]$pose.AngleErrorDegrees,
+                    [double]$pose.AngleToleranceDegrees,
+                    $pose.LastReason, $pose.InputSeedRequired)
+            }
+        }
+        if ($null -ne $combat.BlockStateNote) {
+            Write-Host ('Block evidence note: {0}' -f
+                $combat.BlockStateNote) -ForegroundColor DarkYellow
+        }
+    }
+}
 Write-Host ("Retail vectors: {0} clear, {1} failed, {2} refs released  Rearms: {3}  Invalid holds: {4}  Targets: {5}" -f
     $vectorClears, $vectorFailures, $referencesCleared,
     $counters.Rearms, $invalidSampleHolds, @($snapshot.Targets).Count)
@@ -153,6 +271,19 @@ Write-Host ("Swing invariant: {0} same-target reaccepts before reset; {1} multi-
             [double]$distance.CapsuleRadiusMeters)
     } elseif ($null -ne $distance) {
         Write-Host 'Distance to target contact: unavailable'
+    }
+    if ($null -ne $distance -and $distance.HeadPoseValid) {
+        Write-Host (
+            'HMD to contact: {0:F3} m horizontal, {1:F3} m full' -f
+            [double]$distance.HeadHorizontalToTargetContactMeters,
+            [double]$distance.HeadToTargetContactMeters)
+    }
+    $telegraph = $snapshot.LastContact.AttackTelegraph
+    if ($null -ne $telegraph -and $telegraph.Observed) {
+        Write-Host (
+            'Automatic swing attack: enabled={0} triggered-this-swing={1} pulse={2}' -f
+            $telegraph.Enabled, $telegraph.TriggeredThisSwing,
+            $telegraph.PulseActive)
     }
 }
 Write-Host "Next: $($snapshot.Recommendation)"

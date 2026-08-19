@@ -173,6 +173,10 @@ FEARVR_STATIC_ASSERT(sizeof(FearVrInputState) == 192,
 /* NDC coordinates are projected by the game while its verified per-eye
    camera is active. The D3D9 bridge expands each pair into a visible line
    immediately before that eye is captured. This is not shared with Host. */
+enum {
+  FEARVR_OVERLAY_TRIANGLE_MAX_INPUT_VERTICES = 32768u
+};
+
 typedef struct FearVrOverlayLineVertex {
   float ndcX;
   float ndcY;

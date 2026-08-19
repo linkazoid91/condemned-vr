@@ -12,7 +12,8 @@ squash or recreate the source tree when publishing it: the existing history,
    `THIRD_PARTY_NOTICES.md` are included at the repository root.
 4. Build and run both test suites with `tools/build-all.ps1`.
 5. Inspect any release archive manually. It may contain project-authored
-   binaries and notices only.
+   binaries, `condemnedvr-defaults.ini`, and notices only. The defaults file
+   must sit beside the project `GameClient.dll`.
 6. Create the public repository from this Git history. Do not upload the
    ignored `stage/`, `vendor-local/`, `build/`, `logs/`, `dist/` or
    `local-runtime/` directories through the web interface.
@@ -23,6 +24,8 @@ squash or recreate the source tree when publishing it: the existing history,
   databases or extracted game assets;
 - saves, profiles, screenshots or captured frame data from `stage/` or
   `logs/`;
+- `%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini` or any other player's
+  writable settings/profile file;
 - F.E.A.R. retail/Public Tools files retained on a development machine;
 - OpenXR-SDK or MinHook checkouts from `vendor-local/`; or
 - third-party mod binaries without a separate license and redistribution
@@ -39,3 +42,12 @@ Custom project-owned assets are allowed, but record their author and license
 before committing them. For third-party code or assets, add the exact source,
 version and redistribution terms to `THIRD_PARTY_NOTICES.md`. Never treat a
 downloadable game asset as redistributable merely because it is accessible.
+
+`config/condemnedvr-defaults.ini` is a project-authored numeric calibration
+asset governed with this source tree. It must contain no Retail data, save
+state, logs, captured runtime objects, or machine-specific paths. Release
+tooling may copy that exact source-controlled file beside the project loader;
+it must never promote a developer's LocalAppData INI automatically. The
+project-local `stage/` remains non-redistributable even when it contains this
+allowed file, because the same stage also contains legally installed Retail
+files.

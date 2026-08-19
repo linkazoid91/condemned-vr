@@ -8,6 +8,11 @@
 
 namespace condemnedvr {
 
+enum class PhysicalMeleeColliderGizmoRole : std::uint8_t {
+    Attack,
+    Block
+};
+
 inline fearvr::TrackingVector PhysicalMeleeColliderGizmoSubtract(
     const fearvr::TrackingVector& left,
     const fearvr::TrackingVector& right) noexcept {
@@ -34,7 +39,9 @@ inline WeaponGripCalibrationGizmo BuildPhysicalMeleeColliderGizmo(
     const fearvr::TrackingVector& tipUnits,
     const fearvr::TrackingVector& collisionOriginUnits,
     float radiusUnits,
-    bool collisionBodyLive) noexcept {
+    bool collisionBodyLive,
+    PhysicalMeleeColliderGizmoRole role =
+        PhysicalMeleeColliderGizmoRole::Attack) noexcept {
     WeaponGripCalibrationGizmo gizmo{};
     if (!fearvr::IsFinite(baseUnits) || !fearvr::IsFinite(tipUnits) ||
         !fearvr::IsFinite(collisionOriginUnits) ||
@@ -69,12 +76,15 @@ inline WeaponGripCalibrationGizmo BuildPhysicalMeleeColliderGizmo(
     side = PhysicalMeleeColliderGizmoScale(side, 1.0F / sideLength);
     const fearvr::TrackingVector up =
         PhysicalMeleeColliderGizmoCross(side, axis);
-    const std::uint32_t volumeColor = collisionBodyLive
-        ? 0xE050FF90U
-        : 0xE0FFB040U;
-    const std::uint32_t originColor = collisionBodyLive
-        ? 0xFFFFFFFFU
-        : 0xFFFF6040U;
+    const bool block = role == PhysicalMeleeColliderGizmoRole::Block;
+    const std::uint32_t volumeColor = block
+        ? collisionBodyLive ? 0xE040E8FFU : 0xE06080FFU
+        : collisionBodyLive ? 0xE050FF90U : 0xE0FFB040U;
+    const std::uint32_t originColor = block
+        ? collisionBodyLive ? 0xFFFFFFFFU : 0xE080A0FFU
+        : collisionBodyLive ? 0xFFFFFFFFU : 0xFFFF6040U;
+    const std::uint32_t axisColor = block
+        ? 0xE040FFFFU : 0xE0FFFF40U;
     constexpr std::size_t kRingSegments = 12U;
     constexpr float kTwoPi = 6.28318530717958647692F;
     const fearvr::TrackingVector centers[] = {
@@ -114,7 +124,7 @@ inline WeaponGripCalibrationGizmo BuildPhysicalMeleeColliderGizmo(
             RingPoint(tipUnits, angle), volumeColor);
     }
     AddWeaponGripCalibrationGizmoLine(
-        gizmo, baseUnits, tipUnits, 0xE0FFFF40U);
+        gizmo, baseUnits, tipUnits, axisColor);
     constexpr float kOriginCrossHalfUnits = 6.0F;
     const fearvr::TrackingVector originAxes[] = {
         {kOriginCrossHalfUnits, 0.0F, 0.0F},

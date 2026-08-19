@@ -12,6 +12,7 @@
 #include "loader_event_format.h"
 #include "module_identity.h"
 #include "renderer_probe.h"
+#include "retail_menu_integration.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -199,6 +200,13 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
         return;
     }
     const auto function = reinterpret_cast<Function>(g_setMasterDatabase);
+    if (CommandLineContains(
+            L"-condemnedvr-m6-retail-vr-settings")) {
+        // CScreenOptions can be constructed during Retail's database setup,
+        // so this opt-in hook must arm before forwarding that lifecycle call.
+        condemnedvr::InstallRetailVrSettingsMenuProbe(
+            g_original, AppendLoaderEvent);
+    }
     function(masterDatabase);
 
     if (CommandLineContains(L"-condemnedvr-m4-locomotion")) {
@@ -213,7 +221,9 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     if (CommandLineContains(L"-condemnedvr-m4-core-actions")) {
         condemnedvr::InstallBindingCoreActionsHook(
             masterDatabase, g_original, g_bridge,
-            AppendLoaderEvent);
+            AppendLoaderEvent,
+            CommandLineContains(
+                L"-condemnedvr-m5-forensic-memory-probe"));
     }
     if (CommandLineContains(L"-condemnedvr-m4-haptics")) {
         condemnedvr::InstallControllerHaptics(
@@ -225,7 +235,8 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     }
     if (CommandLineContains(L"-condemnedvr-m5-head-aim")) {
         condemnedvr::InstallHeadAimHooks(
-            g_original, AppendLoaderEvent,
+            masterDatabase, g_original,
+            AppendLoaderEvent,
             CommandLineContains(
                 L"-condemnedvr-m5-aim-path-probe"),
             CommandLineContains(
@@ -245,13 +256,19 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
             CommandLineContains(
                 L"-condemnedvr-m5-two-handed-melee"));
     }
+    const bool armIkRightArm = CommandLineContains(
+        L"-condemnedvr-arm-ik-right-arm");
+    const bool armIkRightHandProof = CommandLineContains(
+        L"-condemnedvr-arm-ik-right-hand-proof");
     const bool menuControls = CommandLineContains(
         L"-condemnedvr-m6-menu-controls");
+    bool armIkLifecycleObserverReady = false;
     if (CommandLineContains(L"-condemnedvr-m4-menu") ||
         menuControls) {
-        condemnedvr::InstallMenuToggleHook(
-            masterDatabase, g_original, g_bridge,
-            AppendLoaderEvent, menuControls);
+        armIkLifecycleObserverReady =
+            condemnedvr::InstallMenuToggleHook(
+                masterDatabase, g_original, g_bridge,
+                AppendLoaderEvent, menuControls);
     }
     if (CommandLineContains(L"-condemnedvr-m3-probe")) {
         condemnedvr::ProbeRendererInterfaces(
@@ -261,14 +278,26 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
         condemnedvr::InstallArmIkDiscovery(
             masterDatabase, g_original, AppendLoaderEvent);
     }
-    if (CommandLineContains(
-            L"-condemnedvr-arm-ik-right-arm")) {
-        condemnedvr::InstallArmIkRightArm(
-            masterDatabase, g_original, AppendLoaderEvent);
-    } else if (CommandLineContains(
-                   L"-condemnedvr-arm-ik-right-hand-proof")) {
-        condemnedvr::InstallArmIkRightHandProof(
-            masterDatabase, g_original, AppendLoaderEvent);
+    if (armIkRightArm) {
+        if (armIkLifecycleObserverReady) {
+            condemnedvr::InstallArmIkRightArm(
+                masterDatabase, g_original, AppendLoaderEvent);
+        } else {
+            AppendLoaderEvent(
+                "arm_ik_right_arm_rejected",
+                "reason=retail_game_state_lifecycle_observer_not_armed "
+                "requires=-condemnedvr-m4-menu");
+        }
+    } else if (armIkRightHandProof) {
+        if (armIkLifecycleObserverReady) {
+            condemnedvr::InstallArmIkRightHandProof(
+                masterDatabase, g_original, AppendLoaderEvent);
+        } else {
+            AppendLoaderEvent(
+                "arm_ik_right_hand_proof_rejected",
+                "reason=retail_game_state_lifecycle_observer_not_armed "
+                "requires=-condemnedvr-m4-menu");
+        }
     }
     if (CommandLineContains(L"-condemnedvr-m3-pass-through")) {
         const bool stereoDiagnostic = CommandLineContains(

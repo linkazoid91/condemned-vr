@@ -177,22 +177,26 @@ int main() {
         ShouldDispatchPhysicalMeleeNativeImpact(
             true, true, true, false) ||
         ShouldDispatchPhysicalMeleeNativeImpact(
-            true, true, false, true)) {
+            true, true, false, true) ||
+        ShouldDispatchPhysicalMeleeNativeImpact(
+            true, true, true, true, true)) {
         return Fail(
-            "player native impact must require enabled accepted contact");
+            "player native impact must require an unsuppressed accepted contact");
     }
     if (!ShouldMaintainPhysicalMeleeCollision(
-            true, true, true, true) ||
+            true, true, true, true, true) ||
         ShouldMaintainPhysicalMeleeCollision(
-            false, true, true, true) ||
+            false, true, true, true, true) ||
         ShouldMaintainPhysicalMeleeCollision(
-            true, false, true, true) ||
+            true, false, true, true, true) ||
         ShouldMaintainPhysicalMeleeCollision(
-            true, true, false, true) ||
+            true, true, false, true, true) ||
         ShouldMaintainPhysicalMeleeCollision(
-            true, true, true, false)) {
+            true, true, true, false, true) ||
+        ShouldMaintainPhysicalMeleeCollision(
+            true, true, true, true, false)) {
         return Fail(
-            "continuous collision lifetime must fail closed by context");
+            "continuous collision lifetime must require a classified attack");
     }
 
     const auto emptyReferenceVector =
@@ -255,6 +259,173 @@ int main() {
             desiredGrip, localModelGrip.positionUnits,
             localModelGrip.rotation, false).active) {
         return Fail("stale held-model poses must fail closed");
+    }
+
+    // Guided alignment inverts the same held-model equation. Moving the
+    // controller to a second desired pose must reproduce the frozen object
+    // reference exactly with the newly solved local grip.
+    const PhysicalMeleeRigidTransform secondDesiredGrip{
+        {112.0F, 185.0F, 326.0F},
+        {0.0F, kHalfSqrt, 0.0F, kHalfSqrt}};
+    PhysicalMeleeRigidTransform solvedLocalGrip{};
+    if (!SolvePhysicalMeleeModelLocalGrip(
+            heldModel.objectWorld, secondDesiredGrip, solvedLocalGrip)) {
+        return Fail("guided model-local grip solve must accept finite poses");
+    }
+    const PhysicalMeleeVisualProxyTransform guidedHeldModel =
+        ResolvePhysicalMeleeHeldModelTransform(
+            secondDesiredGrip, solvedLocalGrip.positionUnits,
+            solvedLocalGrip.rotation, true);
+    if (!guidedHeldModel.active ||
+        !Near(guidedHeldModel.objectWorld.positionUnits.x,
+              heldModel.objectWorld.positionUnits.x, 0.001F) ||
+        !Near(guidedHeldModel.objectWorld.positionUnits.y,
+              heldModel.objectWorld.positionUnits.y, 0.001F) ||
+        !Near(guidedHeldModel.objectWorld.positionUnits.z,
+              heldModel.objectWorld.positionUnits.z, 0.001F) ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(guidedHeldModel.objectWorld.rotation),
+            fearvr::Normalize(heldModel.objectWorld.rotation))) < 0.9999F) {
+        return Fail("guided grip must preserve the captured object pose");
+    }
+    PhysicalMeleeRigidTransform rejectedLocalGrip{};
+    auto overRangeDesiredGrip = secondDesiredGrip;
+    overRangeDesiredGrip.positionUnits = {1000.0F, 1000.0F, 1000.0F};
+    if (SolvePhysicalMeleeModelLocalGrip(
+            heldModel.objectWorld, overRangeDesiredGrip,
+            rejectedLocalGrip)) {
+        return Fail("over-range guided grip solves must fail closed");
+    }
+
+    // Saved grip records use readable Z * Y * X Euler corrections. Conversion
+    // back from a solved quaternion must preserve both ordinary and gimbal
+    // rotations when recomposed.
+    const fearvr::TrackingVector readableRotation{37.0F, -58.0F, 129.0F};
+    const fearvr::TrackingQuaternion readableQuaternion =
+        PhysicalMeleeLocalRotationFromDegrees(readableRotation);
+    fearvr::TrackingVector recoveredRotation{};
+    if (!PhysicalMeleeLocalRotationDegreesFromQuaternion(
+            readableQuaternion, recoveredRotation) ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(readableQuaternion),
+            fearvr::Normalize(PhysicalMeleeLocalRotationFromDegrees(
+                recoveredRotation)))) < 0.9999F) {
+        return Fail("guided grip quaternion must round-trip to saved Euler");
+    }
+    const fearvr::TrackingQuaternion gimbalQuaternion =
+        PhysicalMeleeLocalRotationFromDegrees({25.0F, 90.0F, -40.0F});
+    if (!PhysicalMeleeLocalRotationDegreesFromQuaternion(
+            gimbalQuaternion, recoveredRotation) ||
+        std::fabs(fearvr::Dot(
+            fearvr::Normalize(gimbalQuaternion),
+            fearvr::Normalize(PhysicalMeleeLocalRotationFromDegrees(
+                recoveredRotation)))) < 0.9999F) {
+        return Fail("guided grip Euler conversion must preserve gimbal poses");
+    }
+
+    // Firearm aim follows authored model geometry rather than the controller.
+    // Prefer Breach -> Flash when both sockets exist; Retail handgun assets may
+    // expose only Flash, whose authored local +Z then supplies the direction.
+    const PhysicalMeleeRigidTransform identityModel{
+        {10.0F, 20.0F, 30.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F}};
+    const PhysicalMeleeRigidTransform flashLocal{
+        {0.0F, 0.0F, 12.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F}};
+    const PhysicalMeleeRigidTransform breachLocal{
+        {0.0F, 0.0F, 2.0F},
+        {0.0F, 0.0F, 0.0F, 1.0F}};
+    const PhysicalFirearmMuzzleFrame identityMuzzle =
+        ResolvePhysicalFirearmMuzzleFrame(
+            identityModel, flashLocal, breachLocal, true);
+    if (!identityMuzzle.active ||
+        identityMuzzle.directionSource !=
+            PhysicalFirearmMuzzleDirectionSource::BreachToFlash ||
+        !Near(identityMuzzle.originUnits.x, 10.0F) ||
+        !Near(identityMuzzle.originUnits.y, 20.0F) ||
+        !Near(identityMuzzle.originUnits.z, 42.0F) ||
+        !Near(identityMuzzle.forward.x, 0.0F) ||
+        !Near(identityMuzzle.forward.y, 0.0F) ||
+        !Near(identityMuzzle.forward.z, 1.0F) ||
+        !Near(identityMuzzle.right.x, 1.0F) ||
+        !Near(identityMuzzle.up.y, 1.0F) ||
+        !Near(identityMuzzle.breachToFlashUnits, 10.0F) ||
+        !Near(
+            PhysicalMeleeDot(
+                PhysicalMeleeCross(
+                    identityMuzzle.right, identityMuzzle.up),
+                identityMuzzle.forward),
+            1.0F)) {
+        return Fail(
+            "firearm muzzle frame must follow Flash and Breach geometry");
+    }
+    const PhysicalMeleeRigidTransform rotatedModel{
+        {10.0F, 20.0F, 30.0F},
+        {0.0F, kHalfSqrt, 0.0F, kHalfSqrt}};
+    const PhysicalFirearmMuzzleFrame rotatedMuzzle =
+        ResolvePhysicalFirearmMuzzleFrame(
+            rotatedModel, flashLocal, breachLocal, true);
+    if (!rotatedMuzzle.active ||
+        !Near(rotatedMuzzle.originUnits.x, 22.0F, 0.01F) ||
+        !Near(rotatedMuzzle.originUnits.y, 20.0F, 0.01F) ||
+        !Near(rotatedMuzzle.originUnits.z, 30.0F, 0.01F) ||
+        !Near(rotatedMuzzle.forward.x, 1.0F, 0.01F) ||
+        !Near(rotatedMuzzle.forward.y, 0.0F, 0.01F) ||
+        !Near(rotatedMuzzle.forward.z, 0.0F, 0.01F)) {
+        return Fail(
+            "firearm muzzle frame must follow the displayed model rotation");
+    }
+
+    const PhysicalFirearmMuzzleFrame flashOnlyMuzzle =
+        ResolvePhysicalFirearmMuzzleFrameFromFlashSocket(
+            identityModel, flashLocal, true);
+    if (!flashOnlyMuzzle.active ||
+        flashOnlyMuzzle.directionSource !=
+            PhysicalFirearmMuzzleDirectionSource::FlashSocketForward ||
+        !Near(flashOnlyMuzzle.originUnits.x, 10.0F) ||
+        !Near(flashOnlyMuzzle.originUnits.y, 20.0F) ||
+        !Near(flashOnlyMuzzle.originUnits.z, 42.0F) ||
+        !Near(flashOnlyMuzzle.forward.x, 0.0F) ||
+        !Near(flashOnlyMuzzle.forward.y, 0.0F) ||
+        !Near(flashOnlyMuzzle.forward.z, 1.0F) ||
+        !Near(flashOnlyMuzzle.right.x, 1.0F) ||
+        !Near(flashOnlyMuzzle.up.y, 1.0F)) {
+        return Fail(
+            "Flash-only firearm frames must use the authored socket +Z axis");
+    }
+    const PhysicalMeleeRigidTransform rotatedFlashLocal{
+        flashLocal.positionUnits,
+        {0.0F, kHalfSqrt, 0.0F, kHalfSqrt}};
+    const PhysicalFirearmMuzzleFrame rotatedFlashMuzzle =
+        ResolvePhysicalFirearmMuzzleFrameFromFlashSocket(
+            identityModel, rotatedFlashLocal, true);
+    if (!rotatedFlashMuzzle.active ||
+        !Near(rotatedFlashMuzzle.originUnits.x, 10.0F, 0.01F) ||
+        !Near(rotatedFlashMuzzle.originUnits.y, 20.0F, 0.01F) ||
+        !Near(rotatedFlashMuzzle.originUnits.z, 42.0F, 0.01F) ||
+        !Near(rotatedFlashMuzzle.forward.x, 1.0F, 0.01F) ||
+        !Near(rotatedFlashMuzzle.forward.y, 0.0F, 0.01F) ||
+        !Near(rotatedFlashMuzzle.forward.z, 0.0F, 0.01F)) {
+        return Fail(
+            "Flash-only firearm frames must preserve authored socket rotation");
+    }
+    PhysicalMeleeRigidTransform degenerateBreach = breachLocal;
+    degenerateBreach.positionUnits = flashLocal.positionUnits;
+    PhysicalMeleeRigidTransform invalidFlash = flashLocal;
+    invalidFlash.rotation = {0.0F, 0.0F, 0.0F, 0.0F};
+    if (ResolvePhysicalFirearmMuzzleFrame(
+            identityModel, flashLocal, degenerateBreach, true).active ||
+        ResolvePhysicalFirearmMuzzleFrame(
+            identityModel, flashLocal, breachLocal, false).active ||
+        ResolvePhysicalFirearmMuzzleFrame(
+            identityModel, flashLocal, breachLocal,
+            true, 20.0F, 10.0F).active ||
+        ResolvePhysicalFirearmMuzzleFrameFromFlashSocket(
+            identityModel, flashLocal, false).active ||
+        ResolvePhysicalFirearmMuzzleFrameFromFlashSocket(
+            identityModel, invalidFlash, true).active) {
+        return Fail(
+            "stale, degenerate, or invalid firearm socket geometry must fail closed");
     }
 
     // Two-hand support is a select-style handle constraint. The dominant
@@ -481,12 +652,30 @@ int main() {
             {0.0F, 0.0F, 100.0F},
             {0.0F, 0.0F, 175.0F},
             {0.0F, 0.0F, 175.0F}, 4.0F, true);
+    const WeaponGripCalibrationGizmo blockColliderPreview =
+        BuildPhysicalMeleeColliderGizmo(
+            {0.0F, 0.0F, 100.0F},
+            {0.0F, 0.0F, 175.0F},
+            {0.0F, 0.0F, 175.0F}, 4.0F, false,
+            PhysicalMeleeColliderGizmoRole::Block);
+    const WeaponGripCalibrationGizmo blockColliderLive =
+        BuildPhysicalMeleeColliderGizmo(
+            {0.0F, 0.0F, 100.0F},
+            {0.0F, 0.0F, 175.0F},
+            {0.0F, 0.0F, 175.0F}, 4.0F, true,
+            PhysicalMeleeColliderGizmoRole::Block);
     if (!colliderPreview.valid || colliderPreview.count != 44U ||
         !colliderLive.valid || colliderLive.count != 44U ||
         colliderPreview.lines[0].argb != 0xE0FFB040U ||
-        colliderLive.lines[0].argb != 0xE050FF90U) {
+        colliderLive.lines[0].argb != 0xE050FF90U ||
+        !blockColliderPreview.valid ||
+        blockColliderPreview.count != 44U ||
+        !blockColliderLive.valid ||
+        blockColliderLive.count != 44U ||
+        blockColliderPreview.lines[0].argb != 0xE06080FFU ||
+        blockColliderLive.lines[0].argb != 0xE040E8FFU) {
         return Fail(
-            "collider gizmo must distinguish preview and live bodies");
+            "attack and block gizmos must have distinct preview/live colors");
     }
     FearVrOverlayLineVertex projectedCollider[
         kWeaponGripCalibrationGizmoMaximumLines * 2]{};
@@ -1238,6 +1427,220 @@ int main() {
     if (swingAttack.active || swingAttack.triggered) {
         return Fail("unmeasured weapon profiles must not gesture-attack");
     }
+
+    // Automatic pickup seeding is a separate one-shot compatibility
+    // transaction. It waits for a stable verified equip, bounds the Retail
+    // Fire pulse and retries, and never declares readiness without an attack
+    // record plus the complete native-capsule read mask.
+    PhysicalMeleeAutomaticSeedState automaticSeedState{};
+    if (!ObservePhysicalMeleeAutomaticSeedEquip(
+            automaticSeedState, kCondemnedPipeLeverWeaponIndex,
+            0x1000U, 0x2000U, true) ||
+        automaticSeedState.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Stabilizing) {
+        return Fail("a verified melee equip must begin seed stabilization");
+    }
+    auto automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState, 1'000U, true, true, false);
+    if (automaticSeed.started || automaticSeed.pulseActive ||
+        automaticSeed.damageBlocked || automaticSeed.ready) {
+        return Fail("automatic seed must not pulse on the first stable sample");
+    }
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState,
+        1'000U +
+            kPhysicalMeleeAutomaticSeedStableMilliseconds - 1U,
+        true, true, false);
+    if (automaticSeed.started || automaticSeed.pulseActive) {
+        return Fail("automatic seed must honor the complete stability dwell");
+    }
+    const std::uint64_t firstSeedStart =
+        1'000U + kPhysicalMeleeAutomaticSeedStableMilliseconds;
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState, firstSeedStart, true, true, false);
+    if (!automaticSeed.started || !automaticSeed.pulseActive ||
+        !automaticSeed.damageBlocked || automaticSeed.ready ||
+        automaticSeed.attempts != 1U) {
+        return Fail("stable verified equip must begin one bounded seed pulse");
+    }
+    const auto rejectedSeedConfirmation =
+        ConfirmPhysicalMeleeAutomaticSeed(
+            automaticSeedState, firstSeedStart + 10U, 0x3U,
+            true, 0x3000U);
+    if (rejectedSeedConfirmation.accepted ||
+        automaticSeedState.nativeOverrideConfirmed) {
+        return Fail("partial native-capsule reads must not confirm readiness");
+    }
+    const auto acceptedSeedConfirmation =
+        ConfirmPhysicalMeleeAutomaticSeed(
+            automaticSeedState, firstSeedStart + 20U,
+            kPhysicalMeleeAutomaticSeedExpectedReadMask,
+            true, 0x3000U);
+    if (!acceptedSeedConfirmation.accepted ||
+        !acceptedSeedConfirmation.automaticTransaction ||
+        acceptedSeedConfirmation.readyImmediately ||
+        automaticSeedState.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Settling ||
+        !PhysicalMeleeAutomaticSeedDamageIsBlocked(
+            automaticSeedState, firstSeedStart + 20U)) {
+        return Fail(
+            "automatic native confirmation must retain a damage-blocked settle");
+    }
+    const std::uint64_t automaticSeedReadyAt =
+        firstSeedStart + 20U +
+        kPhysicalMeleeAutomaticSeedSettleMilliseconds;
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState, automaticSeedReadyAt - 1U,
+        true, true, true);
+    if (automaticSeed.ready || !automaticSeed.damageBlocked) {
+        return Fail("confirmed automatic seed must finish its settle window");
+    }
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState, automaticSeedReadyAt,
+        true, true, true);
+    if (!automaticSeed.ready || !automaticSeed.becameReady ||
+        automaticSeed.damageBlocked ||
+        automaticSeedState.confirmedCollisionObject != 0x3000U) {
+        return Fail("verified native attack body must become ready after settle");
+    }
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        automaticSeedState, automaticSeedReadyAt + 1U,
+        true, true, false);
+    if (!automaticSeed.bodyLost || automaticSeed.ready ||
+        automaticSeed.attempts != 0U ||
+        automaticSeed.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Stabilizing) {
+        return Fail("lost attack bodies must restart the per-equip seed gate");
+    }
+
+    PhysicalMeleeAutomaticSeedState manualSeedState{};
+    ObservePhysicalMeleeAutomaticSeedEquip(
+        manualSeedState, kCondemnedPipeLeverWeaponIndex,
+        0x1100U, 0x2200U, true);
+    const auto manualSeedConfirmation =
+        ConfirmPhysicalMeleeAutomaticSeed(
+            manualSeedState, 2'000U,
+            kPhysicalMeleeAutomaticSeedExpectedReadMask,
+            true, 0x3300U);
+    if (!manualSeedConfirmation.accepted ||
+        manualSeedConfirmation.automaticTransaction ||
+        !manualSeedConfirmation.readyImmediately ||
+        manualSeedState.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Ready ||
+        PhysicalMeleeAutomaticSeedDamageIsBlocked(
+            manualSeedState, 2'000U)) {
+        return Fail(
+            "a manually created verified body must become ready without suppression");
+    }
+
+    PhysicalMeleeAutomaticSeedState interruptedSeedState{};
+    ObservePhysicalMeleeAutomaticSeedEquip(
+        interruptedSeedState, kCondemnedPipeLeverWeaponIndex,
+        0x1200U, 0x2300U, true);
+    UpdatePhysicalMeleeAutomaticSeed(
+        interruptedSeedState, 3'000U, true, true, false);
+    UpdatePhysicalMeleeAutomaticSeed(
+        interruptedSeedState,
+        3'000U + kPhysicalMeleeAutomaticSeedStableMilliseconds,
+        true, true, false);
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        interruptedSeedState,
+        3'000U + kPhysicalMeleeAutomaticSeedStableMilliseconds + 1U,
+        false, true, false);
+    if (!automaticSeed.retryScheduled || automaticSeed.pulseActive ||
+        !automaticSeed.damageBlocked ||
+        automaticSeed.phase !=
+            PhysicalMeleeAutomaticSeedPhase::RetryWait) {
+        return Fail(
+            "unsafe context must stop the pulse but retain impact suppression");
+    }
+
+    PhysicalMeleeAutomaticSeedState failedSeedState{};
+    ObservePhysicalMeleeAutomaticSeedEquip(
+        failedSeedState, kCondemnedPipeLeverWeaponIndex,
+        0x1300U, 0x2400U, true);
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, 4'000U, true, true, false);
+    const std::uint64_t failedAttempt1Start =
+        4'000U + kPhysicalMeleeAutomaticSeedStableMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt1Start,
+        true, true, false);
+    const std::uint64_t failedAttempt1Deadline =
+        failedAttempt1Start +
+        kPhysicalMeleeAutomaticSeedConfirmationMilliseconds;
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt1Deadline,
+        true, true, false);
+    if (!automaticSeed.timedOut || !automaticSeed.retryScheduled) {
+        return Fail("unconfirmed automatic seed must enter bounded retry wait");
+    }
+    const std::uint64_t failedAttempt2Stable =
+        failedAttempt1Deadline +
+        kPhysicalMeleeAutomaticSeedRetryMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt2Stable,
+        true, true, false);
+    const std::uint64_t failedAttempt2Start =
+        failedAttempt2Stable +
+        kPhysicalMeleeAutomaticSeedStableMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt2Start,
+        true, true, false);
+    const std::uint64_t failedAttempt2Deadline =
+        failedAttempt2Start +
+        kPhysicalMeleeAutomaticSeedConfirmationMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt2Deadline,
+        true, true, false);
+    const std::uint64_t failedAttempt3Stable =
+        failedAttempt2Deadline +
+        kPhysicalMeleeAutomaticSeedRetryMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt3Stable,
+        true, true, false);
+    const std::uint64_t failedAttempt3Start =
+        failedAttempt3Stable +
+        kPhysicalMeleeAutomaticSeedStableMilliseconds;
+    UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt3Start,
+        true, true, false);
+    const std::uint64_t failedAttempt3Deadline =
+        failedAttempt3Start +
+        kPhysicalMeleeAutomaticSeedConfirmationMilliseconds;
+    automaticSeed = UpdatePhysicalMeleeAutomaticSeed(
+        failedSeedState, failedAttempt3Deadline,
+        true, true, false);
+    if (!automaticSeed.timedOut || !automaticSeed.terminalFailure ||
+        automaticSeed.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Failed ||
+        automaticSeed.attempts !=
+            kPhysicalMeleeAutomaticSeedMaximumAttempts) {
+        return Fail("automatic seed retries must stop at the per-equip budget");
+    }
+    const auto lateManualConfirmation =
+        ConfirmPhysicalMeleeAutomaticSeed(
+            failedSeedState, failedAttempt3Deadline + 1U,
+            kPhysicalMeleeAutomaticSeedExpectedReadMask,
+            true, 0x3400U);
+    if (!lateManualConfirmation.accepted ||
+        lateManualConfirmation.automaticTransaction ||
+        !lateManualConfirmation.readyImmediately) {
+        return Fail("manual Retail seeding must remain a fallback after retries");
+    }
+    if (!ObservePhysicalMeleeAutomaticSeedEquip(
+            failedSeedState, kCondemnedPipeLeverWeaponIndex,
+            0x1300U, 0x2500U, true) ||
+        failedSeedState.attempts != 0U ||
+        failedSeedState.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Stabilizing ||
+        !ObservePhysicalMeleeAutomaticSeedEquip(
+            failedSeedState, -1, 0U, 0U, false) ||
+        failedSeedState.phase !=
+            PhysicalMeleeAutomaticSeedPhase::Inactive) {
+        return Fail("weapon/model lifecycle changes must reset automatic seeding");
+    }
+
     fearvr::WeaponWeightFilterState lightFilter{};
     fearvr::WeaponWeightFilterState heavyFilter{};
     fearvr::WeaponWeightPose lightOutput{};

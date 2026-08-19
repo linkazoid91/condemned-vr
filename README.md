@@ -119,10 +119,12 @@ view increments `CALLBACKS` whenever the collision body reports contact and
 impact path. In the current lifecycle-validation build, speed and energy are
 diagnostic only; see `CURRENT_STATE.md` before interpreting those counters.
 
-The Pipe preset also enables a stereo collider wireframe. Amber shows the
-configured swept volume while it is waiting for that first Retail seed;
-green means the player-owned collision body is live. The bright cross marks
-the exact controller-tip proxy origin. Debug lines are always visible.
+The Pipe preset supports a stereo collider wireframe, hidden by default for
+normal play. In VR Tools, `DRAW MELEE COLLIDER` shows it: amber is the
+configured swept volume waiting for the first Retail seed, green means the
+player-owned collision body is live, and the bright cross is the exact
+controller-tip proxy origin. `DRAW CONTROLLERS` independently controls the
+calibration wireframes. Both choices save globally and affect drawing only.
 
 Open VR Tools with both grips + Y and select the `COLLIDER` tab to edit the
 equipped weapon's local position, pitch/yaw/roll, length, radius, and direction.
@@ -132,10 +134,22 @@ by Retail weapon index.
 
 The `GRIP` tab similarly adjusts the equipped weapon model's local position
 and rotation. Menu adjustments and reset save automatically in the per-weapon
-`grip` record; `SAVE GRIP SNAPSHOT` forces another save. When using the
-continuous both-grips calibration fallback, press controller Y or keyboard P
-to save before quitting. Saved alignment loads automatically the next time the
-same Retail weapon profile is equipped.
+`grip` record. Its final row starts a guided two-trigger alignment: first make
+the visible object and hand look right, pull and release the right trigger,
+then move the physical controller to the natural grip pose and pull/release
+again. The result saves that Retail item's `grip` and `right_hand_ik` records
+together. The melee collider remains a separate controller-local calibration
+in the `COLLIDER` tab. When using the continuous both-grips calibration
+fallback, press controller Y or keyboard P to save before quitting. Saved
+alignment loads automatically the next time the same Retail weapon profile is
+equipped.
+
+Release builds copy `config/condemnedvr-defaults.ini` beside the project
+`GameClient.dll`. Missing player keys read that project-authored first-level
+baseline; changes made in VR Tools write only to
+`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini` and override the package
+one key at a time. Keep the packaged file with `GameClient.dll`, but never
+distribute a player's writable INI.
 
 ## Repository layout
 

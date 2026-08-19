@@ -7,6 +7,10 @@ Condemned VR adds OpenXR presentation and input to the verified Steam
 read-only. Development copies, logs and user data exist only below ignored
 project-local directories.
 
+For a game-neutral stereo research sequence, including a DirectX 6 path through
+the DK2 dxwrapper fork, see
+[`LEGACY-DIRECTX-VR-STEREO-HANDOFF.md`](LEGACY-DIRECTX-VR-STEREO-HANDOFF.md).
+
 The architecture originated in the MIT-licensed F.E.A.R. VR project. The port
 retains its proven cross-bitness OpenXR/D3D9 transport while replacing every
 game-specific identity, offset, signature, hook and control mapping. Detailed

@@ -8,6 +8,7 @@
 #include <cstdio>
 
 #include "arm_ik.h"
+#include "condemned_block_pose.h"
 #include "condemned_physical_melee.h"
 #include "condemned_weapon_identity.h"
 #include "input_state.h"
@@ -17,6 +18,8 @@ namespace condemnedvr {
 
 enum class ToolMenuTab : std::uint8_t {
     Melee,
+    Block,
+    BlockCollider,
     Weapon,
     Grip,
     Collider,
@@ -34,6 +37,10 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
     switch (tab) {
     case ToolMenuTab::Melee:
         return "MELEE";
+    case ToolMenuTab::Block:
+        return "BLOCK";
+    case ToolMenuTab::BlockCollider:
+        return "BLOCK COL";
     case ToolMenuTab::Weapon:
         return "WEAPON";
     case ToolMenuTab::Grip:
@@ -63,10 +70,14 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
     switch (tab) {
     case ToolMenuTab::Melee:
         return 4U;
+    case ToolMenuTab::Block:
+        return 7U;
+    case ToolMenuTab::BlockCollider:
+        return 10U;
     case ToolMenuTab::Weapon:
         return 7U;
     case ToolMenuTab::Grip:
-        return 9U;
+        return 10U;
     case ToolMenuTab::Collider:
         return 10U;
     case ToolMenuTab::TwoHand:
@@ -82,10 +93,19 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
     case ToolMenuTab::Controls:
         return 1U;
     case ToolMenuTab::Debug:
-        return 2U;
+        return 3U;
     default:
         return 0U;
     }
+}
+
+inline std::uint32_t ToolMenuRowCount(
+    ToolMenuTab tab,
+    bool emptyHandIkPage) noexcept {
+    if (tab == ToolMenuTab::HandIk && emptyHandIkPage) {
+        return 2U;
+    }
+    return ToolMenuRowCount(tab);
 }
 
 struct ToolMenuState {
@@ -116,7 +136,8 @@ struct ToolMenuTransition {
 
 inline ToolMenuTransition UpdateToolMenuState(
     ToolMenuState& state,
-    const ToolMenuInputEvent& input) noexcept {
+    const ToolMenuInputEvent& input,
+    bool emptyHandIkPage = false) noexcept {
     ToolMenuTransition result{};
     if (input.toggle) {
         state.open = !state.open;
@@ -145,7 +166,8 @@ inline ToolMenuTransition UpdateToolMenuState(
     }
     state.tab = static_cast<ToolMenuTab>(tab);
 
-    const std::uint32_t rows = ToolMenuRowCount(state.tab);
+    const std::uint32_t rows =
+        ToolMenuRowCount(state.tab, emptyHandIkPage);
     if (rows == 0U) {
         state.row = 0U;
     } else {
@@ -164,8 +186,9 @@ inline ToolMenuTransition UpdateToolMenuState(
 }
 
 struct ToolMenuDebugDrawSettings {
-    bool colliderVisible{true};
-    bool controllerVisible{true};
+    bool colliderVisible{false};
+    bool blockColliderVisible{false};
+    bool controllerVisible{false};
 };
 
 inline bool UpdateToolMenuDebugDrawSettings(
@@ -181,11 +204,92 @@ inline bool UpdateToolMenuDebugDrawSettings(
         settings.colliderVisible = !settings.colliderVisible;
         return true;
     case 1U:
+        settings.blockColliderVisible =
+            !settings.blockColliderVisible;
+        return true;
+    case 2U:
         settings.controllerVisible = !settings.controllerVisible;
         return true;
     default:
         return false;
     }
+}
+
+// Retail owns the native block lifetime unless this explicit per-weapon
+// override is enabled. Keeping the override disabled by default preserves the
+// verified Retail window while still making its duration practical to tune in
+// headset. The bounded range prevents a malformed setting from creating a
+// near-permanent guard or a zero-length collision record.
+constexpr std::uint32_t kToolMenuBlockWindowDefaultMilliseconds = 450U;
+constexpr std::uint32_t kToolMenuBlockWindowMinimumMilliseconds = 100U;
+constexpr std::uint32_t kToolMenuBlockWindowMaximumMilliseconds = 2000U;
+constexpr std::uint32_t kToolMenuBlockWindowStepMilliseconds = 25U;
+
+struct ToolMenuBlockTimingSettings {
+    std::uint32_t collisionWindowMilliseconds{
+        kToolMenuBlockWindowDefaultMilliseconds};
+    bool overrideEnabled{false};
+};
+
+inline bool ToolMenuBlockTimingSettingsAreValid(
+    const ToolMenuBlockTimingSettings& settings) noexcept {
+    return settings.collisionWindowMilliseconds >=
+            kToolMenuBlockWindowMinimumMilliseconds &&
+        settings.collisionWindowMilliseconds <=
+            kToolMenuBlockWindowMaximumMilliseconds;
+}
+
+inline bool UpdateToolMenuBlockTimingSettings(
+    ToolMenuBlockTimingSettings& settings,
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    switch (row) {
+    case 0U:
+        if (delta == 0 && !activate) {
+            return false;
+        }
+        settings.overrideEnabled = !settings.overrideEnabled;
+        return true;
+    case 1U: {
+        if (delta == 0) {
+            return false;
+        }
+        const std::int64_t requested =
+            static_cast<std::int64_t>(
+                settings.collisionWindowMilliseconds) +
+            static_cast<std::int64_t>(delta) *
+                kToolMenuBlockWindowStepMilliseconds;
+        const std::uint32_t next = static_cast<std::uint32_t>(
+            std::clamp<std::int64_t>(
+                requested,
+                kToolMenuBlockWindowMinimumMilliseconds,
+                kToolMenuBlockWindowMaximumMilliseconds));
+        if (next == settings.collisionWindowMilliseconds) {
+            return false;
+        }
+        settings.collisionWindowMilliseconds = next;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+inline float ResolveToolMenuBlockWindowSeconds(
+    const ToolMenuBlockTimingSettings& settings,
+    float retailSeconds,
+    bool& overrideApplied) noexcept {
+    overrideApplied = false;
+    if (!std::isfinite(retailSeconds) || retailSeconds <= 0.0F ||
+        retailSeconds > 10.0F ||
+        !ToolMenuBlockTimingSettingsAreValid(settings) ||
+        !settings.overrideEnabled) {
+        return retailSeconds;
+    }
+    overrideApplied = true;
+    return static_cast<float>(
+        settings.collisionWindowMilliseconds) / 1000.0F;
 }
 
 struct ToolMenuMeleeSettings {
@@ -399,6 +503,52 @@ inline void ApplyToolMenuColliderSettings(
                 settings.rotationOffsetDegrees),
             {0.0F, 0.0F, signedLength}));
     profile.radiusUnits = settings.radiusUnits;
+}
+
+// Reprojects a second controller-local capsule onto the exact weighted grip
+// pose represented by an existing physical-melee frame. This lets attack and
+// block records share tracking/weighting while retaining independent geometry.
+// Only the current pose is reconstructed because Retail owns collision sweep
+// history; this helper supplies the native capsule transform and debug shape.
+inline bool ResolveToolMenuColliderFrameAtCurrentPose(
+    const PhysicalMeleeFrame& sourceFrame,
+    const PhysicalMeleeProfile& sourceProfile,
+    const ToolMenuColliderSettings& colliderSettings,
+    PhysicalMeleeFrame& colliderFrame) noexcept {
+    colliderFrame = {};
+    if (!sourceFrame.poseValid ||
+        !fearvr::IsFinite(sourceFrame.currentBaseUnits) ||
+        !fearvr::IsFinite(sourceFrame.currentRotation) ||
+        !PhysicalMeleeProfileIsValid(sourceProfile) ||
+        !ToolMenuColliderSettingsAreValid(colliderSettings)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion rotation =
+        fearvr::Normalize(sourceFrame.currentRotation);
+    const PhysicalMeleePose gripPose{
+        PhysicalMeleeSubtract(
+            sourceFrame.currentBaseUnits,
+            fearvr::Rotate(
+                rotation, sourceProfile.localBaseOffsetUnits)),
+        rotation};
+    if (!PhysicalMeleePoseIsValid(gripPose)) {
+        return false;
+    }
+    PhysicalMeleeProfile colliderProfile = sourceProfile;
+    ApplyToolMenuColliderSettings(
+        colliderSettings, colliderProfile);
+    colliderFrame.currentRotation = rotation;
+    colliderFrame.currentBaseUnits = PhysicalMeleeEndpoint(
+        gripPose, colliderProfile.localBaseOffsetUnits);
+    colliderFrame.currentTipUnits = PhysicalMeleeEndpoint(
+        gripPose, colliderProfile.localTipOffsetUnits);
+    colliderFrame.radiusUnits = colliderProfile.radiusUnits;
+    colliderFrame.poseValid =
+        fearvr::IsFinite(colliderFrame.currentBaseUnits) &&
+        fearvr::IsFinite(colliderFrame.currentTipUnits) &&
+        std::isfinite(colliderFrame.radiusUnits) &&
+        colliderFrame.radiusUnits > 0.0F;
+    return colliderFrame.poseValid;
 }
 
 // Per-weapon correction applied to the dominant-hand socket target after the
@@ -621,12 +771,19 @@ struct ToolMenuWeaponSettingsSlot {
     PhysicalMeleeProfileId profileId{
         PhysicalMeleeProfileId::GenericOneHanded};
     ToolMenuMeleeSettings settings{};
+    PhysicalMeleeBlockPoseSettings blockPoseSettings{};
+    ToolMenuBlockTimingSettings blockTimingSettings{};
     ToolMenuColliderSettings colliderSettings{};
+    ToolMenuColliderSettings blockColliderSettings{};
     ToolMenuRightHandIkSettings rightHandIkSettings{};
     std::uint64_t lastUsed{0U};
     bool occupied{false};
     bool persistentLoadAttempted{false};
+    bool blockPosePersistentLoadAttempted{false};
+    bool blockTimingPersistentLoadAttempted{false};
     bool colliderPersistentLoadAttempted{false};
+    bool blockColliderPersistentLoadAttempted{false};
+    bool blockColliderUsesAttackFallback{true};
     bool rightHandIkPersistentLoadAttempted{false};
 };
 
@@ -665,11 +822,18 @@ inline ToolMenuWeaponSettingsSlot* ResolveToolMenuWeaponSettingsSlot(
         if (slot->profileId != baseProfile.id) {
             slot->profileId = baseProfile.id;
             slot->settings = ToolMenuMeleeSettingsFromProfile(baseProfile);
+            slot->blockPoseSettings = {};
+            slot->blockTimingSettings = {};
             slot->colliderSettings =
                 ToolMenuColliderSettingsFromProfile(baseProfile);
+            slot->blockColliderSettings = slot->colliderSettings;
             slot->rightHandIkSettings = {};
             slot->persistentLoadAttempted = false;
+            slot->blockPosePersistentLoadAttempted = false;
+            slot->blockTimingPersistentLoadAttempted = false;
             slot->colliderPersistentLoadAttempted = false;
+            slot->blockColliderPersistentLoadAttempted = false;
+            slot->blockColliderUsesAttackFallback = true;
             slot->rightHandIkPersistentLoadAttempted = false;
         }
         slot->lastUsed = ++registry.useSequence;
@@ -696,6 +860,8 @@ inline ToolMenuWeaponSettingsSlot* ResolveToolMenuWeaponSettingsSlot(
     replacement->settings = ToolMenuMeleeSettingsFromProfile(baseProfile);
     replacement->colliderSettings =
         ToolMenuColliderSettingsFromProfile(baseProfile);
+    replacement->blockColliderSettings =
+        replacement->colliderSettings;
     replacement->lastUsed = ++registry.useSequence;
     replacement->occupied = true;
     return replacement;
@@ -731,6 +897,15 @@ struct ToolMenuMeleeTelemetry {
     bool secondaryGripAttached{false};
     float secondaryGripDistanceMeters{0.0F};
     float secondaryGripAnchorErrorMeters{0.0F};
+    float blockPosePositionErrorMeters{0.0F};
+    float blockPoseAngleErrorDegrees{0.0F};
+    float lastRetailBlockWindowMilliseconds{0.0F};
+    float lastAppliedBlockWindowMilliseconds{0.0F};
+    std::uint32_t blockPoseActivationCount{0U};
+    bool blockPoseTrackingFresh{false};
+    bool blockPoseActive{false};
+    bool blockCollisionBodyLive{false};
+    bool blockWindowOverrideApplied{false};
 };
 
 inline bool ToolMenuToggleChordDown(
@@ -747,7 +922,24 @@ inline bool ToolMenuToggleChordDown(
         (input.buttons & FEARVR_IB_LEFT_SECONDARY) != 0U;
 }
 
-constexpr std::size_t kToolMenuMaximumTriangleVertices = 24576U;
+constexpr bool ShouldActivateToolMenuShortcut(
+    bool menuOpen,
+    bool shortcutEnabled,
+    bool shortcutRequested) noexcept {
+    return shortcutRequested && (menuOpen || shortcutEnabled);
+}
+
+constexpr bool ShouldCaptureToolMenuShortcutInput(
+    bool menuOpen,
+    bool releaseCapture,
+    bool shortcutEnabled,
+    bool toggleChordDown) noexcept {
+    return menuOpen || releaseCapture ||
+        (shortcutEnabled && toggleChordDown);
+}
+
+constexpr std::size_t kToolMenuMaximumTriangleVertices =
+    FEARVR_OVERLAY_TRIANGLE_MAX_INPUT_VERTICES;
 
 constexpr float kToolMenuDefaultScale = 0.62F;
 constexpr float kToolMenuDefaultDistanceMeters = 1.50F;

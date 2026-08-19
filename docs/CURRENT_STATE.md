@@ -1,6 +1,6 @@
 # Current state
 
-Snapshot basis: repository working tree and checked-in evidence reviewed on 10
+Snapshot basis: repository working tree and checked-in evidence reviewed on 14
 August 2026. Detailed proof, run IDs, addresses, and historical failures stay in
 the linked milestone documents; re-check against newer evidence before use.
 
@@ -16,18 +16,601 @@ the linked milestone documents; re-check against newer evidence before use.
 
 ## Current milestone
 
-**M5 — Condemned-specific gameplay**, currently narrowed to physical melee.
+**M5 — Condemned-specific gameplay**, now focused on representative firearm
+and combat-behaviour evidence after the live-accepted index-76 direction,
+one-handed physical-melee, and forensic-camera checkpoints.
 M1 delegation, M2 transport, M3 stereo/tracking, and M4 controller gates have
 live acceptance. M0 produced the usable no-ASI baseline, but isolated save-path
 persistence and a longer release soak remain unresolved.
 
-Detailed active evidence: [`CONDEMNED-M5.md`](CONDEMNED-M5.md).
+Detailed active evidence: [`CONDEMNED-M4.md`](CONDEMNED-M4.md) for forensic
+controls and [`CONDEMNED-M5.md`](CONDEMNED-M5.md) for the melee checkpoint.
 
 ## Current objective
 
-Promote the live-accepted Pipe setup into a temporary, fail-closed baseline for
-the verified one-handed majority while preserving per-weapon tuning isolation.
-The working tree now maps the 26 modeled `WEAP_1HandedDebris` indices plus
+Room-scale RS1 is **live exercised, rejected for performance, and rolled back
+from the runtime**. Run `run-20260813-131921` armed the read-only candidate;
+the tester reported that it ran horribly. Host telemetry recorded extended
+sections around 17--23 game FPS with heavy reuse and roughly 13--16-frame
+average image age, although later windows recovered to about 42--43 game FPS.
+There is no matched same-scene no-probe control, so causation is not isolated,
+but the candidate failed its usability/timing gate.
+
+The attempted diagnostic never supplied a room-scale movement command or
+engine transform write. Its dedicated helper/probe files, binding and renderer
+sampling, loader/launcher switch `-RoomscaleProbe`, and dedicated automated
+test have been removed. The plan and historical 24/24 x86, 20/20 x64 candidate
+test result remain in
+[`CONDEMNED-ROOMSCALE-PLAN.md`](CONDEMNED-ROOMSCALE-PLAN.md). The required
+live correlation sequence was incomplete, and the later copied loader file is
+not the RS1 event stream, so `GameOrig+0x00168EEC` / manager `+0x10` remains
+only a static candidate. RS2 and every write-enabled room-scale gate remain
+blocked pending a redesigned, lower-cost read-only probe and matched
+performance baseline. The post-rollback full gate passes 23/23 x86 and 19/19
+x64 tests; the refreshed project-local stage uses x86 loader SHA-256
+`6E624F4ADFC690167B663CD79A9234BC563F2EBB134586A8ECE2D1E581210058`.
+No post-rollback game/headset run has been started.
+
+Automatic equip-time melee collision seeding is **implemented and
+headset-free tested, awaiting live validation**. For a positively identified
+mapped one-handed pickup, the runtime waits 250 ms for stable weapon/model
+identity and a fresh tracked pose, overlays one 100 ms Retail Fire-command
+pulse, and accepts readiness only after the existing native collision hook
+observes a player-owned Attack record with exact overridden `read_mask=0x7`
+and a non-null body. Native impact forwarding and the action haptic are blocked
+during this seed-only transaction; the contact latch is not mutated. A
+confirmed body settles for one second before becoming ready. Confirmation is
+bounded to two seconds, retries wait 750 ms, and only three attempts are
+allowed per equip. Weapon/model changes reset the transaction. One ordinary
+Retail attack remains a manual fallback after terminal automatic failure.
+
+This is deliberately separate from the headset-rejected motion-triggered
+`SWING ATTACK` adapter, which remains OFF for accepted physical melee. It does
+not call `EnableCollisions` directly or invent its five-argument ownership
+contract. The final headset-free gate passes 23/23 x86 and 19/19 x64 tests
+plus launcher-focus, screenshot-helper, and schema-v4 watcher regressions. The
+refreshed project-local stage uses x86 loader SHA-256
+`08F10AE3C302D6C7D616DE2B10C01D3F44389B9F362FCCD2EC717AF55BE346E4`.
+No game/headset run has yet established pickup readiness, absence of seed
+damage, or whether Retail exposes an unacceptable one-time attack animation.
+
+Startup-focus reliability has a new **implemented and automated-tested,
+awaiting live validation** candidate. A 13 August tester report showed that a
+fresh launch can still leave another desktop window in the foreground. The
+launcher had issued only one immediate `SetForegroundWindow` request at each
+handoff, latched any early success into `GameWindowFocusRestored`, and wrote
+the report before its actual last focus attempt. It now retries normal requests
+for one bounded second, performs one cleanup-checked attached-input fallback
+only at the final handoff, and verifies the exact game root-owner window plus
+PID. That handoff runs after optional diagnostics windows appear; only then is
+the report written. `GameWindowFocus` records the initial, ready, and final
+attempts, while the legacy boolean reflects only the final result. The
+headset-free launcher-focus regression passes; a canonical live launch plus
+keyboard/mouse, VR-input, and Alt-Tab checks remain required.
+
+The Retail-menu extension seam now has a narrow **live-verified row and
+dispatch boundary**. Canonical run `run-20260813-045556` used staged x86
+loader SHA-256
+`4F5369A915160522E73C31E080F2AF80B7A6C690DF5A9AA4258AC49D080BA274`.
+Retail created the injected control once at native index 7, and six selections
+reached the reserved command `0x3A`; the preserved loader log is SHA-256
+`6F5E45F2330843C3E7B8BB73A9D4A94004F1517B02C87E28DEF2CE74A068D55C`.
+The tester saw the row in Options and reported two deliberate shortcomings:
+the literal was all uppercase and selection opened no destination. The latter
+was the diagnostic-only behavior of that build. This proves construction,
+visibility, and dispatch, but not a finished page or every focus/style
+sub-gate.
+
+The first title-case child candidate is **live exercised and rejected as a
+safe settings host**. It routed command `0x3A` to registered screen 24, an
+otherwise-unlinked native `CScreenGame`, and retained that dormant screen's
+original Game Options controls and lifecycle. `run-20260813-051426` crashed
+before menu construction at `GameOrig.dll+0x539AE` and supplies no page
+evidence. Retry `run-20260813-051528` created the title-case row/page, recorded
+four entries and three Back edges during extensive menu input, then crashed at
+`ClientFx.fxd+0x26EEF`; its preserved loader log SHA-256 is
+`AB67C0C3045B30DC2B3368741AD8CA8965490D70B9EE17651471B0E35DA6D73C`.
+
+Explicitly approved capture run `run-20260813-054534` then entered the page
+once and captured the exact foreground Condemned client before any dormant
+control was activated. The image live verifies a normal-case `VR Settings`
+title and Retail's parchment, pinned-note, font, focus-row, and column design.
+It also exposes the unsuitable dormant content: Crosshair, Subtitles, Blood,
+Always Run, Difficulty, Message Duration, Head Bob, Auto-switch Weapons, HUD
+Fade Speed, and visible invalid-string placeholders. While the page was simply
+left open, with no Back event recorded, the process later reproduced
+`ClientFx.fxd+0x26EEF` in the same WER bucket. A later Windows event-history
+audit found 59 identical faults from 7 August through 13 August 14:18, before
+the Retail-menu work began. The fault therefore does not establish menu or
+screen-24 causality. The original page remains rejected because its controls
+are unrelated/incomplete, contain invalid strings, and invoke unaccepted
+dormant settings behavior. Preserved SHA-256
+values are loader log
+`8579639CECEF66DB40A5A07CE50D801881C1323747D74D11A798180BF58CB6C7`,
+PNG `E50ABCB564976B524852C5A0A3EC79BE1F2D8CF26854CC7ED221AAF808913C1D`,
+and JSON sidecar
+`8EC6E5F94A5E4C34CA891C585B55D2EFBF1769F7BE40E3A47DE8EA8F7FC1CC78`.
+
+The replacement is **partially live verified; its Developer Tools controller
+shortcut suppression now passes live, while keyboard suppression, re-enable,
+and restart persistence remain pending**. It still uses
+the registered Retail object/base shell, but exact
+vtable comparison proves that screen 24 overrides only destructor,
+`OnCommand`, `Build`, and `OnFocus`; the destructor already delegates to the
+base owner, and hooks now completely bypass the other three. The replacement
+sets the title through Retail's wide-title path, creates Display, VR Features,
+Comfort, and Developer Tools rows from the captured Retail descriptor, and
+calls only the verified base Build/finalize/focus/command routines. Display,
+VR Features, and Comfort remain non-mutating placeholders. Developer Tools is
+now a single `On`/`Off` row controlling whether both grips plus the
+controller-specific left secondary button (reported as B by this tester; Y on
+Touch) and F12 may open the existing VR Tools overlay. Exact image,
+inherited-vtable, factory,
+text-setter, per-control vtable, signature, and call-target guards fail closed.
+The full gate passes 23/23 x86 and 19/19 x64.
+
+Explicitly approved run `run-20260813-063732` used staged loader SHA-256
+`B1B860D25C06DAD0725AA87E530D89F09B1FFB2E8CACD178742A979516DE598D`.
+It built and focused the isolated host exactly once with original Build,
+OnFocus, and OnCommand all bypassed. Exact-foreground screenshot SHA-256
+`2223D0C12BCBBE629ED2BC245C267D7D81E462FFD58542E1D6B9BEDAB5E92C8D`
+shows the title-case heading and exactly Display, VR Features, Comfort, and
+Developer Tools with no invalid strings. Back completed base focus-out and
+returned from the page. However, the opening VR Enter edge also selected
+Display before the injected key-edge call returned; the placeholder explicitly
+made no settings mutation. This is a failed entry-input sub-gate.
+
+The new candidate brackets internally generated menu key edges and suppresses
+only a category command produced by the same VR Enter edge that opens the
+page. Later VR selections and physical keyboard/mouse input remain untouched.
+The full automated gate still passes 23/23 x86 and 19/19 x64; refreshed staged
+loader SHA-256 is
+`A9AD752A4A6D25ACCDFB44AFED9D8539A3FB837280C18BCE733EFEB8446B749A`.
+
+Explicitly approved validation run `run-20260813-071147` used that staged
+loader. Two VR-generated accept edges opened the isolated page without any
+`m6_retail_vr_settings_category_selected` event or setting mutation. The page
+built once, retained its four clean rows across re-entry, and recorded two
+active/inactive base-focus cycles; the first return also has an explicit VR
+Back edge. No `m6_retail_vr_settings_entry_category_suppressed` event was
+needed, so the observed behavior passes while the defensive suppression branch
+itself remains automated-only. The exact-foreground 1930x1090 screenshot is
+pixel-identical to the prior accepted page (SHA-256
+`2223D0C12BCBBE629ED2BC245C267D7D81E462FFD58542E1D6B9BEDAB5E92C8D`);
+its new JSON sidecar SHA-256 is
+`B5AE68BD3F7CA9B003467E4423BA6BF11AAC88AFA8BBAD55E151A7EC5B20F46F`.
+Preserved loader-log SHA-256 is
+`4031429705448FBF40396F875F33BD0C21F12B4BDF679DB6A1A448A120B20A09`.
+Shutdown again produced the longstanding `ClientFx.fxd+0x26EEF` WER bucket
+(report `cc156935-3775-472a-97af-d2e8c686fa9e`), which remains a separate
+baseline rather than menu-causality evidence.
+
+`tools/capture-condemned-window.ps1` verifies the exact PID/root-owner/
+foreground client rectangle, writes a PNG plus JSON identity/hash sidecar,
+never changes focus, and passes `-ValidateOnly`. Per tester instruction, no
+game/headset launch is automatic. Hub entry, native rendering, re-entry, and
+one explicit Back now have live evidence.
+
+The first functional row is **partially live verified**. A new
+versioned `[developer] tool_menu_shortcut` preference lives in the existing
+global user INI; packaged and missing-setting behavior preserves the established
+enabled shortcut, while a malformed record fails closed to disabled. Runtime
+writes save before changing the atomic preference. Disabling it does not close
+an already-open overlay or bypass release capture, so the close path remains
+safe. The refreshed project-local stage carries x86 loader SHA-256
+`E44FBB97548C24836E4E26A1AF02D0E62E4DE3938F068EED51CB09CDDC6AA8F6`.
+
+Explicitly approved run `run-20260813-132327` loaded the preference with
+`result=ok enabled=1 capability_available=1`, built the native fourth row with
+`settings_ready=1`, and refreshed its label on focus. One deliberate activation
+then recorded `previous=1 requested=0 saved=1 current=0 label_refreshed=1`; the
+tester confirmed that the toggle worked, then clarified that with the row Off
+VR Tools no longer appeared when pressing both grips + B, their physical label
+for the left-secondary controller chord. This live verifies initial display,
+command dispatch, save success, runtime mutation, immediate native-label
+refresh for `On -> Off`, and controller-chord suppression. It does not yet
+verify F12 suppression, an On-state restore/open/close/release-capture pass, or
+that Off reloads in a fresh process.
+The preserved loader-log SHA-256 is
+`1CE76E5407C1F1EAC6F0F0E721E7BA8B1F583E89790302E5EF8BF3EB6FE64C30`;
+run-metadata, host-log, and bridge-log SHA-256 values are respectively
+`56C0E88D55B4EAB8A55EB1DCECA262394EF21DFE7574E325228714D993190525`,
+`3839C43794BCF43044F3B262E64DC9A88D1D62DA40823E13A2B296435D870F61`,
+and `77A7F8F19F58CFB0CAAEA42ACE1111DF011C1533BC0CD4081367547D2B506265`.
+The launcher-monitor wrapper timed out after startup, so this run has live
+metadata rather than a finalized launch report. Shutdown reproduced the known
+`ClientFx.fxd+0x26EEF` baseline (WER report
+`8b491332-38a1-4566-8c4e-c9d2cb7d83ba`) and is not attributed to the toggle.
+The next step is the remaining keyboard/restore/release-capture behavior and
+fresh-process persistence gate, after fresh explicit launch confirmation.
+
+The preceding accepted candidate addresses the reported empty-right-hand twist.
+A lifetime-validated held model keeps the weighted weapon/aim target; no live
+model or Retail `Unarmed` selects a fresh raw right-grip target and bypasses
+weapon weight plus per-weapon correction. The empty-hand view of **Hand IK**
+now exposes only `START/CANCEL GUIDED EMPTY-HAND ALIGNMENT` and
+`RESET EMPTY-HAND ALIGNMENT`. Two release-gated right-trigger captures solve
+and immediately apply a global controller-local correction, then save it as
+`[arm_ik] empty_right_hand`; weapon-specific Hand IK records remain separate.
+Focus/menu loss, equipping a weapon, stale tracking, malformed transforms, and
+over-range solves fail closed. Dedicated diagnostics cover source selection,
+both capture transforms, solve result, and persistence.
+
+Live run `run-20260811-115639` used the canonical `-WeaponTest Pipe` launch
+and staged x86 loader SHA-256
+`62D2BFC48E735177466570C6E71ACE623270AEDF077E82F9DB6CBEA2E2A0B4D5`.
+The two right-trigger pulls recorded `reference_captured` followed by
+`completed` with `persistence=ok`. The accepted controller-local correction
+was position `(-4.455, 3.542, -2.338)` units and quaternion
+`(0.476682, -0.571406, -0.385630, 0.545490)`, and the same value was present
+in the writable player INI. The headset tester reported that the alignment
+"works perfectly." This **live verifies the in-session empty-hand target,
+guided capture, solve, immediate application, and write**. A fresh-process
+reload, deliberate tracking-loss capture, and equipped/empty transition remain
+separate live sub-gates; their guards and persistence parsing are automated.
+
+The 11 August guided held-object alignment is **live verified in-session for five held assets**.
+Its original behavior is retained here as historical evidence and is superseded
+by the fresh-process contradiction and hand-parented candidate below. That
+candidate's final **Grip** row starts/cancels a two-trigger capture. Capture one
+freezes both displayed transforms: model `O` and right hand `H`. Capture two
+records the desired raw controller/weapon basis `D`; the candidate solves
+`G = inverse(O) * D` for the absolute model-local grip and
+`C = inverse(D) * H` for the per-index hand correction. Applying both keeps
+the object and hand together rather than repairing one by misaligning the other.
+Transient weight and two-hand solving are bypassed only while capture is active.
+A pose can become authoritative only after the render override set/readback
+succeeds for that frame. Focus/menu loss, source index/generation change, stale
+tracking, malformed transforms, and bounded solve failures preserve prior values.
+Success immediately updates and separately saves the existing per-index `grip`
+and `right_hand_ik` records; secondary-grip data and all manual sliders remain.
+The action is available to every lifetime-valid held model, but alignment is
+still calibrated and accepted per Retail item index rather than shared across
+unrelated assets. It deliberately leaves the independent per-index `collider`
+record untouched: that swept capsule is expressed in weighted-controller space
+and must be checked or tuned separately after visually realigning a melee item.
+The automated gate passes 19/19 x86 and 15/15 x64. Canonical live run
+`run-20260811-130418` used staged loader SHA-256
+`0CF5043043D3D4AF00321F5A718C661D072B91B4588378C2E779ED5050848D79`.
+Scanner index 46, `cell_phone` index 4, Camera index 3,
+`colt45_Unbreakable` index 76, and `colt45_Melee_Unbreakable` index 77 each
+completed start, reference capture, controller capture, immediate application,
+and separate `grip_persistence=ok` / `hand_persistence=ok` writes. The tester
+reported that alignment is now "sooooo much easier." This live accepts the
+guided in-session mechanism and usability for those five item identities.
+At the user's instruction, those exact five Grip/right-hand pairs are now
+source-controlled in `config/condemnedvr-defaults.ini`; collider values remain
+unchanged. Source, generated x86, and canonical-stage copies are byte-identical
+at SHA-256 `6ADA21EF6DED26FA929FE53B95431568F9C172F7382FA751C0F0C4086CE3F39A`.
+Fresh-process reload, forced tracking/source-change cancellation, each item's
+camera/fire regression, and all remaining assets remain separate live gates.
+
+A later index-76 fresh-process check contradicted the assumption that the
+in-session two-capture result was a complete held-assembly calibration. The
+tester reported that the right hand was again misoriented and that the weapon
+did not align with the controller. The preserved restart trace loaded the
+per-index Grip and Hand-IK records successfully, activated the visual proxy,
+and repeatedly measured the expected 60-degree grip/aim basis difference; this
+is therefore not evidence of a missing save. The failed capture had preserved
+an already-wrong first hand pose, and the model continued following the
+controller after capture one instead of visibly freezing. The contradictory
+evidence is preserved under
+`stage/condemned-m2-mono/logs/run-20260811-141552/`; detailed transforms and
+hashes are in `CONDEMNED-M5.md`.
+
+The current hand-parented correction is **implemented and automated-tested,
+awaiting live validation**. With model-local Grip `G`, controller-local hand
+correction `C`, and collider frame `T`, it preserves the model-relative
+attachments `A = G * C` and `B = G * T`. A Hand-IK edit computes a matching
+new `G`, so rotating or translating the hand moves the weapon with it, and
+rebases `T` so the collider remains attached to the same model location.
+The firearm reconstruction already consumes `G`, so its visible barrel frame
+follows the same weapon pose. Guided capture now freezes only the model after
+the first trigger. During step two the globally calibrated raw-grip hand
+follows the controller into that frozen model; the second trigger solves the
+fresh `G` and `C`, rebases the collider, and saves all three per-index
+records. The full headset-free gate passes 20/20 x86 and 16/16 x64. The
+built/staged x86 loader is SHA-256
+`4863C9E0389A2049AA6CA9DD6376B96588A4596E42F218ED6FF1700635F11DEB`;
+the staged defaults were intentionally left unchanged. Per the tester's
+instruction, no game/headset run has been started for this candidate, so
+alignment, damage-volume, camera, firearm, and restart behavior remain live
+gates.
+A subsequent index-76 session establishes a narrower **live-verified reset-fit
+boundary**. In `run-20260811-144530`, after Grip and Hand IK were reset, the
+guided reference trace recorded object `O`, hand `H`, and controller driver `D`
+at the identical position `(2156.377,-2309.698,2312.275)` and quaternion
+`(0.054115,0.758500,0.047660,-0.647671)`. The tester independently reported
+that the reset gun already sat perfectly in the hand. This verifies the
+authored reset gun-to-hand relationship for index 76 and shows that a second
+freehand placement is unnecessary for that asset; it does not live-validate
+the replacement button. The preserved loader trace is 244,316 bytes, SHA-256
+`78810AA7F35FAED1FBE5EFF05DE6F7199450FB8832F6E64158200CEDE0DB99E5`;
+the accompanying settings snapshot is SHA-256
+`66709385464EC4AE5A4C613027B1B0FD28F6C5120D70B47D8000BF27162CBACC`.
+
+The simplified **Grip** action `ALIGN HAND + WEAPON TO CONTROLLER` is now
+**implemented and automated-tested, awaiting live validation**. One press
+samples raw grip position/rotation and raw aim rotation from the same fresh
+OpenXR input frame, deliberately excluding weapon-weight lag. It aligns the
+hand to the globally corrected grip target, preserves the current
+`A = G * C` gun-in-hand relationship, rebases the collider to preserve
+`B = G * T`, and separately saves Grip, Hand IK, and Collider. The previous
+frozen two-pose workflow remains as an advanced fallback for a genuinely bad
+authored model-to-hand fit. The full gate passes 20/20 x86 and 16/16 x64;
+the tested/staged x86 loader is SHA-256
+`2D44888071EA3D360E9A7FB822CBC5EDD5BB6C8DBB1E4DD9AE77FCE1D4237A9E`.
+The source and staged defaults remain byte-identical at SHA-256
+`6ADA21EF6DED26FA929FE53B95431568F9C172F7382FA751C0F0C4086CE3F39A`.
+No game/headset run has been made with this new binary.
+
+Live run `run-20260811-152219` now **accepts the one-press interaction
+in-session for five held identities** on VirtualDesktopXR 1.0.10 / Quest 3.
+With staged loader SHA-256
+`2D44888071EA3D360E9A7FB822CBC5EDD5BB6C8DBB1E4DD9AE77FCE1D4237A9E`,
+the tester exercised index 76 eight times, Scanner 46 three times,
+`cell_phone` 4 five times, Item Camera 3 twice, and Pipe 32 once. All 19
+`m5_align_held_assembly_to_controller` events were `applied`, used a fresh
+same-sample raw grip/aim pair, measured the expected 60.000-degree basis
+difference, and reported Grip/Hand/Collider persistence `ok/ok/ok`. The tester
+accepted the result as good enough to use until a concrete issue appears.
+This closes the immediate application, repeat-use, five-identity usability,
+and write sub-gates. Restart reload, forced stale/source-change rejection,
+post-alignment collider/damage checks, camera/fire regressions, and all other
+identities remain open. The preserved loader checkpoint is 1,090,914 bytes,
+SHA-256
+`90D6F718892EAC82C4E76E9971C989AB4A7A668805568AB983DD9D8FCDD101A9`;
+the final player-settings snapshot is SHA-256
+`07B4F52D6ED87265F83CB23285B6DF4289920063279E8E157243A7E2A3097CDC`.
+
+The current combat-investigation diagnostic is **implemented, automated-tested,
+and live exercised**. Its instrumentation is usable; the automatic command-17
+telegraph candidate is headset-rejected because of its delayed Retail attack
+animation. The diagnostic layer does not
+alter damage, collision, AI, spacing, or block behavior. Compact contact records
+add a runtime tick, fresh HMD/grip distance to Retail's contact point, and the
+per-swing native attack-telegraph state. An optional read-only player-vitals
+sample is armed only when the supported Retail `Health` command, setter,
+singleton, and field signatures all match. Enemy health remains deliberately
+unobserved because the native melee dispatcher sends an engine damage message
+rather than returning target health; actor accepted/native-forward counts are
+reported without relabeling them as health loss. The schema-v4 watcher also
+correlates existing command-28 block edges with observed player-health
+decreases. The full gate passes 21/21 x86 and 17/17 x64, plus the synthetic
+schema-v4 watcher regression; tested and staged `GameClient.dll` SHA-256 is
+`96C17087069654ABA75A321BDCEC4ECA08EBD0BED622A6750DF70B75BE483505`.
+Launch attempt `run-20260812-090345` never started the game and supplies no live
+combat evidence.
+
+Successful run `run-20260812-100216` armed the verified read-only vitals path
+and recorded six accepted/native-forwarded actor hits plus one world/prop hit,
+seven rearms, 44 duplicate blocks, zero same-target accepts before rearm, and
+513/513 Retail reference-vector clears. Actor accepts for repeated targets were
+separated by at least 1,266 ms, rejecting duplicate callbacks within one swing
+as the fast-kill cause. The tester observed some enemies die in one hit and
+others in two; a head-hit multiplier is plausible but unproven because enemy
+health and semantic node names are not observed. Five actor accepts used node
+handle `0x00000006` and one used `0x00000026`.
+
+All seven accepts had automatic swing attack disabled because the loaded Pipe
+record had `swing_attack=0`, but the raw log separately contains five manual
+controller-applied command-17 down/up pairs. The tester reports that enemies
+reacted only to the Retail attack trigger and not to physical-only swings. This
+live-correlates AI anticipation with the native attack-command path while
+leaving the downstream signal and animation-free integration unresolved. The
+closest actor surface contact was 0.4729 m horizontally from the HMD and already
+overlapped the configured capsule, so the measurement does not support blaming
+the weapon collider for the remaining stand-off.
+
+Five command-28 down/up pairs and 12 health decreases were observed; all
+decreases were outside an ordered active pair. The tester initially reported
+that block had not worked, but later clarified that a trigger tap was enough to
+produce many visible blocks and did not need to remain held. The live-visible
+blocks are verified; the proposed explanation that command 28 primes Retail's
+native state and the physical weapon collider then supplies the spatial
+interception remains a hypothesis. Command-active intervals therefore do not
+measure native block-state lifetime. Watcher UTC values are ingestion times and
+do not measure the original activation. The post-run diagnostic candidate adds monotonic
+loader ticks, automatic/manual command-17 separation, and authoritative block-
+command activation duration. The full gate passes 21/21 x86 and 17/17 x64 plus the focused
+watcher regression. Built and canonical-stage `GameClient.dll` are
+byte-identical at SHA-256
+`9E4E1B4CC0FC5C569AC8A3A3019A70292CEC4DFF713D9FC6F3BAE9F683741B57`;
+that exact diagnostic build is live exercised below.
+
+Live ON run `run-20260812-124543` used that exact staged loader and loaded the
+Pipe player override with `swing_attack=1`. Thirty-five motion threshold
+crossings produced 35 matched automatic command-17 pairs; one additional pair
+is consistent with a manual trigger. Twelve contacts across four actors were
+accepted/native-forwarded, 121 held-overlap callbacks were blocked, 12 rearms
+completed, and no target was accepted twice before rearm. All 515 Retail
+reference vectors were released cleanly. Five accepts occurred during the
+100 ms command pulse and seven after it, confirming that the physical proxy's
+native forwards remain independently contact-gated. This does not exclude
+Retail attack-window side effects or establish visible AI response.
+
+The run exposed one automatic cooldown violation: two pulses began 62 ms apart
+despite the configured 450 ms cooldown, with the first pulse ending after
+47 ms. Reset-on-transient-invalid paths can erase the state, but the responsible
+reset is not yet observable. Five command-28 activations lasted only 109--203 ms;
+all nine health decreases were outside their active intervals. The tester
+first described these as unsuccessful attempts, then clarified after further
+play that a short activation visibly enabled repeated spatial blocks without
+holding the trigger. The snapshot observes command edges, not Retail's native
+block state, so those health correlations cannot classify the later blocks as
+active or inactive. Raw trigger/eligibility loss is also not distinguishable
+from a short physical press. The final snapshot, event stream, and preserved
+loader checkpoint have SHA-256
+`518F024CC40F3F62F85237988896D72D43B765518CE8BB99CC0BB361B0FD99A9`,
+`70D0F348AC9FE1833C605A724734714E1DC2BFD5FD1E81035BD01A797858214E`,
+and `37DD60127A4A802056DB62CBFE986E5E1B1D5F36CC44477697452AE0476E061E`.
+
+The tester confirms that automatic command 17 made enemies react, but also
+started Retail's unwanted attack animation. Its wind-up completed after the
+physical controller hit had already landed, creating unacceptable delayed
+timing and a possible second damage opportunity. Additional Retail-animation
+damage is not observed, so it remains a risk rather than a confirmed cause of
+the earlier fast kills. The A/B therefore rejects automatic command 17 as the
+shipping telegraph. The player Pipe override has been restored to
+`swing_attack=0`, SHA-256
+`2095B603D697AD25F9652CE04CB9D8DC44547D5B9E5AF910DBD0AD5A9B979B78`;
+the rejected ON file is preserved separately and packaged defaults remain OFF.
+
+Automatic guard-pose entry is **live verified**, but the first exit path failed
+the effective-defense gate. In `run-20260812-140353`, entering the saved pose
+produced the automatic command-28 down edge plus Retail block sound and
+haptics. Leaving produced the matching pose exit and command-28 up edge, yet
+the tester remained in Retail's native defensive state. The preserved loader
+checkpoint has SHA-256
+`CBF33EF30D040A45BE77497CB25D9473D7ABB0BABE7B4858D0E346FD2203E317`.
+Identity-verified disassembly now establishes why: command 28 reaches
+`PlayerManager::CommandOff` at GameOrig RVA `0x000A1B30`, whose selector-3
+case returns without cancelling block. The up edge is therefore a command-level
+release, not proof that native defense ended.
+
+The guarded second-`CS_Block` exit hypothesis is now **live rejected**. In
+`run-20260812-150308`, three automatic exits queued the same-weapon check, but
+`HandlingAnimationStimulus("CS_Block")` and the active stimulus were already
+false every time, so the fail-closed guard made no engine handoff. The tester
+still blocked outside the pose. The preserved loader log has SHA-256
+`149B66FB47B117E9F4755C3A7173186D516F5A73E1946408CD70B6A6955C1292`.
+This proves the short animation stimulus is not the authoritative defensive
+lifetime; it does not prove an unconditional second stimulus would cancel.
+
+The same run exposed the stronger root cause. Every automatic entry called the
+verified Retail `EnableCollisions` path with argument five set to one, while a
+later ordinary attack seed used zero. Identity-verified disassembly establishes
+that argument as `bBlocking`: block records skip the attack notifier. The
+generic physical-melee update had nevertheless replaced every player-owned
+record's expiration with the continuous contact-damage lifetime, including the
+block record. A new candidate is **implemented and automated only**: exact
+record-selection and `bBlocking` byte layouts are verified, only positively
+classified attack records may receive the continuous lifetime, and block or
+unknown records remain Retail-window-owned. The failed second-stimulus handoff
+is disabled. The full gate passes 22/22 x86 and 18/18 x64 plus schema-v4; built
+and staged loader SHA-256 is
+`C44ABD8267A861E2F55714E31233880A50E25939AC48DB0B3703828F09ADAFDF`.
+
+A follow-on dedicated-block-collider candidate is **implemented and automated-
+tested, awaiting live validation**. A missing per-weapon `block_collider`
+record follows that weapon's current attack collider, including later attack-
+collider edits, until the first explicit **Block Col** edit creates an
+independent record. Positively classified `bBlocking=true` records now use that
+geometry both when Retail reads native capsule dimensions and while its update
+path builds the capsule transform; attack records retain the existing attack
+geometry. Explicit block geometry is rebased with held-object alignment, while
+an inherited block capsule continues following the rebased attack collider.
+
+The **Block** tab also has a per-weapon `CUSTOM BLOCK WINDOW` toggle and bounded
+100--2000 ms duration in 25 ms steps. The toggle defaults OFF, so existing
+weapons preserve Retail's authored duration; diagnostics report Retail and
+applied values separately. **Debug** now has independent attack-collider,
+block-collider, and controller toggles. Block preview/live capsules are
+blue/cyan, use a role-specific live flag, and all three drawings default OFF.
+The global debug record is version 2 with version-1 read compatibility. The
+normal headset-free gate passes 22/22 x86 and 18/18 x64 plus launcher-focus and
+schema-v4 watcher tests. The unstaged x86 loader built from the current dirty
+worktree has SHA-256
+`B7C4DE41F9D80D13CF6C7C1D7909A99EFC4EE9B450786C85FBF4759AFF8D055F`.
+That initial candidate was not live-run. The first staged launch,
+`run-20260813-034938`, then exposed a bounded menu-rendering regression before
+block behavior could be validated: navigation remained `open=1`, but entering
+`BLOCK` emitted `m5_vr_tool_menu_overlay_failed bridge_draw_rejected=1`.
+Representative complete pages reproduce the exact split: Block uses 29,820
+triangle vertices and Debug 27,402, both above the bridge's former 24,576
+limit, while the visible Block Col page uses 21,876. The accepted fix gives the
+menu producer and D3D9 bridge one shared 32,768-vertex cap, logs the rejected
+count/limit, and covers Block, Block Col, and Debug page budgets headset-free.
+The full gate passes 22/22 x86 and 18/18 x64 plus launcher-focus and schema-v4.
+Live run `run-20260813-040058` recorded 18 Block, 15 Block Col, and 16 Debug
+navigations plus ten Debug adjustments with the menu still open and zero
+`m5_vr_tool_menu_overlay_failed` events; the tester confirmed all three tabs
+remain visible and interactive. This is **live verified tool-menu rendering**.
+Exact staged SHA-256 values are
+`0942BFD65C726FD0A27BB46AF0C2342A7220C3A6196D961114886C79F04D4705`
+for `GameClient.dll` and
+`D188B8DFB75BB134E6654A94CF6DBD33CC38C982C8E75806DFBACAF7A232BCD7`
+for `condemnedvr-d3d9.dll`. Collision interception, timing, colors, and
+native block expiration remain unverified live.
+
+
+
+The Retail `Camera`-socket target-query context switch is live accepted for
+both mapped forensic displays. Scanner index 46 succeeded in
+`run-20260810-143142`; Item Camera index 3 succeeded in
+`run-20260810-145113`. Both keep Retail command 116 for tool selection,
+command 17 for use, and Retail ownership of range, filtering, classification,
+cache, and collection dispatch.
+
+Visible-handgun direction was live accepted for stable index 76
+(`colt45_Unbreakable`) using the then-packaged grip position `(0,0,-6)` and
+local rotation `(-8,100,16)` degrees. The later guided-alignment run produced
+position `(3.630,1.723,-7.606)` and rotation
+`(165.034,70.934,-177.826)` degrees; the user instructed that this new pair be
+promoted into the packaged defaults. The prior sight-direction result therefore
+requires a fresh fire regression under the new release pose. The first
+direction-only candidate
+required authored `Breach -> Flash` geometry; `run-20260810-155025` found
+`Flash` handle 2 but no `Breach`, so all nine calls safely retained
+raw-controller aim and provided no candidate alignment evidence.
+
+Verified Retail static evidence shows that `Breach` is optional. The follow-up
+index-76 candidate reconstructs the same visible model pose used by the stereo
+weapon override, prefers `Breach -> Flash` when both transforms exist, and
+otherwise uses the authored `Flash` socket's local +Z axis. Retail's original
+fire position remains unchanged; transformed `Flash` position is diagnostic
+only. Current weapon/model references, saved grip generation, fresh tracking,
+finite transforms, and exact model-interface slots fail closed to raw-controller
+aim, then Retail on stale tracking. Other weapon indices retain the existing
+controller basis.
+
+Live run `run-20260811-081337` used VirtualDesktopXR 1.0.10 on a Quest 3 and
+the canonical `-WeaponTest Pipe -Wait` launch. All four index-76 shots logged
+`result=applied`, `direction_source=Flash_socket_plus_Z`, a valid stable
+Flash transform, unavailable optional Breach, and `fallback=none`. The tester
+confirmed that impacts followed the visible handgun sights. This is **live
+verified direction alignment for index 76**.
+
+The claim does not move or accept the muzzle origin: Retail `firePosition`
+remains native, and the observed diagnostic Flash-to-Retail-origin separation
+was 64.570--78.185 units. Close-range parallax and every other firearm model
+remain outside the acceptance. The full build passes 19/19 x86 and 15/15 x64
+tests; the accepted staged x86 SHA-256 is
+`5C385D018E511623E563357F4FCE82BCA689C38D1DB96C7C72405D1698F257F2`.
+
+The current release-readiness candidate adds a source-controlled
+`config/condemnedvr-defaults.ini` and stages it beside `GameClient.dll`.
+Settings reads now use a per-key precedence of the writable player file first,
+then that packaged file; menu writes continue to modify only
+`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini`. The package contains the
+retained first-level weapon, collider, grip, hand-IK, and arm-IK calibrations,
+including the live-authored Item Camera index-3 records and the newest retained
+pose/hand records for indices 4, 17, and 46. These additions are retained
+calibrations, not blanket perceptual acceptance for every record. All 28
+current player-setting keys now have packaged counterparts; only the intended
+legacy-v1 to packaged-v2 record normalization differs. `[debug] draw=1,0,0`
+keeps both developer wireframes hidden for a fresh player. The Debug-tab rows
+now save their global visibility preference immediately, including OFF. The
+full automated gate, including parsing every packaged record, passes 19/19 x86
+and 15/15 x64; source, build output, and canonical stage all share defaults
+SHA-256
+`04AFF10BC30AFF6B069A613FB0E29FD579F9AA9C21E63A6D8E749186110DC579`,
+and built/staged candidate `GameClient.dll` share
+`C22FAB9AA6DC4C5B4802C3E62B6EBAE81B4888EE0FDB828981A5F8DEBD49A610`.
+Runs `run-20260811-102206` and `run-20260811-102500` now live-accept
+the Debug player override/restart boundary. The later process loaded `0/0`,
+recorded eight successful saves ending at `0/0` with zero save failures, and
+left `[debug] draw=1,0,0` in the writable player INI; the tester confirmed the
+choices appeared to save. Three actor contacts after the final OFF save were
+accepted/native-forwarded, so hidden drawing still did not disable damage. The
+2,509,819-byte loader checkpoint SHA-256 is
+`ECC05757BD7B2DD7EE3A2864FA5E38983551FAB38CC5145DF990B9778C8BB993`.
+An isolated empty-player-path run is still needed to live-identify packaged
+per-weapon fallback; that path currently remains automated-only.
+
+The preceding pushed checkpoint promoted the live-accepted Pipe setup into a
+temporary fail-closed baseline for the verified one-handed majority. The
+repository maps the 26 modeled `WEAP_1HandedDebris` indices plus
 Crowbar, excludes `Unarmed`, normal firearm states, two-handers, and unknown
 indices, and lets an unedited mapped weapon read the Pipe's Melee/Weapon,
 Collider, Grip, and right-hand IK records. The first save for that weapon
@@ -50,13 +633,15 @@ The live-tested staged loader SHA-256 is
 the full RelWithDebInfo gate passes 19/19 x86 and 15/15 x64 tests, and the
 PowerShell helper/parser checks pass.
 
-The working tree also adds two independent visibility controls at the top of
-the VR Tools `DEBUG` tab: `DRAW MELEE COLLIDER` and `DRAW CONTROLLERS`. They
-default on and reset on process restart. The gates are draw-only: collision,
-contact damage, controller input, grip/IK calibration, and weapon state continue
-underneath a hidden overlay. Automated transition tests prove that the toggles
-do not affect one another; the complete RelWithDebInfo gate again passes 19/19
-x86 and 15/15 x64. The refreshed staged loader SHA-256 is
+The earlier visibility candidate added two independent controls at the top of
+the VR Tools `DEBUG` tab: `DRAW MELEE COLLIDER` and `DRAW CONTROLLERS`. That
+live-tested build defaulted them on and reset them on process restart. The
+current release-readiness candidate instead defaults both hidden and persists
+their global user preference. The gates remain draw-only: collision, contact
+damage, controller input, grip/IK calibration, and weapon state continue
+underneath a hidden overlay. Automated transition and settings-store tests
+prove that the toggles do not affect one another and that OFF survives a
+save/load round trip. The earlier live-tested staged loader SHA-256 was
 `FF89DA8555392B4312972637053124CB7E346BB435D6CB05F54315FA206FDE2D`.
 Run `run-20260809-124936` live-accepts the UI change. The headset tester
 confirmed both overlays hide and restore correctly, while the ordered menu log
@@ -75,9 +660,214 @@ above 0.75). Plain Y remains the pause-menu control, and both grips + Y remains
 the separate VR Tools chord. The same focus, freshness, playing-state, and
 calibration/menu-capture guards apply. The complete RelWithDebInfo gate passes
 19/19 x86 and 15/15 x64 tests; the new project-local stage loader is
-`C950716B4690A3411C6E0FF18B3CFCCC7FA75D34E307CC65ACB701DD05B6DE94`. This
-control extension remains **implemented, staged, and automated-only** until a
-crime-scene prompt proves the expected forensic tool behavior in-headset.
+`C950716B4690A3411C6E0FF18B3CFCCC7FA75D34E307CC65ACB701DD05B6DE94`.
+Run `run-20260810-080738` **live-accepts ready-tool selection**: the headset
+tester confirmed that right-stick up pulls out the forensic tool. The armed
+gate recorded 22 matched command-116 press/release pairs at `game_state=1`,
+each with `control=right_stick_up`, and zero core-action rejections; it also
+recorded 13 ordinary Y pause dispatches. Ready selection is therefore a live
+PASS. Actual forensic use/scanning, contextual actions, tool pose/aim, prompts,
+stow/reselection, crime-scene variants, and transition behavior remain the
+active gameplay work.
+
+A bounded, observation-only forensic memory trace is implemented behind
+`-ForensicMemoryProbe`. It signature-checks the Retail weapon-display and
+command paths, then records bounded Tool, Fire, and Activate observations
+without game-memory writes or video capture. Run `run-20260810-103612`
+live-armed the first version and recorded 44 command edges, 44 edge snapshots,
+163 samples, 15 root transitions, and four complete traces, all with
+`engine_writes=0`.
+
+That run raised, but did not prove, a Fire-magnitude hypothesis. Sixteen VR
+right-trigger Fire presses reached command 17 with output `1` without taking
+the photo. After switching to flatscreen and realigning, one mouse Fire edge at
+Retail value `128` took the photo and Scanner index 46 changed to `cell_phone`
+index 4. The preserved loader trace is
+`stage/condemned-m2-mono/logs/run-20260810-103612/condemnedvr-loader-snapshot.log`
+(SHA-256
+`F9EADA3039F70B826E2C5CEC9912063E465D146B68AF2D0B8D1E77F8CE85C24D`).
+
+The same trace rejected the initial object-layout assumption: the
+`weapon+0x90` product remained `0x029DDEB0` across different equipped objects,
+did not match the known Scanner or DigitalCamera vtables, and yielded no
+aligned word diff. Static factory/constructor facts remain valid, but that live
+pointer must not be treated as the final subclass object.
+
+Run `run-20260810-105904` falsified the magnitude hypothesis. VR Fire at the
+experimental value `128` did not take the photo, and two physical mouse Fire
+edges at `128` also failed in the same unchanged Scanner state. Later, the same
+VR trigger fired `colt45_Unbreakable` nine times; observed weapon fields
+changed 9 to 0 and 0 to 9 while the Retail fire-vector path ran. Command 17's
+native binding declares range `(0.100,99999.000)`, so the original value `1`
+was already active. The magnitude experiment has been removed. The preserved
+loader trace is
+`stage/condemned-m2-mono/logs/run-20260810-105904/condemnedvr-loader-snapshot.log`
+(SHA-256
+`67BB633813E5562FD01972706EB3976DB1487B9BF2C2587C883AAB4CA49439E8`).
+
+The observer hooks the verified Scanner and DigitalCamera updates to capture
+their actual live `this` pointers, plus Retail command on/off callbacks. Static
+analysis now classifies Scanner `+0x1DB` as target hit, `+0x1DC` as framing
+valid, and `+0x1DD` as the final `can_photo` conjunction consumed by its
+vtable eligibility function at `GameOrig+0x000F46F0`.
+
+Loader `F242036E6D975389B7394B014FE37628CABD72C874C1736BB67800FDFD6A9E77`
+live-armed both observer layers in `run-20260810-112423`. Scanner index 46
+resolved the actual object `0x0CC8A098` and expected vtable RVA `0x0014AB44`;
+DigitalCamera was not instantiated in this scene. Two VR Fire edges reached
+Retail while only target hit was observed as one and did not take a photo; one
+physical mouse Fire edge later reached Retail with target hit zero and also
+failed.
+
+A bounded read-only sample of Scanner `+0x1D8..+0x1DF` then recorded five
+`target_hit=1, framing_ok=1, can_photo=1` windows during a 20-second controller
+sweep. The tester confirmed that controller movement drives forensic aim, head
+aim does not, and the final state matches Retail's beep plus green camera
+light.
+
+The same run contains a successful flatscreen reference: physical Fire `128`
+at trace 20 changed the Scanner's first four state bytes from `0x01000001` to
+`0x01010101`, then `0x01010100`, before index 46 advanced to phone index 4.
+The final preserved log SHA-256 is
+`7350A928463DCFED3937447790ACAA55796301A6DF51F63C01D556BDB10900B9`.
+
+The expanded six-byte loader
+`4413F08686DDBC9AD24FF5790DC60D1311BA8B01EC94DA0044B603C1DB56FA14`
+live-armed in `run-20260810-115015`. One VR Fire edge had
+`controller_active=1`, output `1`, and target hit, framing, and final
+`can_photo` all equal to one at the exact Retail command callback. It produced
+only the expected controller haptic: no flash, no photo, and no Scanner-46
+transition through 256 sampled frames. This falsifies eligibility or missed
+aim as the explanation for that failure. Its final preserved loader log is
+`stage/condemned-m2-mono/logs/run-20260810-115015/condemnedvr-loader-snapshot.log`
+(SHA-256
+`C32359EA48CB5B0C7F59CDA18586A25DFD5926AF5C918CAC33A781B8BF1B97A2`).
+
+Bounded reverse engineering maps PlayerMgr command-on to
+`GameOrig+0x000A0C30`, `CClientWeapon::Fire` to `+0x00024D90`, and their
+verified command-17 callsite to `+0x000A13C7`. The live Scanner weapon uses
+vtable RVA `0x0013B46C`, type `0x15`, and has its weapon `+0x303` Fire-ready
+byte set. The same branch also has a Scanner/collection-tool special callsite
+at `+0x000A1351`, targeting `GameOrig+0x000E8F00`; that path returns before
+generic `Fire` and therefore makes ?no weapon Fire? ambiguous by itself.
+
+The route-marker loader
+`26360CAC206D32972EE8012B3AC49044430FEBDBD0F138F062269684CEDA8EBE`
+live-armed in `run-20260810-121200`. It recorded 32 PlayerMgr Fire dispatches,
+including 24 Scanner-46 dispatches with target hit, framing, and `can_photo`
+all held at one. None entered generic `CClientWeapon::Fire`. The one physical
+mouse-`128` edge in this run occurred with all three Scanner gates zero, so it
+is not a valid flat/VR route comparison. The completed loader trace is
+`stage/condemned-m2-mono/logs/run-20260810-121200/condemnedvr-loader-snapshot.log`
+(SHA-256
+`925715B6773C396CB58518F80BF5414E8DA904BC0CFF57B97AA946DEFB35F52F`).
+
+The branch/collection observer build passes 19/19 x86 and 15/15 x64
+tests; SHA-256
+`4B1B05040114790C0E4DD389048CAD46EC001082295B16C6AF1EA492C717841F`.
+
+Live `run-20260810-123242` recorded five Scanner-46 PlayerMgr Fire callbacks.
+Every branch input had `player_mode=1`, weapon type `0x15`, state
+`+0x218=1`, Fire-ready one, owner null, and the same all-three-green Scanner
+state. All five returned without either
+`m5_forensic_collection_action_dispatch` or
+`m5_forensic_weapon_fire_dispatch`. A read-only live check then resolved
+PlayerMgr's target-query object at `0x02CCF388`, vtable RVA `0x00149A70`,
+and cached result at object `+0xB4`: its classification byte `+0x1C` was
+zero and target reference `+0x2C` was null. This is the decisive mismatch:
+the Scanner display sees the right-controller target, while the activation
+branch sees no target from its separate desktop-camera query.
+
+The completed baseline loader trace is
+`stage/condemned-m2-mono/logs/run-20260810-123242/condemnedvr-loader-snapshot.log`
+(SHA-256 `5F3E15664DAEC3D14EA0C32FFA7FF690B1DBA8F559AD1683EFDFB56C5DEB2B77`).
+
+
+The cached-result getter is `GameOrig+0x000EA500`; updater
+`+0x000EA010` calls acquisition routine `+0x000E98D0`. That routine obtains
+the desktop camera transform through the engine-client interface, builds a
+Retail segment, and calls `IntersectSegment` from return RVAs
+`+0x000E9BCE` and `+0x000E9BEE`. The live engine method resolves to
+`Condemned.exe+0x000095C0`.
+
+The superseded first implementation temporarily replaced only the query
+start/end with fresh OpenXR right-controller origin/+Z, called Retail, then
+restored the caller-stack prefix. It preserved range, flags, filter, result
+classification, and action ownership. Its automated tests passed, but live
+`run-20260810-134726` falsifies its optical axis. The completed snapshot has
+209 bounded query records, 167 engine intersections, and zero restoration
+failures. All 89 Scanner-ready PlayerMgr branch records retained cached
+`kind=0`; none reached kind three, collection action, or generic weapon
+`Fire`. The saved Scanner grip is position `(-0.15,-0.90,0.65)` with local
+rotation `(20.0,85.5,25.5)` degrees, while the raw ray ignored that visible
+camera/controller-forward disagreement.
+
+The preserved completed trace is
+`stage/condemned-m2-mono/logs/run-20260810-134726/condemnedvr-loader-snapshot.log`
+(1,412,180 bytes; SHA-256
+`7881DF6FCA814885DA78288CEF1751744061B261FCD5D4259D9BC66BBAE42ACC`).
+
+The forensic camera is presented as separate white alignment-arrow graphics
+and a camera body/screen; the embedded view follows the arrows. Scanner and
+DigitalCamera share vtable slot `+0x24` at `GameOrig+0x000F4CB0`. Scanner
+calls it at `+0x000FC0C0`, and DigitalCamera at `+0x000FC6CD`. The shared
+function resolves the model-socket name stored at display `+0x1AC` and asks
+Retail's model interface for its world transform. A bounded live read of
+Scanner display `0x0CC1A098` confirmed the literal socket name `Camera`.
+
+The current replacement hooks the shared socket function only after its
+invariant code, both display vtable entries, and both virtual-call sites
+match. Each successful finite `LT_OK` output publishes a coherent per-display
+pose. The target-query hook additionally requires forensic type `0x15` and
+maps only stable catalog index 46 to Scanner or index 3 to DigitalCamera.
+Index 6 (`CollectionToolBase`) and unknown indices are compile-time asserted
+to receive no override. A matching pose must be no older than 250 ms.
+
+The candidate segment uses socket-local +Z while retaining Retail's original
+range and every non-geometry field, then restores the query immediately after
+Retail returns. `m5_forensic_camera_socket_pose`,
+`m5_forensic_camera_socket_ray_query`, and
+`m5_forensic_camera_socket_ray_fallback` expose display kind, expected kind,
+source sequence, age, geometry, result, and fallback reason without persistent
+engine writes. The index-3 candidate passes 19/19 x86 and 15/15 x64 tests;
+built x86 SHA-256 is
+`FD2311E189650AC3DD79FB7A887D0DBDCA40487064180CD385E69FF36655F638`.
+
+Live `run-20260810-143142` headset-accepts the Scanner mapping. Immediately
+before the successful VR Fire edge, PlayerMgr's cache was `kind=3` with
+non-null target `0x38EEF848`; Retail's collection action ran with `handled=1`,
+and the tester confirmed the visible photo. The frozen checkpoint is
+`stage/condemned-m2-mono/logs/run-20260810-143142/condemnedvr-loader-photo-success-checkpoint.log`
+(431,677 bytes; SHA-256
+`3F29DCB159E7F9504E2F1E1E375C62603EA90CDE5B8474924168E294DB62AD25`).
+
+The Scanner-only run established the index-3 baseline: `Camera` /
+`WEAP_Camera` stayed forensic type `0x15` and published fresh DigitalCamera
+poses, but stale-Scanner fallback left PlayerMgr at kind zero.
+
+Candidate run `run-20260810-145113` is now headset accepted. Index 3 used
+`pose_display_kind=digital_camera`; the successful Fire edge saw all four
+DigitalCamera state bytes at one, PlayerMgr cached kind three with non-null
+target `0x38B4F9A0`, and Retail's collection action returned `handled=1`. The
+tester confirmed the visible Item Camera result. Preserve the checkpoint at
+`stage/condemned-m2-mono/logs/run-20260810-145113/condemnedvr-loader-item-camera-success-checkpoint.log`
+(1,393,735 bytes; SHA-256
+`1DC321F8DDA0C61BC7FEE84D14BE47C530636CC4A782E7A1CD68F0610A870047`).
+
+The forensic Camera-socket route is accepted for both mapped displays. The
+first firearm candidate found `Flash` but no `Breach` on index 76 and
+safely applied no candidate direction. The revised Flash-socket +Z direction
+crossed four native fire calls without fallback in `run-20260811-081337`;
+the tester confirmed impacts followed the visible handgun sights. Index-76
+direction is live accepted while Retail origin/parallax and every other firearm
+remain unchanged and unclaimed.
+
+Live attempts `run-20260810-101312` and `run-20260810-101822` both stopped
+before game launch: VDXR loaded, but `xrGetSystem(HMD)` remained unavailable
+for the bounded 15-second retry and ended with
+`XR_ERROR_FORM_FACTOR_UNAVAILABLE`. No loader/probe armed event exists for
+either run, so both are explicitly **no forensic behavior evidence**; retry
+after the headset session is awake.
 
 The earlier Pipe acceptance evidence remains the reference baseline. Live run
 `run-20260808-060131` proved the corrected reference-vector lifecycle at
@@ -214,18 +1004,20 @@ already rearmed, so `InvalidSampleLatchHolds` remained zero: the fail-closed
 branch retains direct automated coverage but was not naturally exercised in
 this short live run.
 
-Weapon model alignment is now persistent rather than process-local. A versioned
+Weapon model alignment is persistent rather than process-local. A versioned
 per-weapon `grip` record stores the absolute local grip position, local rotation
-correction, and optional secondary-grip enable/offset/radius in
-`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini`. New calibration slots load
-that record only when its stored profile identity matches; invalid, stale, or
-missing data falls back to authored profile defaults. GRIP and 2-HAND menu
-changes and resets auto-save, while continuous fallback calibration saves on
-controller Y or keyboard P. Authored base values remain separate so Reset still
-has a stable target.
+correction, and optional secondary-grip enable/offset/radius. Reads prefer
+`%LOCALAPPDATA%\CondemnedVR\weapon-settings.ini`, then the packaged module-
+sibling defaults; writes target only the player file. Stored profile identity,
+mapped one-hand Pipe fallback, and authored defaults remain the fail-closed
+lower layers. GRIP and 2-HAND menu changes and resets auto-save, while
+continuous fallback calibration saves on controller Y or keyboard P. Authored
+base values remain separate so Reset still has a stable target.
 
-The x86 settings-store tests now cover grip round-trip, profile mismatch,
-out-of-range save rejection, and malformed-record rejection. The full
+The x86 settings-store tests cover packaged fallback, player precedence, Debug
+ON/OFF persistence, grip round-trip, profile mismatch, out-of-range save
+rejection, malformed-record rejection, and every declared record in the actual
+copied post-build defaults file. The full
 RelWithDebInfo suite passes 19/19 x86 and 15/15 x64. The refreshed staged loader
 SHA-256 is
 `9D789BCDCFD5FD8372B786BB67B74250B42F5CD68E3906BD275DFAB2F2A4B5E6`.
@@ -272,21 +1064,21 @@ baseline.
 | D3D9 capture | **PASS** | M2 live: pre-`Present` capture of the actual discard swap chain; mono and stereo transport accepted |
 | Versioned IPC/shared textures | **PASS** | M2 live: x86 bridge/x64 host connected, transferred completed frames, handled heartbeat loss and clean shutdown |
 | OpenXR host | **PASS** | M2 live on VDXR; session-scoped SteamVR also used successfully; startup retry is bounded |
-| Frame pacing | **PASS** | 1 Aug live: OpenXR-request clock, newest-complete image policy, near-90 Hz accepted; see performance doc |
+| Frame pacing | **PASS (pacing) / PARTIAL (headroom)** | Request-clock pacing is live accepted near 90 Hz; later feature-heavy runs kept XR submission near 90 Hz but imported 65-87.5 pairs/s with two-to-five-frame average age, so representative 90 Hz headroom remains open; see [performance evidence](CONDEMNED-PERFORMANCE.md) |
 | Native stereo | **PASS** | M3 live at 100% render scale and 130% coupled FOV; distinct fuseable eyes, state restoration, no repeated simulation |
-| HMD rotation | **PASS** | M3 live full relative yaw/pitch/roll and recenter |
+| HMD rotation | **PARTIAL** | M3 live accepts responsive relative yaw/pitch/roll and yaw-only recenter; an 11 August report says the horizon can intermittently inherit a downward pitch. Source inspection supports a Retail camera-base composition hypothesis, but no correlated orientation trace exists yet |
 | HMD translation | **PASS** | M3 live bounded relative translation; current path limits unsafe travel and falls back on stale tracking |
-| Controller transport/input | **PASS** | M4 base controls pass live; right-stick-up forensic command 116 is staged and automated-only pending its focused live gate |
+| Controller transport/input | **PASS** | M4 base controls and right-stick-up forensic ready selection pass live; the complete forensic lifecycle remains M5 work |
 | Locomotion | **PASS** | M4 live left-stick movement and right-stick turning with keyboard/mouse coexistence |
-| Weapon/fire aiming | **PARTIAL** | Right-controller fire-vector path and HMD-relative view/flashlight exist; representative firearms, recoil, tools, and complete gameplay coverage remain M5 work |
-| Visible weapon pose | **EXPERIMENTAL** | Profile-calibrated Retail model is overridden only during eye renders and restored exactly; no standalone held object yet |
+| Weapon/fire aiming | **PARTIAL** | HMD flashlight, mapped Scanner/Item Camera aim/action, index-76 visible-barrel direction, and the five-identity one-press held-pose interaction pass live; Flash direction/fire still needs regression under the new saved Grip, while origin/parallax, recoil, and complete coverage remain |
+| Visible weapon pose | **PARTIAL** | Render-only override/restoration remains exact; after the old guided restart contradiction, the one-press hand-parented workflow is live accepted in-session for indices 76, 46, 4, 3, and 32, while restart and dependent collider/camera/fire validation remain |
 | Simulated weapon weight | **EXPERIMENTAL** | Bounded player-local damped-spring solver is automated-tested and drives visible/collision pose; it is not collision-constrained physics |
 | Melee collision | **PARTIAL** | Pipe reference path and index-29 inherited native geometry/continuous speed-qualified overlap pass live; the other mapped one-handed assets remain unverified |
 | Actor contact qualification | **EXPERIMENTAL** | Pipe ownership, 1 cm overlap, 7.25 m/s Hit Speed, and 0.12 m travel-plus-swing-end rearm pass live with zero same-target reaccepts; the transient-invalid hold is regression-tested but was not naturally invoked in the confirmation run |
 | Native damage handoff | **PARTIAL** | Pipe damage is live-accepted; index 29 produced three clean actor native-forwards across two targets, with explicit headset-visible damage confirmation pending; remaining assets are unproven |
-| Arm/hand IK | **PARTIAL** | Condemned skeleton/chains, callback order, wrist placement, locomotion anchoring, and initial calibrations have live evidence; broad lifecycle/pose regression remains |
+| Arm/hand IK | **PARTIAL** | Initial chains, callback order, wrist placement, locomotion anchoring, empty-hand correction, and five-identity one-press hand/weapon propagation have live evidence; restart/load-state generation and explicit visual collider preservation remain open |
 | Haptics | **PARTIAL** | M4 bounded input-confirmation pulses passed live; melee-impact impulse haptics and verified weapon-event feedback are not implemented |
-| HUD/UI | **PARTIAL** | Retail menu/screen comfort panel and controller menu navigation passed live; VR Tools is developer UI; gameplay HUD/effects/cutscene classification lacks representative acceptance |
+| HUD/UI | **PARTIAL** | Retail menu/screen comfort panel and controller navigation passed live; the title-case VR Settings hub, four-row styling, two clean entries/focus-outs, and one explicit Back pass live. The prior opening-Enter leak did not recur, so its defensive suppression branch remains automated-only. Display, VR Features, and Comfort are placeholders; Developer Tools `On -> Off`, save, runtime mutation, immediate native-label refresh, and controller-hotkey suppression pass live, while F12 suppression, On restoration/release capture, and fresh-process persistence remain pending; VR Tools remains developer UI |
 | Installer/release | **NOT STARTED** | Safe developer staging and publication audit exist; no install/update/uninstall package satisfies M6 |
 
 ## Current pipeline
@@ -311,7 +1103,7 @@ player-local bounded weapon-weight solver                   [EXPERIMENTAL]
         +--> base/tip kinematics and sweep telemetry          [IMPLEMENTED; automated]
                 |
                 v
-        Retail melee collision-body transform                [TEMPORARY; seed required]
+        Retail melee collision-body transform                [TEMPORARY; automatic seed live gate pending]
                 |
                 v
         Retail registered collision callback                 [VERIFIED / observed live]
@@ -337,23 +1129,34 @@ with a lifetime-safe, collision-constrained item rendered from its physical pose
 
 ## Temporary scaffolding
 
-- **Swing-to-Retail-attack adapter:** a tracking-space 3.00 m/s gesture emits a
-  bounded command-17 pulse for mapped profiles. For the pipe it seeds the
-  Retail collision body; for the fire axe it remains a play-test bridge. Final
-  physical melee must not require this Fire edge or Retail animation timing.
+- **Retail VR Settings isolated host:** adds one native Options row and reuses
+  the registered screen-24 base shell while bypassing its unsuitable
+  dormant Build/OnFocus/OnCommand path. Four Retail-native category rows are
+  diagnostic-only. Hub rendering, two clean entries/focus-outs, and one
+  explicit Back have live evidence; the same-entry-edge suppression remains
+  automated-only because its branch was not exercised. The next scaffold is
+  one guarded category destination with one mod-owned persisted boolean. The
+  pre-existing ClientFx shutdown fault remains a separate gate.
+- **Swing-to-Retail-attack adapter:** a tracking-space 3.00 m/s gesture can
+  emit a bounded command-17 pulse for mapped profiles, but its delayed Retail
+  animation was headset-rejected and it remains OFF for accepted physical
+  melee. The fire-axe bridge remains experimental. Equip-time seeding below is
+  a distinct one-shot compatibility transaction, not motion-triggered damage.
 - **Render-only Retail weapon override:** proves acquisition, grip calibration,
   alignment, weight, and stereo rendering while restoring the engine object.
   Replace it with a standalone lifetime-safe held item at the constrained pose.
 - **Retail collision-body/wall proxy:** redirects the animation-derived physics
-  transform and currently requires a Retail attack to create the body. It is a
+  transform. The native body still has to be created once, so this remains a
   bridge to a permanent physical weapon/collision solution.
-- **Deferred pickup auto-seeding:** the native body still has to be created once.
-  Later work should detect equip, wait for a stable identity/model and fresh
-  pose, issue one internal seed-only Retail pulse with damage blocked, and
-  require a player-owned body plus native override `read_mask=0x7` before
-  declaring the weapon ready. Reset and retry on weapon lifecycle changes.
-  A silent direct `EnableCollisions` call remains off-limits until its five
-  arguments and ownership contract are verified; do not guess that ABI.
+- **Automatic equip-time seed candidate:** implemented and automated-tested,
+  but not live accepted. Stable mapped pickups receive one guarded seed-only
+  command-17 pulse. Damage dispatch, contact-latch mutation, and the action
+  haptic are blocked until exact player Attack classification and overridden
+  `read_mask=0x7` confirm the body, followed by a bounded settle. Three timed
+  attempts are allowed; a manual Retail attack is exposed only as the terminal
+  fallback. A silent direct `EnableCollisions` call remains off-limits until
+  its five arguments and ownership contract are verified; do not guess that
+  ABI. A truly seedless system still requires the standalone item below.
 - **Physical-hit qualification:** the working tree now gates contact with
   configurable `Require Swing`, speed-only `Hit Speed`, and tip-displacement
   `Rearm Travel`. Impact energy remains diagnostic. Travel no longer rearms
@@ -366,9 +1169,10 @@ with a lifetime-safe, collision-constrained item rendered from its physical pose
 - **`MeleeAimProbe`:** animation-relative collision steering is a diagnostic
   A/B path, is mutually exclusive with the physical wall proxy, and is not the
   final melee architecture.
-- **Calibration/debug helpers:** collider/controller wireframes, Grip/2-Hand
-  snapshot controls, discovery probes, and the hand-only IK proof exist to
-  establish profiles/layouts. Do not optimize them as final player UX.
+- **Calibration/debug helpers:** collider/controller wireframes, 2-Hand snapshot
+  controls, discovery probes, and the hand-only IK proof remain bounded aids for
+  establishing profiles/layouts; the live-accepted guided Grip interaction is
+  no longer classified as temporary diagnostic scaffolding.
 - **M4 confirmation haptics:** prove transport only; final recoil/impact haptics
   must come from verified game/contact events.
 - **M2-named local stage/launcher:** it is the current M5 developer harness,
@@ -391,9 +1195,11 @@ These are regression dependencies, not cleanup opportunities.
 
 Headset-free:
 
-- `tools\build-all.ps1` builds x86/x64 and runs 19/15 CTest tests covering the
+- `tools\build-all.ps1` builds x86/x64 and currently runs 23/19 CTest tests covering the
   protocol/ABI, state/math, input/UI, weight/melee/IK, logging, identity,
-  fail-closed loader/bridge, settings, and background-render guards.
+  fail-closed loader/bridge, settings, and background-render guards. The x86
+  settings test covers packaged fallback, per-player precedence, Debug ON/OFF
+  persistence, and malformed-player-override rejection.
 - `tools\test-condemned-m0-tools.ps1` tests the M0 PowerShell parsers.
 - `tools\verify-condemned-m0.ps1` and compiled module verifiers need a legal
   game install but no headset; they do not prove hooks in a running process.
@@ -422,47 +1228,91 @@ hash, OpenXR runtime, and launch switches.
 
 Sources are the launch report, session host/bridge JSONL under
 `stage/condemned-m2-mono/logs/run-*`, loader `condemnedvr-loader.log`, and the
-performance tools. Gaps: loader records have only `event` and key/value `detail`
-(no timestamp/stage/correlation ID) and are not inherently per-session; contact
-records lack stable semantic actor/material identity; stages are not joined in
-one record; and impact haptics do not exist. Improve only as an experiment needs.
+performance tools. Gaps: the loader envelope has only `event` and key/value
+`detail` and is not inherently per-session; current contact, vitals, and command-
+edge records carry a monotonic runtime tick, but no shared stage/correlation ID.
+Contact records still lack stable semantic actor/material/node identity; stages
+are not joined in one record; and impact haptics do not exist. Improve only as
+an experiment needs.
 
 ## Next experiment
 
-**Hypothesis:** index 29 proves the shared architecture, but a visually
-different common one-handed asset will need only per-index geometry/grip
-correction rather than another damage implementation.
+Keep automatic `SWING ATTACK` OFF. Live-validate the attack-only collision-
+lifetime and dedicated-block-collider candidate without using the left trigger.
+Start with block timing override OFF and the block collider still reporting its
+attack-collider fallback. Pose-to-command entry and Retail feedback are already
+live verified; the required gate is that the classified block record remains
+finite, uses the independently visible block capsule, and defense no longer
+persists outside the pose, while a later classified attack record still uses
+the attack capsule and supports physical hits.
 
-- **Baseline:** `run-20260809-113629` loaded all four Pipe-baseline records for
-  index 29, consumed native `read_mask=0x7`, and produced three clean actor
-  native forwards across two targets. The accepted Pipe reference remains
-  `run-20260809-095447`.
-- **Minimal change:** select a different form factor such as
-  `meat_cleaver` (27), `mannequin_arm` (26), or a 2x4; inspect the inherited
-  pose/collider before saving only that index's required corrections.
-- **Headset procedure:** equip and seed it, verify the inherited settings are
-  visible, align only if needed, then check slow rejection, one fast hit,
-  continuous-follow-through latching, and a later rearmed swing. Relaunch once
-  after any edit.
-- **Diagnostics:** first require four `source=pipe_baseline` events, then
-  `read_mask=0x7`, clean Retail reference release and native forwarding. After
-  an edit/relaunch, require `source=weapon_record` for that record while index
-  32 remains byte-for-byte unchanged.
-- **Success:** the asset aligns and damages each target at most once per swing,
-  repeats only after a valid reset, and keeps its correction isolated from the
-  Pipe and other one-handed weapons.
-- **Failure interpretation:** a fit problem belongs to that index's profile;
-  a missing constructor/callback path means that identity must be removed or
-  held fail-closed. A shared lifecycle invariant failure must also be regressed
-  against the Pipe.
-- **Rollback:** remove only the failing index from the explicit allowlist and
-  retain the accepted Pipe/index-29 paths.
+The automatic-command A/B is complete and rejected. It proved enemy reaction,
+but Retail's wind-up attacked only after the physical hit. The player and
+packaged settings are back to OFF. Do not re-enable command 17 automatically to
+solve anticipation.
+
+- **Established baseline:** the corrected latch accepted six actor hits with a
+  completed rearm between every accept and blocked 44 duplicates. Fast visible
+  kills are not explained by repeated callbacks in a single swing. The nearest
+  slow actor contact was 0.4729 m HMD-XZ to the Retail surface and overlapped
+  the configured capsule. Physical-only swings did not cause visible AI
+  anticipation; five manual Retail attack-command trials did. Enemies visibly
+  died in one or two physical hits. A later tester clarification establishes
+  that a short command-28 activation visibly enabled many blocks without a
+  continuous trigger hold. Whether the weapon collider alone decided those
+  blocks remains a hypothesis.
+- **Rejected A/B:** with all Pipe damage/collider/weight values fixed, 35
+  automatic threshold crossings reached command 17 and 12 physical contacts
+  reached the native dispatcher. Enemies visibly reacted, but the unwanted
+  Retail wind-up attacked after the physical hit. This fails timing and risks a
+  second attack; it does not prove a second damage application.
+- **Minimal diagnostic:** trace the verified command-17 path by pipeline stage
+  from player attack-state transition to AI observation and animation/window
+  activation. Instrument a bounded candidate only after identity and surrounding
+  bytes establish it; do not guess an AI object, offset, callback, or vtable
+  slot. The first pass must be read-only.
+- **Cooldown follow-up:** defer the observed 62 ms/450 ms violation while the
+  feature remains OFF. Preserve the evidence if the swing state is reused.
+- **Damage follow-up:** before tuning strength, add a bounded read-only semantic
+  name for Retail's collision node and a tester marker that joins a deliberate
+  head/body strike to visible defeat. Raw handles `0x06`/`0x26` and native
+  dispatch count do not prove a head multiplier.
+- **Block follow-up:** equip Pipe, close the menu, and avoid left trigger. First
+  confirm `BLOCK COL` reports attack fallback and the blue block preview exactly
+  overlaps the attack capsule; then make one visible block-collider adjustment
+  and confirm only the block capsule moves. Enter the saved pose and require a
+  classified `blocking_argument=1` / `role=block` record whose updates report
+  `continuous_lifetime=0`; the block capsule must turn cyan while the attack
+  capsule remains role-independent. Leave, wait beyond the displayed finite
+  Retail window, and take an enemy strike outside the pose. Repeat entry/exit,
+  then perform a normal physical hit and require a separate
+  `blocking_argument=0` / `role=attack` record with `continuous_lifetime=1`.
+  Only after that baseline, enable a single conservative custom-window value
+  and verify `retail_ms` versus `applied_ms`. Record visible defense, health,
+  command edges, pose errors, collision role, both capsule positions, and
+  timing independently.
+- **Block success:** defense does not remain latched outside the pose, re-entry
+  works, every block record stays Retail-window-owned, and attack-only lifetime
+  classification preserves normal physical hits.
+- **Telegraph success:** a qualified fast swing can expose anticipation to AI without a
+  Retail player animation, delayed attack window, or pre-contact action haptic;
+  damage still requires accepted physical contact.
+- **Failure interpretation:** if AI anticipation cannot be isolated from the
+  Retail attack state, keep automatic swing attack OFF rather than accepting a
+  delayed second attack. If the automatic pose produces correct command edges
+  but no visible defense, move block investigation into Retail state/eligibility
+  or the spatial interception hypothesis. If a finite classified block record
+  disappears but defense still remains, instrument the distinct Retail
+  `BLOCKWINDOW`/server state; do not add repeated stimuli or write the weapon
+  state directly.
+- **Regression:** collision, native dispatch, AI, player movement, firearm,
+  forensic, keyboard/mouse, and host-absent fallbacks remain unchanged.
+- **Rollback:** already complete for the rejected ON override. Restore the
+  preceding staged DLL only if new diagnostic plumbing disturbs runtime behavior.
 - **Headset required:** yes.
 
-Do not retune the accepted Pipe collider or 7.25/0.12 hit baseline while
-promoting another weapon. Changing any native capsule length or radius after
-seeding requires another seed because Retail fixes those dimensions when it
-creates the primitive.
+The isolated packaged-fallback smoke and representative ordinary-firearm
+inventory remain queued after this combat gate.
 
 ## Verified facts and known unknowns
 
@@ -475,17 +1325,40 @@ locations. Exact evidence is in M0–M5, not repeated here.
 
 Still unresolved:
 
+- representative 90 Hz performance headroom under the current gameplay, IK,
+  and diagnostic workload: the 1 August request-pacing acceptance remains
+  valid, while 11-12 August feature-heavy runs show lower imported-pair rate
+  and higher image age. A controlled one-change-at-a-time A/B must separate
+  diagnostic I/O/drawing, game render time, Classic-D3D9 transfer, host import,
+  and host GPU work; see [`CONDEMNED-PERFORMANCE.md`](CONDEMNED-PERFORMANCE.md);
+- an intermittent reported HMD horizon pitch offset: the current renderer
+  composes the complete untouched Retail camera rotation with relative HMD
+  rotation and suppresses native mouse pitch while the head snapshot is fresh.
+  Residual Retail base pitch is the leading source-supported hypothesis, but a
+  bounded pre/post-F6 trace must separate Retail base, HMD-relative, and final
+  eye orientation before any fix;
 - representative headset validation and asset-specific grip/collider tuning
   across the newly mapped one-handed allowlist; only index 29 has crossed the
   shared constructor/contact/native-forward boundary so far;
 - headset acceptance and final tuning for Hit Speed/Rearm Travel plus future
   impact-energy and per-material scaling;
-- automatic equip-time collision-body seeding with a verified safe lifecycle;
+- live acceptance of the automatic equip-time collision-body seed candidate,
+  including pickup animation, nearby-target damage suppression, haptic
+  suppression, retry/reset behavior, and immediate post-ready physical hits;
+- a truly seedless collision lifecycle independent of Retail attack creation;
 - a safe standalone weapon object's creation, ownership, collision constraints,
   resistance, throwing, blocking, and destruction lifecycle;
 - permanent visible weapon/body/hand integration across every load, death,
-  cutscene, execution, and weapon transition;
-- complete weapon catalog profiles, firearm/forensic-tool behavior, impact
+  cutscene, execution, and weapon transition; the arm-IK game-state generation,
+  transactional reinstall, and per-side heartbeat candidate is implemented and
+  automated-tested but still awaits the bounded live lifecycle gate;
+  the empty-right-hand raw-grip target and guided global correction are
+  implemented and automated-tested, but still require headset alignment,
+  transition, tracking-loss, weapon-isolation, and restart acceptance;
+- forensic ready selection plus mapped Scanner and Item Camera target/action
+  paths are live accepted; remaining contextual transitions, prompts, stow, and
+  broader scene-lifecycle behavior remain;
+- complete weapon catalog profiles, representative firearm behavior, impact
   haptics, HUD/full-screen effect classification, and comfort treatment;
 - isolated save persistence, long-session/release regression, installer flow,
   and support for any game binary other than verified Steam 1.0.314.0.

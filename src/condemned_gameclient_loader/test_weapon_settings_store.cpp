@@ -38,10 +38,160 @@ int main() {
             static_cast<unsigned long>(GetCurrentProcessId())) <= 0) {
         return Fail("temporary settings path formatting failed");
     }
+    wchar_t defaultsPath[MAX_PATH]{};
+    if (swprintf_s(
+            defaultsPath,
+            L"%scondemnedvr-default-settings-test-%lu.ini",
+            temporaryDirectory,
+            static_cast<unsigned long>(GetCurrentProcessId())) <= 0) {
+        return Fail("temporary default settings path formatting failed");
+    }
     DeleteFileW(path);
+    DeleteFileW(defaultsPath);
     if (!SetEnvironmentVariableW(
             L"CONDEMNEDVR_SETTINGS_PATH", path)) {
         return Fail("settings path override failed");
+    }
+    if (!SetEnvironmentVariableW(
+            L"CONDEMNEDVR_DEFAULT_SETTINGS_PATH", defaultsPath)) {
+        return Fail("default settings path override failed");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_32", L"settings",
+            L"2,1,1,4.75,0.8,120,600,3,1.5,10,8,0.8,0.65,1,2.5,0.2",
+            defaultsPath) ||
+        !WritePrivateProfileStringW(
+            L"debug", L"draw", L"1,0,0", defaultsPath) ||
+        !WritePrivateProfileStringW(
+            L"developer", L"tool_menu_shortcut", L"1,1",
+            defaultsPath) ||
+        !WritePrivateProfileStringW(
+            L"arm_ik", L"empty_right_hand",
+            L"1,0,0,0,0,0,0,1",
+            defaultsPath)) {
+        return Fail("packaged defaults fixture must be writable");
+    }
+
+    ToolMenuDebugDrawSettings loadedDebug{true, true, true};
+    if (LoadDebugDrawSettings(loadedDebug) !=
+            WeaponSettingsStoreResult::Ok ||
+        loadedDebug.colliderVisible ||
+        loadedDebug.blockColliderVisible ||
+        loadedDebug.controllerVisible) {
+        return Fail(
+            "legacy packaged debug defaults must migrate with block draw hidden");
+    }
+    ToolMenuDebugDrawSettings enabledDebug{true, true, true};
+    if (SaveDebugDrawSettings(enabledDebug) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("enabled debug settings must save");
+    }
+    loadedDebug = {};
+    if (LoadDebugDrawSettings(loadedDebug) !=
+            WeaponSettingsStoreResult::Ok ||
+        !loadedDebug.colliderVisible ||
+        !loadedDebug.blockColliderVisible ||
+        !loadedDebug.controllerVisible) {
+        return Fail("enabled debug settings must round-trip");
+    }
+    ToolMenuDebugDrawSettings hiddenDebug{};
+    if (SaveDebugDrawSettings(hiddenDebug) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("disabled debug settings must save");
+    }
+    loadedDebug = {true, true, true};
+    if (LoadDebugDrawSettings(loadedDebug) !=
+            WeaponSettingsStoreResult::Ok ||
+        loadedDebug.colliderVisible ||
+        loadedDebug.blockColliderVisible ||
+        loadedDebug.controllerVisible) {
+        return Fail("disabled debug settings must survive reload");
+    }
+
+    bool toolMenuShortcutEnabled = false;
+    if (LoadToolMenuShortcutEnabled(toolMenuShortcutEnabled) !=
+            WeaponSettingsStoreResult::Ok ||
+        !toolMenuShortcutEnabled) {
+        return Fail(
+            "packaged Developer Tools preference must preserve the shortcut");
+    }
+    if (SaveToolMenuShortcutEnabled(false) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("disabled tool-menu shortcut preference must save");
+    }
+    toolMenuShortcutEnabled = true;
+    if (LoadToolMenuShortcutEnabled(toolMenuShortcutEnabled) !=
+            WeaponSettingsStoreResult::Ok ||
+        toolMenuShortcutEnabled) {
+        return Fail("disabled tool-menu shortcut must survive reload");
+    }
+    if (SaveToolMenuShortcutEnabled(true) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("enabled tool-menu shortcut preference must save");
+    }
+
+    EmptyRightHandAlignmentSettings loadedEmptyHand{};
+    if (LoadEmptyRightHandAlignmentSettings(loadedEmptyHand) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedEmptyHand.localPositionOffsetUnits.x, 0.0F) ||
+        !Near(loadedEmptyHand.localRotationOffset.w, 1.0F)) {
+        return Fail(
+            "packaged empty-hand alignment must default to identity");
+    }
+    EmptyRightHandAlignmentSettings expectedEmptyHand{};
+    expectedEmptyHand.localPositionOffsetUnits =
+        {1.25F, -2.5F, 3.75F};
+    constexpr float kHalfSqrtTwo = 0.70710678118F;
+    expectedEmptyHand.localRotationOffset =
+        {0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo};
+    if (SaveEmptyRightHandAlignmentSettings(expectedEmptyHand) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("valid empty-hand alignment must save");
+    }
+    loadedEmptyHand = {};
+    if (LoadEmptyRightHandAlignmentSettings(loadedEmptyHand) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedEmptyHand.localPositionOffsetUnits.x, 1.25F) ||
+        !Near(loadedEmptyHand.localPositionOffsetUnits.y, -2.5F) ||
+        !Near(loadedEmptyHand.localPositionOffsetUnits.z, 3.75F) ||
+        !Near(loadedEmptyHand.localRotationOffset.y, kHalfSqrtTwo) ||
+        !Near(loadedEmptyHand.localRotationOffset.w, kHalfSqrtTwo)) {
+        return Fail(
+            "empty-hand alignment must round-trip independently of weapons");
+    }
+    EmptyRightHandAlignmentSettings invalidEmptyHand =
+        expectedEmptyHand;
+    invalidEmptyHand.localPositionOffsetUnits.x =
+        kEmptyRightHandMaximumPositionOffsetUnits + 0.01F;
+    if (SaveEmptyRightHandAlignmentSettings(invalidEmptyHand) !=
+            WeaponSettingsStoreResult::InvalidArgument) {
+        return Fail(
+            "out-of-range empty-hand alignment must not save");
+    }
+    if (!WritePrivateProfileStringW(
+            L"arm_ik", L"empty_right_hand",
+            L"1,0,0,0,0,0,0,0", path) ||
+        LoadEmptyRightHandAlignmentSettings(loadedEmptyHand) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !Near(loadedEmptyHand.localPositionOffsetUnits.x, 1.25F)) {
+        return Fail(
+            "malformed player empty-hand alignment must fail closed");
+    }
+
+    ToolMenuMeleeSettings packagedMelee{};
+    if (LoadWeaponToolSettings(
+            32, PhysicalMeleeProfileId::Pipe, packagedMelee) !=
+            WeaponSettingsStoreResult::Ok ||
+        !packagedMelee.swingAttackEnabled ||
+        !packagedMelee.requireSwingForContactDamage ||
+        !Near(packagedMelee.hitSpeedMetersPerSecond, 2.5F) ||
+        !Near(packagedMelee.contactRearmDistanceMeters, 0.2F) ||
+        !Near(
+            packagedMelee.swingTriggerSpeedMetersPerSecond, 4.75F) ||
+        packagedMelee.swingPulseMilliseconds != 120U ||
+        !Near(packagedMelee.handlingWeight, 1.5F)) {
+        return Fail(
+            "a missing player key must load its packaged weapon default");
     }
 
     ToolMenuMeleeSettings expected{};
@@ -103,6 +253,48 @@ int main() {
             "version-one settings must load with safe hit defaults");
     }
 
+    PhysicalMeleeBlockPoseSettings expectedBlock{};
+    expectedBlock.headRelativePositionMeters = {
+        0.35F, -0.25F, 0.50F};
+    expectedBlock.headRelativeRotation = {
+        0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo};
+    expectedBlock.positionToleranceMeters = 0.16F;
+    expectedBlock.angleToleranceDegrees = 30.0F;
+    expectedBlock.enabled = true;
+    expectedBlock.captured = true;
+    if (SaveWeaponBlockPoseSettings(
+            32, PhysicalMeleeProfileId::Pipe, expectedBlock) !=
+        WeaponSettingsStoreResult::Ok) {
+        return Fail("valid block-pose settings must save");
+    }
+    PhysicalMeleeBlockPoseSettings loadedBlock{};
+    if (LoadWeaponBlockPoseSettings(
+            32, PhysicalMeleeProfileId::Pipe, loadedBlock) !=
+            WeaponSettingsStoreResult::Ok ||
+        !loadedBlock.enabled || !loadedBlock.captured ||
+        !Near(loadedBlock.headRelativePositionMeters.x, 0.35F) ||
+        !Near(loadedBlock.headRelativePositionMeters.y, -0.25F) ||
+        !Near(loadedBlock.headRelativePositionMeters.z, 0.50F) ||
+        !Near(loadedBlock.headRelativeRotation.y, kHalfSqrtTwo) ||
+        !Near(loadedBlock.positionToleranceMeters, 0.16F) ||
+        !Near(loadedBlock.angleToleranceDegrees, 30.0F)) {
+        return Fail("saved block-pose settings must round-trip exactly");
+    }
+    if (LoadWeaponBlockPoseSettings(
+            32, PhysicalMeleeProfileId::Plank, loadedBlock) !=
+            WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail("block poses must reject changed profile identity");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_11", L"block_pose",
+            L"1,2,1,1,0.2,-0.2,0.4,0,0,0,0,0.18,25",
+            path) ||
+        LoadWeaponBlockPoseSettings(
+            11, PhysicalMeleeProfileId::Crowbar, loadedBlock) !=
+            WeaponSettingsStoreResult::ParseFailed) {
+        return Fail("invalid block-pose quaternions must fail closed");
+    }
+
 
     ToolMenuColliderSettings expectedCollider{};
     expectedCollider.positionOffsetUnits = {1.0F, -2.0F, 3.0F};
@@ -132,9 +324,84 @@ int main() {
     }
     if (LoadWeaponColliderSettings(
             32, PhysicalMeleeProfileId::Plank, loadedCollider) !=
-        WeaponSettingsStoreResult::ProfileMismatch) {
+            WeaponSettingsStoreResult::ProfileMismatch) {
         return Fail(
             "collider settings must reject a changed profile identity");
+    }
+
+    ToolMenuColliderSettings loadedBlockCollider = expectedCollider;
+    if (LoadWeaponBlockColliderSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            loadedBlockCollider) !=
+            WeaponSettingsStoreResult::NotFound ||
+        !Near(loadedBlockCollider.lengthUnits, 84.5F)) {
+        return Fail(
+            "a missing dedicated block collider must remain distinguishable from attack geometry");
+    }
+    ToolMenuColliderSettings expectedBlockCollider = expectedCollider;
+    expectedBlockCollider.positionOffsetUnits = {-4.0F, 5.0F, 6.0F};
+    expectedBlockCollider.rotationOffsetDegrees = {-15.0F, 25.0F, 35.0F};
+    expectedBlockCollider.lengthUnits = 62.5F;
+    expectedBlockCollider.radiusUnits = 7.0F;
+    expectedBlockCollider.reversed = false;
+    if (SaveWeaponBlockColliderSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            expectedBlockCollider) != WeaponSettingsStoreResult::Ok) {
+        return Fail("valid dedicated block collider settings must save");
+    }
+    loadedBlockCollider = {};
+    if (LoadWeaponBlockColliderSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            loadedBlockCollider) != WeaponSettingsStoreResult::Ok ||
+        !Near(loadedBlockCollider.positionOffsetUnits.x, -4.0F) ||
+        !Near(loadedBlockCollider.positionOffsetUnits.y, 5.0F) ||
+        !Near(loadedBlockCollider.positionOffsetUnits.z, 6.0F) ||
+        !Near(loadedBlockCollider.rotationOffsetDegrees.x, -15.0F) ||
+        !Near(loadedBlockCollider.rotationOffsetDegrees.y, 25.0F) ||
+        !Near(loadedBlockCollider.rotationOffsetDegrees.z, 35.0F) ||
+        !Near(loadedBlockCollider.lengthUnits, 62.5F) ||
+        !Near(loadedBlockCollider.radiusUnits, 7.0F) ||
+        loadedBlockCollider.reversed) {
+        return Fail(
+            "dedicated block collider settings must round-trip independently");
+    }
+    if (LoadWeaponBlockColliderSettings(
+            32, PhysicalMeleeProfileId::Plank,
+            loadedBlockCollider) !=
+            WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "block colliders must reject a changed profile identity");
+    }
+
+    ToolMenuBlockTimingSettings expectedBlockTiming{};
+    expectedBlockTiming.overrideEnabled = true;
+    expectedBlockTiming.collisionWindowMilliseconds = 725U;
+    if (SaveWeaponBlockTimingSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            expectedBlockTiming) != WeaponSettingsStoreResult::Ok) {
+        return Fail("valid block timing settings must save");
+    }
+    ToolMenuBlockTimingSettings loadedBlockTiming{};
+    if (LoadWeaponBlockTimingSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            loadedBlockTiming) != WeaponSettingsStoreResult::Ok ||
+        !loadedBlockTiming.overrideEnabled ||
+        loadedBlockTiming.collisionWindowMilliseconds != 725U) {
+        return Fail("block timing settings must round-trip exactly");
+    }
+    if (LoadWeaponBlockTimingSettings(
+            32, PhysicalMeleeProfileId::Plank,
+            loadedBlockTiming) !=
+            WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "block timing must reject a changed profile identity");
+    }
+    expectedBlockTiming.collisionWindowMilliseconds = 99U;
+    if (SaveWeaponBlockTimingSettings(
+            32, PhysicalMeleeProfileId::Pipe,
+            expectedBlockTiming) !=
+            WeaponSettingsStoreResult::InvalidArgument) {
+        return Fail("out-of-range block timing must fail closed");
     }
 
     WeaponGripSettings expectedGrip{};
@@ -237,6 +504,19 @@ int main() {
         return Fail(
             "new one-handed melee settings must inherit the saved pipe record");
     }
+    PhysicalMeleeBlockPoseSettings inheritedBlock{};
+    if (LoadWeaponBlockPoseSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedBlock, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        !inheritedPipeBaseline ||
+        !inheritedBlock.enabled || !inheritedBlock.captured ||
+        !Near(inheritedBlock.headRelativePositionMeters.x, 0.35F) ||
+        !Near(inheritedBlock.positionToleranceMeters, 0.16F) ||
+        !Near(inheritedBlock.angleToleranceDegrees, 30.0F)) {
+        return Fail(
+            "new one-handed block poses must inherit the saved pipe record");
+    }
     ToolMenuColliderSettings inheritedCollider{};
     if (LoadWeaponColliderSettingsWithPipeOneHandedFallback(
             inheritedWeaponIndex, inheritedProfile.id,
@@ -291,6 +571,28 @@ int main() {
         inheritedPipeBaseline) {
         return Fail(
             "ordinary firearms must not borrow one-handed melee settings");
+    }
+    if (LoadWeaponBlockPoseSettingsWithPipeOneHandedFallback(
+            7, PhysicalMeleeProfileId::GenericOneHanded,
+            inheritedBlock, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::NotFound ||
+        inheritedPipeBaseline) {
+        return Fail(
+            "ordinary firearms must not borrow a melee guard pose");
+    }
+
+    PhysicalMeleeBlockPoseSettings clearedBlock{};
+    if (SaveWeaponBlockPoseSettings(
+            inheritedWeaponIndex, inheritedProfile.id,
+            clearedBlock) != WeaponSettingsStoreResult::Ok ||
+        LoadWeaponBlockPoseSettingsWithPipeOneHandedFallback(
+            inheritedWeaponIndex, inheritedProfile.id,
+            inheritedBlock, inheritedPipeBaseline) !=
+            WeaponSettingsStoreResult::Ok ||
+        inheritedPipeBaseline || inheritedBlock.enabled ||
+        inheritedBlock.captured) {
+        return Fail(
+            "a local cleared guard pose must shadow the Pipe fallback");
     }
 
     ToolMenuMeleeSettings localOneHanded = expected;
@@ -380,7 +682,146 @@ int main() {
             "version-one elbow records must load with safe left-hand defaults");
     }
 
+    if (!WritePrivateProfileStringW(
+            L"debug", L"draw", L"1,2,0", path)) {
+        return Fail("malformed player override fixture must be writable");
+    }
+    ToolMenuDebugDrawSettings rejectedDebug{true, true, true};
+    if (LoadDebugDrawSettings(rejectedDebug) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !rejectedDebug.colliderVisible ||
+        !rejectedDebug.blockColliderVisible ||
+        !rejectedDebug.controllerVisible) {
+        return Fail(
+            "a malformed player override must fail closed instead of "
+            "falling through to packaged defaults");
+    }
+    if (!WritePrivateProfileStringW(
+            L"developer", L"tool_menu_shortcut", L"1,2", path)) {
+        return Fail("malformed Developer Tools fixture must be writable");
+    }
+    bool rejectedShortcut = false;
+    if (LoadToolMenuShortcutEnabled(rejectedShortcut) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        rejectedShortcut) {
+        return Fail(
+            "malformed Developer Tools values must reject without mutation");
+    }
+
     DeleteFileW(path);
+    DeleteFileW(defaultsPath);
+    SetEnvironmentVariableW(
+        L"CONDEMNEDVR_DEFAULT_SETTINGS_PATH", nullptr);
+
+    ToolMenuDebugDrawSettings shippedDebug{true, true, true};
+    if (LoadDebugDrawSettings(shippedDebug) !=
+            WeaponSettingsStoreResult::Ok ||
+        shippedDebug.colliderVisible ||
+        shippedDebug.blockColliderVisible ||
+        shippedDebug.controllerVisible) {
+        return Fail(
+            "the real packaged debug settings must parse and stay hidden");
+    }
+
+    bool shippedShortcut = false;
+    if (LoadToolMenuShortcutEnabled(shippedShortcut) !=
+            WeaponSettingsStoreResult::Ok ||
+        !shippedShortcut) {
+        return Fail(
+            "the real packaged Developer Tools preference must parse enabled");
+    }
+
+    ToolMenuMeleeSettings shippedPipe{};
+    if (LoadWeaponToolSettings(
+            32, PhysicalMeleeProfileId::Pipe, shippedPipe) !=
+            WeaponSettingsStoreResult::Ok ||
+        shippedPipe.swingAttackEnabled ||
+        !shippedPipe.requireSwingForContactDamage ||
+        !Near(shippedPipe.hitSpeedMetersPerSecond, 7.25F) ||
+        !Near(shippedPipe.contactRearmDistanceMeters, 0.12F)) {
+        return Fail(
+            "the real packaged pipe baseline must parse with accepted tuning");
+    }
+
+    struct PackagedRecordExpectation {
+        std::int32_t weaponIndex;
+        PhysicalMeleeProfileId profileId;
+        bool melee;
+        bool collider;
+        bool grip;
+        bool rightHandIk;
+    };
+    constexpr PackagedRecordExpectation packagedRecords[] = {
+        {0, PhysicalMeleeProfileId::Plank, true, false, false, false},
+        {3, PhysicalMeleeProfileId::GenericOneHanded,
+            false, true, true, true},
+        {4, PhysicalMeleeProfileId::GenericOneHanded,
+            false, true, true, true},
+        {17, PhysicalMeleeProfileId::FireAxe, true, false, true, true},
+        {30, PhysicalMeleeProfileId::GenericOneHanded,
+            false, false, false, true},
+        {32, PhysicalMeleeProfileId::Pipe, true, true, true, true},
+        {46, PhysicalMeleeProfileId::GenericOneHanded,
+            true, true, true, true},
+        {76, PhysicalMeleeProfileId::GenericOneHanded,
+            true, true, true, true},
+        {77, PhysicalMeleeProfileId::GenericOneHanded,
+            true, false, true, true},
+    };
+    for (const PackagedRecordExpectation& expectedRecord :
+         packagedRecords) {
+        ToolMenuMeleeSettings melee{};
+        ToolMenuColliderSettings collider{};
+        WeaponGripSettings grip{};
+        ToolMenuRightHandIkSettings rightHandIk{};
+        if ((expectedRecord.melee &&
+             LoadWeaponToolSettings(
+                 expectedRecord.weaponIndex,
+                 expectedRecord.profileId, melee) !=
+                 WeaponSettingsStoreResult::Ok) ||
+            (expectedRecord.collider &&
+             LoadWeaponColliderSettings(
+                 expectedRecord.weaponIndex,
+                 expectedRecord.profileId, collider) !=
+                 WeaponSettingsStoreResult::Ok) ||
+            (expectedRecord.grip &&
+             LoadWeaponGripSettings(
+                 expectedRecord.weaponIndex,
+                 expectedRecord.profileId, grip) !=
+                 WeaponSettingsStoreResult::Ok) ||
+            (expectedRecord.rightHandIk &&
+             LoadWeaponRightHandIkSettings(
+                 expectedRecord.weaponIndex,
+                 expectedRecord.profileId, rightHandIk) !=
+                 WeaponSettingsStoreResult::Ok)) {
+            return Fail(
+                "every declared record in the real packaged settings "
+                "must parse");
+        }
+    }
+
+    fearvr::ArmIkTuning shippedArmIk{};
+    if (LoadArmIkTuning(shippedArmIk) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(shippedArmIk.elbowOutward, 1.0F) ||
+        !Near(shippedArmIk.leftHandPitchDegrees, 175.0F)) {
+        return Fail("the real packaged arm IK baseline must parse");
+    }
+
+    EmptyRightHandAlignmentSettings shippedEmptyHand{};
+    if (LoadEmptyRightHandAlignmentSettings(shippedEmptyHand) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(shippedEmptyHand.localPositionOffsetUnits.x, 0.0F) ||
+        !Near(shippedEmptyHand.localPositionOffsetUnits.y, 0.0F) ||
+        !Near(shippedEmptyHand.localPositionOffsetUnits.z, 0.0F) ||
+        !Near(shippedEmptyHand.localRotationOffset.x, 0.0F) ||
+        !Near(shippedEmptyHand.localRotationOffset.y, 0.0F) ||
+        !Near(shippedEmptyHand.localRotationOffset.z, 0.0F) ||
+        !Near(shippedEmptyHand.localRotationOffset.w, 1.0F)) {
+        return Fail(
+            "the real packaged empty-hand alignment must parse as identity");
+    }
+
     SetEnvironmentVariableW(L"CONDEMNEDVR_SETTINGS_PATH", nullptr);
     return 0;
 }

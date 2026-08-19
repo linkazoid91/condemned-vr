@@ -286,6 +286,100 @@ struct PhysicalMeleeSwingAttackResult {
     bool rearmed{false};
 };
 
+// A supported weapon may need one ordinary Retail Fire edge before its native
+// attack collision body exists. Keep that compatibility handoff separate from
+// the rejected motion-triggered swing adapter: it runs once per stable equip,
+// waits for exact native-body confirmation, and bounds every retry.
+constexpr std::uint64_t
+    kPhysicalMeleeAutomaticSeedStableMilliseconds = 250U;
+constexpr std::uint64_t
+    kPhysicalMeleeAutomaticSeedPulseMilliseconds = 100U;
+constexpr std::uint64_t
+    kPhysicalMeleeAutomaticSeedConfirmationMilliseconds = 2'000U;
+constexpr std::uint64_t
+    kPhysicalMeleeAutomaticSeedSettleMilliseconds = 1'000U;
+constexpr std::uint64_t
+    kPhysicalMeleeAutomaticSeedRetryMilliseconds = 750U;
+constexpr std::uint32_t
+    kPhysicalMeleeAutomaticSeedMaximumAttempts = 3U;
+constexpr std::uint32_t
+    kPhysicalMeleeAutomaticSeedExpectedReadMask = 0x7U;
+
+enum class PhysicalMeleeAutomaticSeedPhase : std::uint8_t {
+    Inactive,
+    Stabilizing,
+    Pulse,
+    AwaitingConfirmation,
+    Settling,
+    Ready,
+    RetryWait,
+    Failed
+};
+
+inline const char* PhysicalMeleeAutomaticSeedPhaseName(
+    PhysicalMeleeAutomaticSeedPhase phase) noexcept {
+    switch (phase) {
+    case PhysicalMeleeAutomaticSeedPhase::Stabilizing:
+        return "stabilizing";
+    case PhysicalMeleeAutomaticSeedPhase::Pulse:
+        return "pulse";
+    case PhysicalMeleeAutomaticSeedPhase::AwaitingConfirmation:
+        return "awaiting_confirmation";
+    case PhysicalMeleeAutomaticSeedPhase::Settling:
+        return "settling";
+    case PhysicalMeleeAutomaticSeedPhase::Ready:
+        return "ready";
+    case PhysicalMeleeAutomaticSeedPhase::RetryWait:
+        return "retry_wait";
+    case PhysicalMeleeAutomaticSeedPhase::Failed:
+        return "failed";
+    default:
+        return "inactive";
+    }
+}
+
+struct PhysicalMeleeAutomaticSeedState {
+    std::int32_t weaponIndex{-1};
+    std::uintptr_t weaponToken{0U};
+    std::uintptr_t modelToken{0U};
+    std::uintptr_t confirmedCollisionObject{0U};
+    std::uint64_t stableSinceMilliseconds{0U};
+    std::uint64_t pulseEndMilliseconds{0U};
+    std::uint64_t confirmationDeadlineMilliseconds{0U};
+    std::uint64_t settleEndMilliseconds{0U};
+    std::uint64_t retryNotBeforeMilliseconds{0U};
+    std::uint64_t damageBlockEndMilliseconds{0U};
+    std::uint32_t attempts{0U};
+    PhysicalMeleeAutomaticSeedPhase phase{
+        PhysicalMeleeAutomaticSeedPhase::Inactive};
+    bool nativeOverrideConfirmed{false};
+};
+
+struct PhysicalMeleeAutomaticSeedResult {
+    PhysicalMeleeAutomaticSeedPhase phase{
+        PhysicalMeleeAutomaticSeedPhase::Inactive};
+    std::uint32_t attempts{0U};
+    bool pulseActive{false};
+    bool damageBlocked{false};
+    bool ready{false};
+    bool started{false};
+    bool timedOut{false};
+    bool retryScheduled{false};
+    bool terminalFailure{false};
+    bool becameReady{false};
+    bool bodyLost{false};
+};
+
+struct PhysicalMeleeAutomaticSeedConfirmation {
+    PhysicalMeleeAutomaticSeedPhase phase{
+        PhysicalMeleeAutomaticSeedPhase::Inactive};
+    std::uint64_t damageBlockEndMilliseconds{0U};
+    std::uint32_t attempts{0U};
+    bool accepted{false};
+    bool automaticTransaction{false};
+    bool readyImmediately{false};
+};
+
 // Gate-2 uses Retail's existing melee collision body only as a wall-contact
 // probe. Its origin follows the measured weapon endpoint, while Retail's
 // native impact dispatcher remains disabled until target classification and
@@ -326,6 +420,39 @@ struct PhysicalMeleeRigidTransform {
 
 struct PhysicalMeleeVisualProxyTransform {
     PhysicalMeleeRigidTransform objectWorld{};
+    bool active{false};
+};
+
+// Authored firearm sockets provide a model-local barrel frame. Flash is the
+// visible muzzle origin. Prefer Breach -> Flash when both positions exist;
+// Retail handguns that omit Breach use the authored Flash-socket +Z axis.
+enum class PhysicalFirearmMuzzleDirectionSource : std::uint8_t {
+    None = 0U,
+    BreachToFlash,
+    FlashSocketForward
+};
+
+inline const char* PhysicalFirearmMuzzleDirectionSourceName(
+    PhysicalFirearmMuzzleDirectionSource source) noexcept {
+    switch (source) {
+    case PhysicalFirearmMuzzleDirectionSource::BreachToFlash:
+        return "Breach_to_Flash";
+    case PhysicalFirearmMuzzleDirectionSource::FlashSocketForward:
+        return "Flash_socket_plus_Z";
+    case PhysicalFirearmMuzzleDirectionSource::None:
+        break;
+    }
+    return "none";
+}
+
+struct PhysicalFirearmMuzzleFrame {
+    fearvr::TrackingVector originUnits{};
+    fearvr::TrackingVector right{};
+    fearvr::TrackingVector up{};
+    fearvr::TrackingVector forward{};
+    float breachToFlashUnits{0.0F};
+    PhysicalFirearmMuzzleDirectionSource directionSource{
+        PhysicalFirearmMuzzleDirectionSource::None};
     bool active{false};
 };
 
@@ -486,7 +613,8 @@ enum class PhysicalMeleeContactReason : std::uint8_t {
     InvalidFrame,
     OutsideConfiguredCollider,
     SwingNotQualified,
-    ContactLatched
+    ContactLatched,
+    AutomaticSeedSuppressed
 };
 
 struct PhysicalMeleeContactState {
@@ -1179,6 +1307,292 @@ inline PhysicalMeleeSwingAttackResult UpdatePhysicalMeleeSwingAttack(
     return result;
 }
 
+inline std::uint64_t AddPhysicalMeleeAutomaticSeedMilliseconds(
+    std::uint64_t start,
+    std::uint64_t duration) noexcept {
+    const std::uint64_t maximum =
+        std::numeric_limits<std::uint64_t>::max();
+    return start > maximum - duration
+        ? maximum : start + duration;
+}
+
+inline void ResetPhysicalMeleeAutomaticSeed(
+    PhysicalMeleeAutomaticSeedState& state) noexcept {
+    state = {};
+}
+
+// Returns true only when the observed candidate changed. Invalid, unknown, or
+// incomplete identities clear the whole transaction; a later valid equip must
+// establish a fresh stability dwell before it can pulse.
+inline bool ObservePhysicalMeleeAutomaticSeedEquip(
+    PhysicalMeleeAutomaticSeedState& state,
+    std::int32_t weaponIndex,
+    std::uintptr_t weaponToken,
+    std::uintptr_t modelToken,
+    bool candidateValid) noexcept {
+    if (!candidateValid || weaponIndex < 0 ||
+        weaponToken == 0U || modelToken == 0U) {
+        const bool changed =
+            state.phase != PhysicalMeleeAutomaticSeedPhase::Inactive ||
+            state.weaponIndex != -1 ||
+            state.weaponToken != 0U ||
+            state.modelToken != 0U;
+        ResetPhysicalMeleeAutomaticSeed(state);
+        return changed;
+    }
+    if (state.weaponIndex == weaponIndex &&
+        state.weaponToken == weaponToken &&
+        state.modelToken == modelToken &&
+        state.phase != PhysicalMeleeAutomaticSeedPhase::Inactive) {
+        return false;
+    }
+    ResetPhysicalMeleeAutomaticSeed(state);
+    state.weaponIndex = weaponIndex;
+    state.weaponToken = weaponToken;
+    state.modelToken = modelToken;
+    state.phase = PhysicalMeleeAutomaticSeedPhase::Stabilizing;
+    return true;
+}
+
+inline bool PhysicalMeleeAutomaticSeedPulseIsActive(
+    const PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds) noexcept {
+    return nowMilliseconds != 0U &&
+        (state.phase == PhysicalMeleeAutomaticSeedPhase::Pulse ||
+         state.phase == PhysicalMeleeAutomaticSeedPhase::Settling) &&
+        state.pulseEndMilliseconds != 0U &&
+        nowMilliseconds < state.pulseEndMilliseconds;
+}
+
+inline bool PhysicalMeleeAutomaticSeedDamageIsBlocked(
+    const PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds) noexcept {
+    return nowMilliseconds != 0U && state.attempts != 0U &&
+        state.damageBlockEndMilliseconds != 0U &&
+        nowMilliseconds < state.damageBlockEndMilliseconds;
+}
+
+inline void PopulatePhysicalMeleeAutomaticSeedResult(
+    const PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds,
+    PhysicalMeleeAutomaticSeedResult& result) noexcept {
+    result.phase = state.phase;
+    result.attempts = state.attempts;
+    result.pulseActive = PhysicalMeleeAutomaticSeedPulseIsActive(
+        state, nowMilliseconds);
+    result.damageBlocked =
+        PhysicalMeleeAutomaticSeedDamageIsBlocked(
+            state, nowMilliseconds);
+    result.ready =
+        state.phase == PhysicalMeleeAutomaticSeedPhase::Ready;
+}
+
+inline void SchedulePhysicalMeleeAutomaticSeedRetry(
+    PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds,
+    PhysicalMeleeAutomaticSeedResult& result) noexcept {
+    state.nativeOverrideConfirmed = false;
+    state.confirmedCollisionObject = 0U;
+    state.stableSinceMilliseconds = 0U;
+    state.settleEndMilliseconds = 0U;
+    if (state.attempts >=
+        kPhysicalMeleeAutomaticSeedMaximumAttempts) {
+        state.phase = PhysicalMeleeAutomaticSeedPhase::Failed;
+        result.terminalFailure = true;
+        return;
+    }
+    state.phase = PhysicalMeleeAutomaticSeedPhase::RetryWait;
+    state.retryNotBeforeMilliseconds = std::max(
+        AddPhysicalMeleeAutomaticSeedMilliseconds(
+            nowMilliseconds,
+            kPhysicalMeleeAutomaticSeedRetryMilliseconds),
+        state.damageBlockEndMilliseconds);
+    result.retryScheduled = true;
+}
+
+inline PhysicalMeleeAutomaticSeedResult
+UpdatePhysicalMeleeAutomaticSeed(
+    PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds,
+    bool safeContext,
+    bool attackInputIdle,
+    bool collisionBodyLive) noexcept {
+    PhysicalMeleeAutomaticSeedResult result{};
+    if (nowMilliseconds == 0U ||
+        state.phase == PhysicalMeleeAutomaticSeedPhase::Inactive) {
+        PopulatePhysicalMeleeAutomaticSeedResult(
+            state, nowMilliseconds, result);
+        return result;
+    }
+
+    if (state.phase == PhysicalMeleeAutomaticSeedPhase::Ready) {
+        if (collisionBodyLive) {
+            PopulatePhysicalMeleeAutomaticSeedResult(
+                state, nowMilliseconds, result);
+            return result;
+        }
+        state.nativeOverrideConfirmed = false;
+        state.confirmedCollisionObject = 0U;
+        state.stableSinceMilliseconds = 0U;
+        state.pulseEndMilliseconds = 0U;
+        state.confirmationDeadlineMilliseconds = 0U;
+        state.settleEndMilliseconds = 0U;
+        state.retryNotBeforeMilliseconds = 0U;
+        state.damageBlockEndMilliseconds = 0U;
+        state.attempts = 0U;
+        state.phase = PhysicalMeleeAutomaticSeedPhase::Stabilizing;
+        result.bodyLost = true;
+    }
+
+    if (state.phase ==
+        PhysicalMeleeAutomaticSeedPhase::Settling) {
+        if (!safeContext || !collisionBodyLive) {
+            result.bodyLost = !collisionBodyLive;
+            SchedulePhysicalMeleeAutomaticSeedRetry(
+                state, nowMilliseconds, result);
+        } else if (nowMilliseconds >=
+                   state.settleEndMilliseconds) {
+            state.phase = PhysicalMeleeAutomaticSeedPhase::Ready;
+            state.damageBlockEndMilliseconds = 0U;
+            result.becameReady = true;
+        }
+        PopulatePhysicalMeleeAutomaticSeedResult(
+            state, nowMilliseconds, result);
+        return result;
+    }
+
+    if (state.phase == PhysicalMeleeAutomaticSeedPhase::Pulse) {
+        if (!safeContext) {
+            SchedulePhysicalMeleeAutomaticSeedRetry(
+                state, nowMilliseconds, result);
+        } else if (nowMilliseconds >=
+                   state.pulseEndMilliseconds) {
+            state.phase =
+                PhysicalMeleeAutomaticSeedPhase::AwaitingConfirmation;
+        }
+    }
+
+    if (state.phase ==
+        PhysicalMeleeAutomaticSeedPhase::AwaitingConfirmation) {
+        if (!safeContext) {
+            SchedulePhysicalMeleeAutomaticSeedRetry(
+                state, nowMilliseconds, result);
+        } else if (nowMilliseconds >=
+                   state.confirmationDeadlineMilliseconds) {
+            result.timedOut = true;
+            SchedulePhysicalMeleeAutomaticSeedRetry(
+                state, nowMilliseconds, result);
+        }
+    }
+
+    if (state.phase ==
+        PhysicalMeleeAutomaticSeedPhase::RetryWait) {
+        if (safeContext && attackInputIdle &&
+            nowMilliseconds >=
+                state.retryNotBeforeMilliseconds) {
+            state.phase =
+                PhysicalMeleeAutomaticSeedPhase::Stabilizing;
+            state.stableSinceMilliseconds = nowMilliseconds;
+        }
+        PopulatePhysicalMeleeAutomaticSeedResult(
+            state, nowMilliseconds, result);
+        return result;
+    }
+
+    if (state.phase == PhysicalMeleeAutomaticSeedPhase::Failed) {
+        PopulatePhysicalMeleeAutomaticSeedResult(
+            state, nowMilliseconds, result);
+        return result;
+    }
+
+    if (state.phase ==
+        PhysicalMeleeAutomaticSeedPhase::Stabilizing) {
+        if (!safeContext || !attackInputIdle) {
+            state.stableSinceMilliseconds = 0U;
+        } else if (state.stableSinceMilliseconds == 0U) {
+            state.stableSinceMilliseconds = nowMilliseconds;
+        } else if (nowMilliseconds -
+                       state.stableSinceMilliseconds >=
+                   kPhysicalMeleeAutomaticSeedStableMilliseconds) {
+            ++state.attempts;
+            state.phase = PhysicalMeleeAutomaticSeedPhase::Pulse;
+            state.pulseEndMilliseconds =
+                AddPhysicalMeleeAutomaticSeedMilliseconds(
+                    nowMilliseconds,
+                    kPhysicalMeleeAutomaticSeedPulseMilliseconds);
+            state.confirmationDeadlineMilliseconds =
+                AddPhysicalMeleeAutomaticSeedMilliseconds(
+                    nowMilliseconds,
+                    kPhysicalMeleeAutomaticSeedConfirmationMilliseconds);
+            state.damageBlockEndMilliseconds =
+                state.confirmationDeadlineMilliseconds;
+            state.settleEndMilliseconds = 0U;
+            state.retryNotBeforeMilliseconds = 0U;
+            state.nativeOverrideConfirmed = false;
+            state.confirmedCollisionObject = 0U;
+            result.started = true;
+        }
+    }
+
+    PopulatePhysicalMeleeAutomaticSeedResult(
+        state, nowMilliseconds, result);
+    return result;
+}
+
+inline PhysicalMeleeAutomaticSeedConfirmation
+ConfirmPhysicalMeleeAutomaticSeed(
+    PhysicalMeleeAutomaticSeedState& state,
+    std::uint64_t nowMilliseconds,
+    std::uint32_t nativeReadMask,
+    bool playerAttackClassified,
+    std::uintptr_t collisionObject) noexcept {
+    PhysicalMeleeAutomaticSeedConfirmation result{};
+    result.phase = state.phase;
+    result.attempts = state.attempts;
+    if (nowMilliseconds == 0U ||
+        state.phase == PhysicalMeleeAutomaticSeedPhase::Inactive ||
+        state.weaponIndex < 0 ||
+        state.weaponToken == 0U ||
+        state.modelToken == 0U ||
+        nativeReadMask !=
+            kPhysicalMeleeAutomaticSeedExpectedReadMask ||
+        !playerAttackClassified || collisionObject == 0U) {
+        return result;
+    }
+
+    state.nativeOverrideConfirmed = true;
+    state.confirmedCollisionObject = collisionObject;
+    const bool automaticTransaction = state.attempts != 0U &&
+        state.confirmationDeadlineMilliseconds != 0U &&
+        nowMilliseconds <= state.confirmationDeadlineMilliseconds;
+    if (automaticTransaction) {
+        state.phase = PhysicalMeleeAutomaticSeedPhase::Settling;
+        state.settleEndMilliseconds =
+            AddPhysicalMeleeAutomaticSeedMilliseconds(
+                nowMilliseconds,
+                kPhysicalMeleeAutomaticSeedSettleMilliseconds);
+        state.damageBlockEndMilliseconds = std::max(
+            state.pulseEndMilliseconds,
+            state.settleEndMilliseconds);
+    } else {
+        state.phase = PhysicalMeleeAutomaticSeedPhase::Ready;
+        state.pulseEndMilliseconds = 0U;
+        state.confirmationDeadlineMilliseconds = 0U;
+        state.settleEndMilliseconds = 0U;
+        state.retryNotBeforeMilliseconds = 0U;
+        state.damageBlockEndMilliseconds = 0U;
+    }
+
+    result.phase = state.phase;
+    result.damageBlockEndMilliseconds =
+        state.damageBlockEndMilliseconds;
+    result.attempts = state.attempts;
+    result.accepted = true;
+    result.automaticTransaction = automaticTransaction;
+    result.readyImmediately = !automaticTransaction;
+    return result;
+}
+
 inline fearvr::TrackingVector PhysicalMeleeEndpoint(
     const PhysicalMeleePose& pose,
     const fearvr::TrackingVector& localOffsetUnits) noexcept {
@@ -1199,6 +1613,73 @@ inline bool PhysicalMeleeRigidTransformIsValid(
         std::isfinite(rotationLengthSquared) &&
         rotationLengthSquared >= 0.25F &&
         rotationLengthSquared <= 4.0F;
+}
+
+inline bool ComposePhysicalMeleeRigidTransforms(
+    const PhysicalMeleeRigidTransform& parent,
+    const PhysicalMeleeRigidTransform& local,
+    PhysicalMeleeRigidTransform& world) noexcept {
+    if (!PhysicalMeleeRigidTransformIsValid(parent) ||
+        !PhysicalMeleeRigidTransformIsValid(local)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion parentRotation =
+        fearvr::Normalize(parent.rotation);
+    PhysicalMeleeRigidTransform composed{};
+    composed.positionUnits = PhysicalMeleeAdd(
+        parent.positionUnits,
+        fearvr::Rotate(parentRotation, local.positionUnits));
+    composed.rotation = fearvr::Multiply(
+        parentRotation, fearvr::Normalize(local.rotation));
+    if (!PhysicalMeleeRigidTransformIsValid(composed)) {
+        return false;
+    }
+    world = composed;
+    return true;
+}
+
+inline bool InvertPhysicalMeleeRigidTransform(
+    const PhysicalMeleeRigidTransform& transform,
+    PhysicalMeleeRigidTransform& inverse) noexcept {
+    if (!PhysicalMeleeRigidTransformIsValid(transform)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion inverseRotation =
+        fearvr::Conjugate(fearvr::Normalize(transform.rotation));
+    PhysicalMeleeRigidTransform inverted{};
+    inverted.positionUnits = fearvr::Rotate(
+        inverseRotation,
+        PhysicalMeleeScale(transform.positionUnits, -1.0F));
+    inverted.rotation = inverseRotation;
+    if (!PhysicalMeleeRigidTransformIsValid(inverted)) {
+        return false;
+    }
+    inverse = inverted;
+    return true;
+}
+
+// Preserves an attached frame while its parent-local reference changes.
+// If currentParent * currentAttached is the model-relative attachment, the
+// returned local transform satisfies nextParent * nextAttached identically.
+inline bool RebasePhysicalMeleeAttachedLocalTransform(
+    const PhysicalMeleeRigidTransform& currentParent,
+    const PhysicalMeleeRigidTransform& nextParent,
+    const PhysicalMeleeRigidTransform& currentAttached,
+    PhysicalMeleeRigidTransform& nextAttached) noexcept {
+    PhysicalMeleeRigidTransform nextParentInverse{};
+    PhysicalMeleeRigidTransform currentAttachment{};
+    PhysicalMeleeRigidTransform rebased{};
+    if (!InvertPhysicalMeleeRigidTransform(
+            nextParent, nextParentInverse) ||
+        !ComposePhysicalMeleeRigidTransforms(
+            currentParent, currentAttached,
+            currentAttachment) ||
+        !ComposePhysicalMeleeRigidTransforms(
+            nextParentInverse, currentAttachment, rebased)) {
+        return false;
+    }
+    nextAttached = rebased;
+    return true;
 }
 
 inline float PhysicalMeleeWrapDegrees(float degrees) noexcept {
@@ -1248,6 +1729,87 @@ ResolvePhysicalMeleeGripCalibrationRotation(
             calibration.localRotationDegrees));
 }
 
+// Converts the same Z * Y * X local correction back to readable degrees.
+// The gimbal branch chooses X = 0 and preserves the equivalent combined Z
+// rotation. Recomposition is checked so a malformed or ambiguous result
+// cannot silently become an authoritative saved calibration.
+inline bool PhysicalMeleeLocalRotationDegreesFromQuaternion(
+    const fearvr::TrackingQuaternion& rotation,
+    fearvr::TrackingVector& localRotationDegrees) noexcept {
+    localRotationDegrees = {};
+    const PhysicalMeleeRigidTransform validation{
+        {}, rotation};
+    if (!PhysicalMeleeRigidTransformIsValid(validation)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion q =
+        fearvr::Normalize(rotation);
+    const float sinY = std::clamp(
+        2.0F * (q.w * q.y - q.z * q.x),
+        -1.0F, 1.0F);
+    const float y = std::asin(sinY);
+    float x = 0.0F;
+    float z = 0.0F;
+    if (std::fabs(std::cos(y)) > 1.0e-5F) {
+        x = std::atan2(
+            2.0F * (q.w * q.x + q.y * q.z),
+            1.0F - 2.0F * (q.x * q.x + q.y * q.y));
+        z = std::atan2(
+            2.0F * (q.w * q.z + q.x * q.y),
+            1.0F - 2.0F * (q.y * q.y + q.z * q.z));
+    } else {
+        const float matrix12 =
+            2.0F * (q.x * q.y - q.w * q.z);
+        const float matrix22 =
+            1.0F - 2.0F * (q.x * q.x + q.z * q.z);
+        z = std::atan2(-matrix12, matrix22);
+    }
+    constexpr float kRadiansToDegrees =
+        180.0F / 3.14159265358979323846F;
+    localRotationDegrees = {
+        PhysicalMeleeWrapDegrees(x * kRadiansToDegrees),
+        PhysicalMeleeWrapDegrees(y * kRadiansToDegrees),
+        PhysicalMeleeWrapDegrees(z * kRadiansToDegrees)};
+    const fearvr::TrackingQuaternion recomposed =
+        fearvr::Normalize(
+            PhysicalMeleeLocalRotationFromDegrees(
+                localRotationDegrees));
+    const float dot = std::fabs(
+        q.x * recomposed.x + q.y * recomposed.y +
+        q.z * recomposed.z + q.w * recomposed.w);
+    return fearvr::IsFinite(localRotationDegrees) &&
+        std::isfinite(dot) && dot >= 0.9999F;
+}
+
+// Inverts O = D * inverse(G) to recover the model-local grip G from a
+// displayed reference object pose O and the desired controller pose D.
+inline bool SolvePhysicalMeleeModelLocalGrip(
+    const PhysicalMeleeRigidTransform& referenceObjectWorld,
+    const PhysicalMeleeRigidTransform& desiredGripWorld,
+    PhysicalMeleeRigidTransform& modelLocalGrip) noexcept {
+    if (!PhysicalMeleeRigidTransformIsValid(referenceObjectWorld) ||
+        !PhysicalMeleeRigidTransformIsValid(desiredGripWorld)) {
+        return false;
+    }
+    const fearvr::TrackingQuaternion objectRotation =
+        fearvr::Normalize(referenceObjectWorld.rotation);
+    const fearvr::TrackingQuaternion objectInverse =
+        fearvr::Conjugate(objectRotation);
+    const fearvr::TrackingVector worldDelta = PhysicalMeleeSubtract(
+        desiredGripWorld.positionUnits,
+        referenceObjectWorld.positionUnits);
+    PhysicalMeleeRigidTransform solved{};
+    solved.positionUnits = fearvr::Rotate(objectInverse, worldDelta);
+    solved.rotation = fearvr::Multiply(
+        objectInverse, fearvr::Normalize(desiredGripWorld.rotation));
+    if (!PhysicalMeleeRigidTransformIsValid(solved) ||
+        PhysicalMeleeLength(solved.positionUnits) > 300.0F) {
+        return false;
+    }
+    modelLocalGrip = solved;
+    return true;
+}
+
 // Places a model-local grip frame exactly on the tracked controller grip.
 // If G is the grip transform inside the model and D is the desired OpenXR
 // grip in world space, the model transform is O' = D * inverse(G).
@@ -1279,6 +1841,145 @@ ResolvePhysicalMeleeHeldModelTransform(
             modelLocalGripPositionUnits));
     result.active = PhysicalMeleeRigidTransformIsValid(
         result.objectWorld);
+    return result;
+}
+
+inline PhysicalFirearmMuzzleFrame ResolvePhysicalFirearmMuzzleFrame(
+    const PhysicalMeleeRigidTransform& objectWorld,
+    const PhysicalMeleeRigidTransform& flashLocal,
+    const PhysicalMeleeRigidTransform& breachLocal,
+    bool sourceFresh,
+    float minimumSocketSeparationUnits = 0.1F,
+    float maximumSocketSeparationUnits = 200.0F) noexcept {
+    PhysicalFirearmMuzzleFrame result{};
+    if (!sourceFresh ||
+        !PhysicalMeleeRigidTransformIsValid(objectWorld) ||
+        !PhysicalMeleeRigidTransformIsValid(flashLocal) ||
+        !PhysicalMeleeRigidTransformIsValid(breachLocal) ||
+        !std::isfinite(minimumSocketSeparationUnits) ||
+        !std::isfinite(maximumSocketSeparationUnits) ||
+        minimumSocketSeparationUnits <= 0.0F ||
+        maximumSocketSeparationUnits < minimumSocketSeparationUnits) {
+        return result;
+    }
+
+    const fearvr::TrackingVector localBarrel = PhysicalMeleeSubtract(
+        flashLocal.positionUnits, breachLocal.positionUnits);
+    result.breachToFlashUnits = PhysicalMeleeLength(localBarrel);
+    fearvr::TrackingVector localForward{};
+    if (!std::isfinite(result.breachToFlashUnits) ||
+        result.breachToFlashUnits < minimumSocketSeparationUnits ||
+        result.breachToFlashUnits > maximumSocketSeparationUnits ||
+        !PhysicalMeleeNormalizeVector(localBarrel, localForward)) {
+        result = {};
+        return result;
+    }
+
+    const fearvr::TrackingQuaternion objectRotation =
+        fearvr::Normalize(objectWorld.rotation);
+    const fearvr::TrackingQuaternion flashWorldRotation =
+        fearvr::Multiply(
+            objectRotation, fearvr::Normalize(flashLocal.rotation));
+    result.originUnits = PhysicalMeleeAdd(
+        objectWorld.positionUnits,
+        fearvr::Rotate(objectRotation, flashLocal.positionUnits));
+    if (!PhysicalMeleeNormalizeVector(
+            fearvr::Rotate(objectRotation, localForward),
+            result.forward)) {
+        result = {};
+        return result;
+    }
+
+    // Preserve the authored Flash-socket roll when possible. If its local +Y
+    // is parallel to the barrel, fall back deterministically to another
+    // visible-model axis before constructing a left-handed basis.
+    const fearvr::TrackingVector upReferences[] = {
+        fearvr::Rotate(flashWorldRotation, {0.0F, 1.0F, 0.0F}),
+        fearvr::Rotate(flashWorldRotation, {1.0F, 0.0F, 0.0F}),
+        fearvr::Rotate(objectRotation, {0.0F, 1.0F, 0.0F}),
+        fearvr::Rotate(objectRotation, {1.0F, 0.0F, 0.0F})};
+    bool upResolved = false;
+    for (const fearvr::TrackingVector& reference : upReferences) {
+        const fearvr::TrackingVector projected = PhysicalMeleeSubtract(
+            reference,
+            PhysicalMeleeScale(
+                result.forward,
+                PhysicalMeleeDot(reference, result.forward)));
+        if (PhysicalMeleeNormalizeVector(projected, result.up)) {
+            upResolved = true;
+            break;
+        }
+    }
+    if (!upResolved ||
+        !PhysicalMeleeNormalizeVector(
+            PhysicalMeleeCross(result.up, result.forward),
+            result.right) ||
+        !PhysicalMeleeNormalizeVector(
+            PhysicalMeleeCross(result.forward, result.right),
+            result.up) ||
+        !fearvr::IsFinite(result.originUnits)) {
+        result = {};
+        return result;
+    }
+
+    result.directionSource =
+        PhysicalFirearmMuzzleDirectionSource::BreachToFlash;
+    result.active = true;
+    return result;
+}
+
+inline PhysicalFirearmMuzzleFrame
+ResolvePhysicalFirearmMuzzleFrameFromFlashSocket(
+    const PhysicalMeleeRigidTransform& objectWorld,
+    const PhysicalMeleeRigidTransform& flashLocal,
+    bool sourceFresh) noexcept {
+    PhysicalFirearmMuzzleFrame result{};
+    if (!sourceFresh ||
+        !PhysicalMeleeRigidTransformIsValid(objectWorld) ||
+        !PhysicalMeleeRigidTransformIsValid(flashLocal)) {
+        return result;
+    }
+
+    const fearvr::TrackingQuaternion objectRotation =
+        fearvr::Normalize(objectWorld.rotation);
+    const fearvr::TrackingQuaternion flashWorldRotation =
+        fearvr::Multiply(
+            objectRotation, fearvr::Normalize(flashLocal.rotation));
+    result.originUnits = PhysicalMeleeAdd(
+        objectWorld.positionUnits,
+        fearvr::Rotate(objectRotation, flashLocal.positionUnits));
+    if (!PhysicalMeleeNormalizeVector(
+            fearvr::Rotate(
+                flashWorldRotation, {0.0F, 0.0F, 1.0F}),
+            result.forward)) {
+        return {};
+    }
+
+    const fearvr::TrackingVector authoredUp =
+        fearvr::Rotate(
+            flashWorldRotation, {0.0F, 1.0F, 0.0F});
+    const fearvr::TrackingVector projectedUp =
+        PhysicalMeleeSubtract(
+            authoredUp,
+            PhysicalMeleeScale(
+                result.forward,
+                PhysicalMeleeDot(
+                    authoredUp, result.forward)));
+    if (!PhysicalMeleeNormalizeVector(
+            projectedUp, result.up) ||
+        !PhysicalMeleeNormalizeVector(
+            PhysicalMeleeCross(result.up, result.forward),
+            result.right) ||
+        !PhysicalMeleeNormalizeVector(
+            PhysicalMeleeCross(result.forward, result.right),
+            result.up) ||
+        !fearvr::IsFinite(result.originUnits)) {
+        return {};
+    }
+
+    result.directionSource =
+        PhysicalFirearmMuzzleDirectionSource::FlashSocketForward;
+    result.active = true;
     return result;
 }
 
@@ -1348,7 +2049,8 @@ inline bool ShouldDispatchPhysicalMeleeNativeImpact(
     bool wallProxyEnabled,
     bool playerOwnedCollision,
     bool contactDamageEnabled = false,
-    bool contactAccepted = false) noexcept {
+    bool contactAccepted = false,
+    bool impactSuppressed = false) noexcept {
     // Enemy and unrecognised Retail melee are never subject to the local
     // physical-weapon gate. The player's proxy reaches Retail's native
     // dispatcher only for a newly qualified physical contact.
@@ -1356,16 +2058,18 @@ inline bool ShouldDispatchPhysicalMeleeNativeImpact(
             wallProxyEnabled, playerOwnedCollision)) {
         return true;
     }
-    return contactDamageEnabled && contactAccepted;
+    return !impactSuppressed &&
+        contactDamageEnabled && contactAccepted;
 }
 
 inline bool ShouldMaintainPhysicalMeleeCollision(
     bool contactDamageEnabled,
     bool playerOwnedCollision,
     bool collisionActive,
-    bool gameplayContextActive) noexcept {
+    bool gameplayContextActive,
+    bool attackCollision) noexcept {
     return contactDamageEnabled && playerOwnedCollision &&
-        collisionActive && gameplayContextActive;
+        collisionActive && gameplayContextActive && attackCollision;
 }
 
 inline void ResetPhysicalMeleeContactState(

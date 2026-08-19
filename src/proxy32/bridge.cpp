@@ -2190,7 +2190,8 @@ public:
     BOOL DrawOverlayTriangles(
         const FearVrOverlayLineVertex* vertices,
         std::uint32_t vertexCount) noexcept {
-        constexpr std::uint32_t kMaximumInputVertices = 24576U;
+        constexpr std::uint32_t kMaximumInputVertices =
+            FEARVR_OVERLAY_TRIANGLE_MAX_INPUT_VERTICES;
         if (vertices == nullptr || vertexCount < 3U ||
             (vertexCount % 3U) != 0U ||
             vertexCount > kMaximumInputVertices) {

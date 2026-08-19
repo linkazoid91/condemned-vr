@@ -38,12 +38,16 @@ $loaderSource = Assert-UnderCondemnedVrProjectRoot (
     Join-Path $cfg.ProjectRoot (
         'build\condemned-x86-vs\src\condemned_gameclient_loader\' +
         'RelWithDebInfo\GameClient.dll'))
+$defaultsSource = Assert-UnderCondemnedVrProjectRoot (
+    Join-Path $cfg.ProjectRoot (
+        'build\condemned-x86-vs\src\condemned_gameclient_loader\' +
+        'RelWithDebInfo\condemnedvr-defaults.ini'))
 $identityVerifier = Assert-UnderCondemnedVrProjectRoot (
     Join-Path $cfg.ProjectRoot (
         'build\condemned-x86-vs\src\condemned_gameclient_loader\' +
         'RelWithDebInfo\verify-condemned-gameclient.exe'))
 $originalSource = Join-Path $retailRoot 'Game\GameClient.dll'
-foreach ($required in @($loaderSource, $identityVerifier, $originalSource)) {
+foreach ($required in @($loaderSource, $defaultsSource, $identityVerifier, $originalSource)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required M1 input is missing: $required"
     }
@@ -77,6 +81,7 @@ if (Test-Path -LiteralPath $moduleDirectory) {
         }
         $allowedNames = @(
             'GameClient.dll',
+            'condemnedvr-defaults.ini',
             'GameOrig.dll',
             'condemnedvr-loader.log'
         )
@@ -94,6 +99,7 @@ New-Item -ItemType Directory -Path $userDirectory -Force | Out-Null
 
 $stagedFiles = [ordered]@{
     'GameClient.dll' = $loaderSource
+    'condemnedvr-defaults.ini' = $defaultsSource
     'GameOrig.dll' = $originalSource
 }
 $records = New-Object Collections.Generic.List[object]

@@ -34,6 +34,8 @@ $buildRoot = Assert-UnderCondemnedVrProjectRoot (
         'build\condemned-x86-vs\src'))
 $loaderSource = Join-Path $buildRoot (
     'condemned_gameclient_loader\RelWithDebInfo\GameClient.dll')
+$defaultsSource = Join-Path $buildRoot (
+    'condemned_gameclient_loader\RelWithDebInfo\condemnedvr-defaults.ini')
 $bridgeSource = Join-Path $buildRoot (
     'condemned_proxy32\RelWithDebInfo\condemnedvr-d3d9-diagnostic.dll')
 $gameClientVerifier = Join-Path $buildRoot (
@@ -46,6 +48,7 @@ $originalSource = Join-Path $retailRoot 'Game\GameClient.dll'
 $retailExecutable = Join-Path $retailRoot 'Condemned.exe'
 foreach ($required in @(
         $loaderSource,
+        $defaultsSource,
         $bridgeSource,
         $gameClientVerifier,
         $executableVerifier,
@@ -84,6 +87,7 @@ if (Test-Path -LiteralPath $moduleDirectory) {
         }
         $allowedNames = @(
             'GameClient.dll',
+            'condemnedvr-defaults.ini',
             'GameOrig.dll',
             'condemnedvr-d3d9.dll',
             'condemnedvr-loader.log',
@@ -103,6 +107,7 @@ New-Item -ItemType Directory -Path $userDirectory -Force | Out-Null
 
 $stagedFiles = [ordered]@{
     'GameClient.dll' = $loaderSource
+    'condemnedvr-defaults.ini' = $defaultsSource
     'GameOrig.dll' = $originalSource
     'condemnedvr-d3d9.dll' = $bridgeSource
 }

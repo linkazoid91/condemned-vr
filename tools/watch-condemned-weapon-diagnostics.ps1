@@ -148,6 +148,21 @@ $profile = ''
 $weaponIndex = -1
 $colliderSeeded = $false
 $collisionObject = ''
+$colliderStateEventCount = 0
+$colliderStateRecordedCount = 0
+$colliderStateSuppressedCount = 0
+$lastColliderTimelineSeeded = $null
+$seenColliderTimelineObjects = @{}
+$automaticSeedArmed = $false
+$automaticSeedCandidate = $false
+$automaticSeedPhase = 'inactive'
+$automaticSeedAttempts = 0
+$automaticSeedStartedCount = 0
+$automaticSeedConfirmedCount = 0
+$automaticSeedReadyCount = 0
+$automaticSeedFailureCount = 0
+$automaticSeedImpactBlockedCount = 0
+$automaticSeedLastSource = ''
 $callbackCount = 0
 $acceptedCount = 0
 $forwardedCount = 0
@@ -163,6 +178,37 @@ $multiTargetSwingCount = 0
 $invalidSampleHoldCount = 0
 $trackingLossCount = 0
 $damageDispatchCount = 0
+$acceptedActorHitCount = 0
+$acceptedWorldHitCount = 0
+$attackTelegraphTriggerCount = 0
+$acceptedWithAttackTelegraphCount = 0
+$acceptedWithoutAttackTelegraphCount = 0
+$acceptedAttackTelegraphUnknownCount = 0
+$retailAttackCommandDownCount = 0
+$retailAttackCommandUpCount = 0
+$minimumActorHeadHorizontalDistanceMeters = $null
+$enemyHealthObserved = $false
+$playerVitals = $null
+$playerHealthDecreaseCount = 0
+$blockCommandActive = $false
+$blockCommandDownCount = 0
+$blockCommandUpCount = 0
+$blockedHealthDecreaseCount = 0
+$unblockedHealthDecreaseCount = 0
+$blockCommandDownRuntimeTick = 0
+$lastBlockHoldDurationMilliseconds = $null
+$maximumBlockHoldDurationMilliseconds = $null
+$blockPoseConfigured = $false
+$blockPoseActive = $false
+$blockPoseActivationCount = 0
+$blockPoseExitCount = 0
+$blockPosePositionErrorMeters = $null
+$blockPoseAngleErrorDegrees = $null
+$blockPosePositionToleranceMeters = $null
+$blockPoseAngleToleranceDegrees = $null
+$blockPoseLastReason = ''
+$blockPoseTrackingFresh = $false
+
 $lastContact = $null
 $timeline = New-Object Collections.Generic.List[object]
 $targets = @{}
@@ -222,6 +268,148 @@ function Observe-Entry([object]$Entry) {
             $script:profile = [string](Field $detail 'profile')
             $script:weaponIndex = [int](Integer (Field $detail 'weapon_index') -1)
             $script:swingTargets = @{}
+            $script:lastColliderTimelineSeeded = $null
+            $script:seenColliderTimelineObjects = @{}
+            $script:automaticSeedCandidate = $false
+            $script:automaticSeedPhase = 'inactive'
+            $script:automaticSeedAttempts = 0
+            $script:automaticSeedLastSource = ''
+        }
+        'm5_physical_melee_auto_seed_armed' {
+            $script:automaticSeedArmed = $true
+        }
+        'm5_physical_melee_auto_seed_candidate' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = [string](Field $detail 'phase')
+            if ([string]::IsNullOrWhiteSpace(
+                    $script:automaticSeedPhase)) {
+                $script:automaticSeedPhase = 'stabilizing'
+            }
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempts'))
+            $script:automaticSeedLastSource = ''
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_candidate'
+                WeaponIndex = [int](Integer (
+                    Field $detail 'weapon_index') -1)
+                Phase = $script:automaticSeedPhase
+            })
+        }
+        'm5_physical_melee_auto_seed_reset' {
+            $script:automaticSeedCandidate = $false
+            $script:automaticSeedPhase = 'inactive'
+            $script:automaticSeedAttempts = 0
+            $script:automaticSeedLastSource = ''
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_reset'
+            })
+        }
+        'm5_physical_melee_auto_seed_started' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = 'pulse'
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempt'))
+            $script:automaticSeedStartedCount++
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_started'
+                Attempt = $script:automaticSeedAttempts
+                DamageBlocked = $true
+                HapticBlocked = $true
+            })
+        }
+        'm5_physical_melee_auto_seed_verification_pending' {
+            $script:automaticSeedPhase = 'awaiting_confirmation'
+        }
+        'm5_physical_melee_auto_seed_retry' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = 'retry_wait'
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempt'))
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_retry'
+                Attempt = $script:automaticSeedAttempts
+                Reason = [string](Field $detail 'reason')
+            })
+        }
+        'm5_physical_melee_auto_seed_failed' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = 'failed'
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempt'))
+            $script:automaticSeedFailureCount++
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_failed'
+                Attempt = $script:automaticSeedAttempts
+                Reason = [string](Field $detail 'reason')
+            })
+        }
+        'm5_physical_melee_auto_seed_body_lost' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = [string](Field $detail 'phase')
+            if ([string]::IsNullOrWhiteSpace(
+                    $script:automaticSeedPhase)) {
+                $script:automaticSeedPhase = 'stabilizing'
+            }
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_body_lost'
+                Phase = $script:automaticSeedPhase
+            })
+        }
+        'm5_physical_melee_auto_seed_confirmed' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = [string](Field $detail 'phase')
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempt'))
+            $script:automaticSeedConfirmedCount++
+            $script:automaticSeedLastSource = [string](Field $detail 'source')
+            $confirmedObject = [string](Field $detail 'collision_object')
+            if (-not [string]::IsNullOrWhiteSpace($confirmedObject) -and
+                $confirmedObject -ne '0x00000000') {
+                $script:colliderSeeded = $true
+                $script:collisionObject = $confirmedObject
+            }
+            if ((Field $detail 'ready_immediately') -eq '1') {
+                $script:automaticSeedPhase = 'ready'
+                $script:automaticSeedReadyCount++
+            }
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_confirmed'
+                Attempt = $script:automaticSeedAttempts
+                Source = $script:automaticSeedLastSource
+                CollisionObject = $confirmedObject
+                ReadyImmediately =
+                    (Field $detail 'ready_immediately') -eq '1'
+            })
+        }
+        'm5_physical_melee_auto_seed_ready' {
+            $script:automaticSeedCandidate = $true
+            $script:automaticSeedPhase = 'ready'
+            $script:automaticSeedAttempts = [int](Integer (
+                Field $detail 'attempt'))
+            $script:automaticSeedReadyCount++
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_seed_ready'
+                Attempt = $script:automaticSeedAttempts
+            })
+        }
+        'm5_physical_melee_auto_seed_impact_blocked' {
+            $reportedBlockedCount = [int](Integer (
+                Field $detail 'count'))
+            if ($reportedBlockedCount -gt
+                    $script:automaticSeedImpactBlockedCount) {
+                $script:automaticSeedImpactBlockedCount =
+                    $reportedBlockedCount
+            } else {
+                $script:automaticSeedImpactBlockedCount++
+            }
         }
         'm5_aim_path_melee_collision_update' {
             $object = [string](Field $detail 'collision_object')
@@ -295,13 +483,175 @@ function Observe-Entry([object]$Entry) {
         'm5_weapon_test_collider_state' {
             $script:colliderSeeded = (Field $detail 'seeded') -eq '1'
             $script:collisionObject = [string](Field $detail 'collision_object')
+            $script:colliderStateEventCount++
+
+            $stateChanged =
+                $null -eq $script:lastColliderTimelineSeeded -or
+                $script:lastColliderTimelineSeeded -ne $script:colliderSeeded
+            $newObject = $script:colliderSeeded -and
+                -not [string]::IsNullOrWhiteSpace($script:collisionObject) -and
+                -not $script:seenColliderTimelineObjects.ContainsKey(
+                    $script:collisionObject)
+            if ($newObject) {
+                $script:seenColliderTimelineObjects[
+                    $script:collisionObject] = $true
+            }
+
+            if ($stateChanged -or $newObject) {
+                $script:colliderStateRecordedCount++
+                Add-Timeline ([pscustomobject][ordered]@{
+                    ObservedAtUtc = $observedAt
+                    Event = 'collider_state'
+                    Seeded = $script:colliderSeeded
+                    CollisionObject = $script:collisionObject
+                })
+            } else {
+                $script:colliderStateSuppressedCount++
+            }
+            $script:lastColliderTimelineSeeded = $script:colliderSeeded
+        }
+        'm5_aim_path_command_edge' {
+            $command = Integer (Field $detail 'command')
+            $runtimeTick = Integer (Field $detail 'runtime_tick_ms')
+            $edgeDown = (Field $detail 'edge') -eq 'down'
+            if ($command -eq 17) {
+                if ($edgeDown) {
+                    $script:retailAttackCommandDownCount++
+                } else {
+                    $script:retailAttackCommandUpCount++
+                }
+                Add-Timeline ([pscustomobject][ordered]@{
+                    ObservedAtUtc = $observedAt
+                    RuntimeTickMilliseconds = $runtimeTick
+                    Event = 'retail_attack_command_edge'
+                    Active = $edgeDown
+                    ControllerApplied =
+                        (Field $detail 'controller_applied') -eq '1'
+                    OutputValue = Number (Field $detail 'output_value')
+                })
+            } elseif ($command -eq 28) {
+                $script:blockCommandActive =
+                    $edgeDown
+                if ($script:blockCommandActive) {
+                    $script:blockCommandDownCount++
+                    $script:blockCommandDownRuntimeTick = $runtimeTick
+                } else {
+                    $script:blockCommandUpCount++
+                    if ($runtimeTick -gt 0 -and
+                        $script:blockCommandDownRuntimeTick -gt 0 -and
+                        $runtimeTick -ge $script:blockCommandDownRuntimeTick) {
+                        $duration =
+                            $runtimeTick - $script:blockCommandDownRuntimeTick
+                        $script:lastBlockHoldDurationMilliseconds = $duration
+                        if ($null -eq
+                                $script:maximumBlockHoldDurationMilliseconds -or
+                            $duration -gt
+                                $script:maximumBlockHoldDurationMilliseconds) {
+                            $script:maximumBlockHoldDurationMilliseconds =
+                                $duration
+                        }
+                    }
+                    $script:blockCommandDownRuntimeTick = 0
+                }
+                Add-Timeline ([pscustomobject][ordered]@{
+                    ObservedAtUtc = $observedAt
+                    RuntimeTickMilliseconds = $runtimeTick
+                    Event = 'block_command_edge'
+                    Active = $script:blockCommandActive
+                    ControllerApplied =
+                        (Field $detail 'controller_applied') -eq '1'
+                    OutputValue = Number (Field $detail 'output_value')
+                })
+            }
+        }
+
+        'm5_physical_melee_swing_attack_triggered' {
+            $script:attackTelegraphTriggerCount++
             Add-Timeline ([pscustomobject][ordered]@{
                 ObservedAtUtc = $observedAt
-                Event = 'collider_state'
-                Seeded = $script:colliderSeeded
-                CollisionObject = $script:collisionObject
+                Event = 'attack_telegraph_triggered'
+                TriggerCount = $script:attackTelegraphTriggerCount
+                SpeedMetersPerSecond = Number (Field $detail 'speed_mps')
+                ThresholdMetersPerSecond = Number (
+                    Field $detail 'threshold_mps')
+                PulseMilliseconds = [int](Integer (Field $detail 'pulse_ms'))
+                CooldownMilliseconds = [int](Integer (
+                    Field $detail 'cooldown_ms'))
             })
         }
+        'm5_physical_melee_block_pose_state' {
+            $script:blockPoseActive =
+                (Field $detail 'active') -eq '1'
+            $entered = (Field $detail 'entered') -eq '1'
+            $exited = (Field $detail 'exited') -eq '1'
+            if ($entered) {
+                $script:blockPoseActivationCount++
+            }
+            if ($exited) {
+                $script:blockPoseExitCount++
+            }
+            $script:blockPoseConfigured = $true
+            $script:blockPoseTrackingFresh =
+                (Field $detail 'tracking_fresh') -eq '1'
+            $script:blockPosePositionErrorMeters = Number (
+                Field $detail 'position_error_m')
+            $script:blockPoseAngleErrorDegrees = Number (
+                Field $detail 'angle_error_deg')
+            $script:blockPosePositionToleranceMeters = Number (
+                Field $detail 'position_tolerance_m')
+            $script:blockPoseAngleToleranceDegrees = Number (
+                Field $detail 'angle_tolerance_deg')
+            $script:blockPoseLastReason = [string](
+                Field $detail 'reason')
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'automatic_block_pose_state'
+                WeaponIndex = [int](Integer (
+                    Field $detail 'weapon_index') -1)
+                Active = $script:blockPoseActive
+                Entered = $entered
+                Exited = $exited
+                TrackingFresh = $script:blockPoseTrackingFresh
+                PositionErrorMeters =
+                    $script:blockPosePositionErrorMeters
+                AngleErrorDegrees =
+                    $script:blockPoseAngleErrorDegrees
+                Reason = $script:blockPoseLastReason
+            })
+        }
+        'm5_combat_player_vitals' {
+            $delta = [long](Integer (Field $detail 'delta'))
+            if ($delta -lt 0) {
+                $script:playerHealthDecreaseCount++
+                if ($script:blockCommandActive) {
+                    $script:blockedHealthDecreaseCount++
+                } else {
+                    $script:unblockedHealthDecreaseCount++
+                }
+            }
+            $script:playerVitals = [pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                RuntimeTickMilliseconds = [long](Integer (
+                    Field $detail 'runtime_tick_ms'))
+                Current = [long](Integer (Field $detail 'current'))
+                Maximum = [long](Integer (Field $detail 'maximum'))
+                Fraction = Number (Field $detail 'fraction')
+                Delta = $delta
+                BlockCommandActive = $script:blockCommandActive
+                Initial = (Field $detail 'initial') -eq '1'
+                Cause = [string](Field $detail 'cause')
+                ReadOnly = $true
+            }
+            Add-Timeline ([pscustomobject][ordered]@{
+                ObservedAtUtc = $observedAt
+                Event = 'player_vitals'
+                Current = $script:playerVitals.Current
+                Maximum = $script:playerVitals.Maximum
+                Delta = $script:playerVitals.Delta
+                BlockCommandActive = $script:playerVitals.BlockCommandActive
+            })
+        }
+
         'm5_weapon_test_contact' {
             $script:callbackCount++
             $accepted = (Field $detail 'accepted') -eq '1'
@@ -330,6 +680,27 @@ function Observe-Entry([object]$Entry) {
             $reason = [string](Field $detail 'reason')
             $kind = [string](Field $detail 'target_kind')
             $target = [string](Field $detail 'target')
+            $runtimeTick = [long](Integer (Field $detail 'runtime_tick_ms'))
+            $headPoseValid = (Field $detail 'head_pose_valid') -eq '1'
+            $headToContact = Number (
+                Field $detail 'head_to_target_contact_m')
+            $headHorizontalToContact = Number (
+                Field $detail 'head_horizontal_to_target_contact_m')
+            $gripPoseValid = (Field $detail 'grip_pose_valid') -eq '1'
+            $gripToContact = Number (
+                Field $detail 'grip_to_target_contact_m')
+            $telegraphTriggeredValue = [string](Field $detail (
+                'attack_telegraph_triggered_this_swing'))
+            $attackTelegraphObserved = -not [string]::IsNullOrWhiteSpace(
+                $telegraphTriggeredValue)
+            $attackTelegraphEnabled =
+                (Field $detail 'attack_telegraph_enabled') -eq '1'
+            $attackTelegraphTriggered = $telegraphTriggeredValue -eq '1'
+            $attackTelegraphPulseActive =
+                (Field $detail 'attack_telegraph_pulse_active') -eq '1'
+            if ((Field $detail 'enemy_health_observed') -eq '1') {
+                $script:enemyHealthObserved = $true
+            }
             $contactPositionValid =
                 (Field $detail 'contact_position_valid') -eq '1'
             $distanceValid =
@@ -361,6 +732,12 @@ function Observe-Entry([object]$Entry) {
                 CapsuleToTargetGapMeters = $capsuleGap
                 CapsuleRadiusMeters = $capsuleRadius
                 ContactAxisFraction = $contactAxis
+                HeadPoseValid = $headPoseValid
+                HeadToTargetContactMeters = $headToContact
+                HeadHorizontalToTargetContactMeters =
+                    $headHorizontalToContact
+                GripPoseValid = $gripPoseValid
+                GripToTargetContactMeters = $gripToContact
             }
             if ($accepted) { $script:acceptedCount++ }
             if ($forwarded) { $script:forwardedCount++ }
@@ -369,6 +746,27 @@ function Observe-Entry([object]$Entry) {
                 $script:actorContactCount++
             } else {
                 $script:worldContactCount++
+            }
+            if ($kind -eq 'actor_candidate' -and $headPoseValid -and
+                ($null -eq $script:minimumActorHeadHorizontalDistanceMeters -or
+                 $headHorizontalToContact -lt
+                    $script:minimumActorHeadHorizontalDistanceMeters)) {
+                $script:minimumActorHeadHorizontalDistanceMeters =
+                    $headHorizontalToContact
+            }
+            if ($accepted) {
+                if ($kind -eq 'actor_candidate') {
+                    $script:acceptedActorHitCount++
+                } else {
+                    $script:acceptedWorldHitCount++
+                }
+                if (-not $attackTelegraphObserved) {
+                    $script:acceptedAttackTelegraphUnknownCount++
+                } elseif ($attackTelegraphTriggered) {
+                    $script:acceptedWithAttackTelegraphCount++
+                } else {
+                    $script:acceptedWithoutAttackTelegraphCount++
+                }
             }
             if ($clearOk) {
                 $script:targetReferenceClearCount++
@@ -394,10 +792,38 @@ function Observe-Entry([object]$Entry) {
                         Target = $target
                         Kind = $kind
                         AcceptedContacts = 0
+                        AcceptedWithAttackTelegraph = 0
+                        AcceptedWithoutAttackTelegraph = 0
+                        AcceptedAttackTelegraphUnknown = 0
+                        FirstAcceptedRuntimeTickMilliseconds = 0
+                        LastAcceptedRuntimeTickMilliseconds = 0
+                        LastAcceptedIntervalMilliseconds = $null
                         LastObservedAtUtc = $observedAt
                     }
                 }
                 $targets[$target].AcceptedContacts++
+                $targetState = $targets[$target]
+                if ($runtimeTick -gt 0) {
+                    if ($targetState.FirstAcceptedRuntimeTickMilliseconds -eq 0) {
+                        $targetState.FirstAcceptedRuntimeTickMilliseconds =
+                            $runtimeTick
+                    }
+                    if ($targetState.LastAcceptedRuntimeTickMilliseconds -gt 0 -and
+                        $runtimeTick -ge
+                            $targetState.LastAcceptedRuntimeTickMilliseconds) {
+                        $targetState.LastAcceptedIntervalMilliseconds =
+                            $runtimeTick -
+                            $targetState.LastAcceptedRuntimeTickMilliseconds
+                    }
+                    $targetState.LastAcceptedRuntimeTickMilliseconds = $runtimeTick
+                }
+                if (-not $attackTelegraphObserved) {
+                    $targetState.AcceptedAttackTelegraphUnknown++
+                } elseif ($attackTelegraphTriggered) {
+                    $targetState.AcceptedWithAttackTelegraph++
+                } else {
+                    $targetState.AcceptedWithoutAttackTelegraph++
+                }
                 $targets[$target].LastObservedAtUtc = $observedAt
             }
             $script:lastContact = [pscustomobject][ordered]@{
@@ -408,6 +834,15 @@ function Observe-Entry([object]$Entry) {
                 Accepted = $accepted
                 Reason = $reason
                 NativeForwarded = $forwarded
+                RuntimeTickMilliseconds = $runtimeTick
+                AttackTelegraph = [pscustomobject][ordered]@{
+                    Observed = $attackTelegraphObserved
+                    Enabled = $attackTelegraphEnabled
+                    TriggeredThisSwing = $attackTelegraphTriggered
+                    PulseActive = $attackTelegraphPulseActive
+                }
+                EnemyHealthObserved =
+                    (Field $detail 'enemy_health_observed') -eq '1'
                 RetailReferenceVectorClearOk = $clearOk
                 RetailReferenceVectorState = $clearState
                 RetailReferenceVector = [pscustomobject][ordered]@{
@@ -438,6 +873,13 @@ function Observe-Entry([object]$Entry) {
                 RetailReferenceVectorState = $clearState
                 WeaponCapsuleToTargetGapMeters = $capsuleGap
                 DistanceAssessment = $distanceAssessment
+                RuntimeTickMilliseconds = $runtimeTick
+                HeadPoseValid = $headPoseValid
+                HeadHorizontalToTargetContactMeters =
+                    $headHorizontalToContact
+                AttackTelegraphObserved = $attackTelegraphObserved
+                AttackTelegraphTriggeredThisSwing =
+                    $attackTelegraphTriggered
             })
         }
         'm5_physical_melee_contact_rearmed' {
@@ -481,8 +923,8 @@ function Observe-Entry([object]$Entry) {
         }
         'm5_physical_melee_tracking_lost' {
             $script:trackingLossCount++
-            Add-Timeline ([pscustomobject][ordered]@{
             $script:swingTargets = @{}
+            Add-Timeline ([pscustomobject][ordered]@{
                 ObservedAtUtc = $observedAt
                 Event = 'tracking_lost'
                 Count = $script:trackingLossCount
@@ -497,9 +939,30 @@ function Write-Snapshot([bool]$GameRunning) {
     $oneHandedEquipped = $oneHandedProfiles -contains $script:profile
     $phase = 'equip_one_handed_melee'
     $recommendation = 'Equip any mapped one-handed melee weapon.'
-    if ($oneHandedEquipped -and -not $script:colliderSeeded) {
+    if ($oneHandedEquipped -and
+        $script:automaticSeedPhase -eq 'settling') {
+        $phase = 'automatic_seed_settling'
+        $recommendation = (
+            'The native collider is verified; wait for automatic seed ' +
+            'damage suppression to settle before striking.')
+    } elseif ($oneHandedEquipped -and -not $script:colliderSeeded -and
+        $script:automaticSeedPhase -eq 'failed') {
+        $phase = 'automatic_seed_failed'
+        $recommendation = (
+            'Automatic collider verification exhausted its retries; ' +
+            'one manual Retail attack remains the fallback.')
+    } elseif ($oneHandedEquipped -and -not $script:colliderSeeded -and
+              ($script:automaticSeedArmed -or
+               $script:automaticSeedCandidate)) {
+        $phase = 'awaiting_automatic_seed'
+        $recommendation = (
+            'Keep the picked-up weapon and tracked controller stable while ' +
+            'the automatic collider seed is verified.')
+    } elseif ($oneHandedEquipped -and -not $script:colliderSeeded) {
         $phase = 'awaiting_seed'
-        $recommendation = 'Perform one Retail attack to create the reusable collider.'
+        $recommendation = (
+            'This run has no automatic-seed telemetry; one manual Retail ' +
+            'attack creates the reusable collider.')
     } elseif ($script:targetReferenceFailureCount -gt 0 -or
               $warnings.ContainsKey('retail_reference_vector')) {
         $phase = 'retail_reference_vector_failure'
@@ -533,7 +996,7 @@ function Write-Snapshot([bool]$GameRunning) {
         })
     }
     $snapshot = [pscustomobject][ordered]@{
-        SchemaVersion = 3
+        SchemaVersion = 4
         UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
         StartedAtUtc = $startedAtUtc.ToString('o')
         Run = $runDirectory.Name
@@ -549,15 +1012,134 @@ function Write-Snapshot([bool]$GameRunning) {
         Collider = [pscustomobject][ordered]@{
             Seeded = $script:colliderSeeded
             CollisionObject = $script:collisionObject
+            StateEventsObserved = $script:colliderStateEventCount
+            StateEventsRecorded = $script:colliderStateRecordedCount
+            StateEventsSuppressed = $script:colliderStateSuppressedCount
             AlignmentCommandPath = $alignmentCommandPath
             LiveAlignment = $script:liveAlignment
             LastAlignmentError = $script:lastLiveAlignmentError
+            AutomaticSeed = [pscustomobject][ordered]@{
+                Armed = $script:automaticSeedArmed
+                Candidate = $script:automaticSeedCandidate
+                Phase = $script:automaticSeedPhase
+                Attempts = $script:automaticSeedAttempts
+                MaximumAttempts = 3
+                StartsObserved = $script:automaticSeedStartedCount
+                ConfirmationsObserved =
+                    $script:automaticSeedConfirmedCount
+                ReadyEventsObserved = $script:automaticSeedReadyCount
+                FailuresObserved = $script:automaticSeedFailureCount
+                SeedImpactsBlocked =
+                    $script:automaticSeedImpactBlockedCount
+                LastConfirmationSource =
+                    $script:automaticSeedLastSource
+                ManualAttackFallback =
+                    $script:automaticSeedPhase -eq 'failed'
+            }
+        }
+        Combat = [pscustomobject][ordered]@{
+            EnemyHealthObserved = $script:enemyHealthObserved
+            EnemyHealthNote = (
+                'Native melee dispatch sends an engine damage message; ' +
+                'it does not return enemy health.')
+            AcceptedActorHits = $script:acceptedActorHitCount
+            AcceptedWorldOrPropHits = $script:acceptedWorldHitCount
+            AttackTelegraphTriggers = $script:attackTelegraphTriggerCount
+            AutomaticSwingAttackTriggers =
+                $script:attackTelegraphTriggerCount
+            RetailAttackCommandDownEdges =
+                $script:retailAttackCommandDownCount
+            RetailAttackCommandUpEdges =
+                $script:retailAttackCommandUpCount
+            AcceptedWithAttackTelegraph =
+                $script:acceptedWithAttackTelegraphCount
+            AcceptedWithoutAttackTelegraph =
+                $script:acceptedWithoutAttackTelegraphCount
+            AcceptedAttackTelegraphUnknown =
+                $script:acceptedAttackTelegraphUnknownCount
+            MinimumActorHeadHorizontalDistanceMeters =
+                $script:minimumActorHeadHorizontalDistanceMeters
+            StandOffNote = (
+                'Distance is HMD XZ position to Retail contact point; ' +
+                'it is diagnostic evidence, not a player-capsule radius.')
+            PlayerVitals = $script:playerVitals
+            PlayerHealthDecreaseEvents = $script:playerHealthDecreaseCount
+            BlockCommandActive = $script:blockCommandActive
+            BlockCommandDownEdges = $script:blockCommandDownCount
+            BlockCommandUpEdges = $script:blockCommandUpCount
+            AutomaticBlockPose = [pscustomobject][ordered]@{
+                Configured = $script:blockPoseConfigured
+                Active = $script:blockPoseActive
+                Activations = $script:blockPoseActivationCount
+                Exits = $script:blockPoseExitCount
+                TrackingFresh = $script:blockPoseTrackingFresh
+                PositionErrorMeters =
+                    $script:blockPosePositionErrorMeters
+                AngleErrorDegrees =
+                    $script:blockPoseAngleErrorDegrees
+                PositionToleranceMeters =
+                    $script:blockPosePositionToleranceMeters
+                AngleToleranceDegrees =
+                    $script:blockPoseAngleToleranceDegrees
+                LastReason = $script:blockPoseLastReason
+                InputSeedRequired = $false
+                ManualTriggerFallback = $true
+            }
+            LastBlockHoldDurationMilliseconds =
+                $script:lastBlockHoldDurationMilliseconds
+            MaximumBlockHoldDurationMilliseconds =
+                $script:maximumBlockHoldDurationMilliseconds
+            LastBlockCommandActivationDurationMilliseconds =
+                $script:lastBlockHoldDurationMilliseconds
+            MaximumBlockCommandActivationDurationMilliseconds =
+                $script:maximumBlockHoldDurationMilliseconds
+            CommandEdgeTimingNote =
+                'Durations require runtime_tick_ms from the loader; watcher ingestion timestamps are not timing evidence.'
+            NativeBlockStateObserved = $false
+            BlockStateNote = (
+                'Command 28 edges describe controller input activation, not ' +
+                'the lifetime of Retail block state. A released command may ' +
+                'leave a native spatial block window active.')
+            HealthDecreasesWhileBlockCommandActive =
+                $script:blockedHealthDecreaseCount
+            HealthDecreasesWhileBlockCommandInactive =
+                $script:unblockedHealthDecreaseCount
+            LegacyBlockHealthFieldNote = (
+                'HealthDecreasesWhileBlocked/NotBlocked are retained for ' +
+                'schema-v4 compatibility; read them as command active/inactive.')
+            HealthDecreasesWhileBlocked =
+                $script:blockedHealthDecreaseCount
+            HealthDecreasesWhileNotBlocked =
+                $script:unblockedHealthDecreaseCount
         }
         Counters = [pscustomobject][ordered]@{
             Callbacks = $script:callbackCount
             AcceptedContacts = $script:acceptedCount
             NativeForwards = $script:forwardedCount
             DamageDispatches = $script:damageDispatchCount
+            AcceptedActorHits = $script:acceptedActorHitCount
+            AcceptedWorldOrPropHits = $script:acceptedWorldHitCount
+            AttackTelegraphTriggers = $script:attackTelegraphTriggerCount
+            AutomaticSwingAttackTriggers =
+                $script:attackTelegraphTriggerCount
+            RetailAttackCommandDownEdges =
+                $script:retailAttackCommandDownCount
+            RetailAttackCommandUpEdges =
+                $script:retailAttackCommandUpCount
+            AcceptedWithAttackTelegraph =
+                $script:acceptedWithAttackTelegraphCount
+            AcceptedWithoutAttackTelegraph =
+                $script:acceptedWithoutAttackTelegraphCount
+            AcceptedAttackTelegraphUnknown =
+                $script:acceptedAttackTelegraphUnknownCount
+            PlayerHealthDecreaseEvents =
+                $script:playerHealthDecreaseCount
+            BlockCommandDownEdges = $script:blockCommandDownCount
+            BlockCommandUpEdges = $script:blockCommandUpCount
+            HealthDecreasesWhileBlocked =
+                $script:blockedHealthDecreaseCount
+            HealthDecreasesWhileNotBlocked =
+                $script:unblockedHealthDecreaseCount
             DuplicateCallbacksBlocked = $script:duplicateCount
             ActorCandidateContacts = $script:actorContactCount
             WorldOrPropContacts = $script:worldContactCount
@@ -571,6 +1153,13 @@ function Write-Snapshot([bool]$GameRunning) {
             TrackingLosses = $script:trackingLossCount
             LiveAlignmentApplied = $script:liveAlignmentAppliedCount
             LiveAlignmentRejected = $script:liveAlignmentRejectedCount
+            AutomaticSeedStarts = $script:automaticSeedStartedCount
+            AutomaticSeedConfirmations =
+                $script:automaticSeedConfirmedCount
+            AutomaticSeedReadyEvents = $script:automaticSeedReadyCount
+            AutomaticSeedFailures = $script:automaticSeedFailureCount
+            AutomaticSeedImpactsBlocked =
+                $script:automaticSeedImpactBlockedCount
             SameTargetAcceptedBeforeRearm =
                 $script:sameTargetBeforeRearmCount
             MultiTargetSwings = $script:multiTargetSwingCount

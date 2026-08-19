@@ -142,3 +142,58 @@ accepted interval OpenXR held approximately 90 Hz while new stereo pairs
 settled around 43-50 fps, with no projection or capture failures. This passes
 the M3 stereo and head-tracking geometry gate; transport latency remains an
 M5 performance task.
+
+## Reported intermittent horizon offset
+
+On 11 August 2026 the headset tester reported that physical forward can
+intermittently appear pitched downward in the game. The current workaround is
+to press `F6`, level the Retail horizon with the mouse in flat-screen mode,
+then press `F6` again. This is a **live-reported symptom without a correlated
+orientation trace**, not a live-verified root cause.
+
+Source inspection supports a bounded Retail-base-rotation hypothesis. The
+stereo renderer reads the untouched Retail camera transform on every world
+camera call and composes each eye as:
+
+```text
+rendered eye rotation = Retail camera-base rotation * HMD-relative rotation
+```
+
+`YawOnlyRecenterPose` deliberately removes only HMD yaw; physical pitch and
+roll remain absolute so a recenter cannot tilt the room. Separately,
+`HookGetExtremalCommandValue` returns zero for Retail pitch/yaw commands 11 and
+12 while the tracked head snapshot is fresh. Turning stereo off with `F6`
+stops refreshing that snapshot; after its 250 ms freshness window, native
+mouse look can change the underlying Retail camera pitch. Turning stereo back
+on then composes HMD motion on top of the newly levelled Retail basis. The F6
+toggle itself neither levels the Retail basis nor requests a new HMD recenter.
+
+This path explains the reported workaround and makes residual Retail camera
+pitch or roll the leading cause: a non-level native camera basis present at
+VR entry, or introduced by a gameplay/lifecycle transition, is inherited by
+both eyes and effectively held once mouse look is suppressed. It is not yet
+known where that native offset originates. Possible sources such as prior
+mouse state, loading/respawn, scripted camera motion, or another Retail camera
+effect remain hypotheses until observed separately. A global coordinate sign
+error is less consistent with an intermittent offset that the native mouse can
+remove.
+
+The preserved loader log for `run-20260810-103612` corroborates the control
+path: it records `m5_vr_mouse_look_suppressed`, followed by an F6
+`toggle_stereo enabled=0` and later `enabled=1`. That session was collected for
+forensic-camera work and contains no Retail-base, HMD-relative, or final-eye
+orientation values, so it cannot quantify or prove this horizon defect.
+
+Before changing camera composition, capture one bounded reproduction while
+the tester holds the HMD physically level. At first stereo entry, recenter,
+relevant game-state transitions, and both sides of F6, record the untouched
+Retail camera quaternion and forward/up vectors, HMD center and yaw-only
+reference, HMD-relative quaternion, composed eye quaternion and forward/up
+vectors, plus command-11/12 raw/output values and freshness state. The leading
+hypothesis passes only if the HMD-relative pitch stays level while the Retail
+base and composed-eye pitch share the offset, and mouse levelling changes those
+two by the same amount. A level Retail basis with an offset HMD-relative pose
+instead localizes the problem to runtime/HMD orientation; level inputs with an
+offset composed result localize it to composition. Do not absorb pitch into
+the HMD recenter or add a local sign correction: both would conflict with the
+verified yaw-only and centralized coordinate rules.

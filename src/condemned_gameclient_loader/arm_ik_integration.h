@@ -29,6 +29,12 @@ bool InstallArmIkRightArm(
 // installs one Right_hand callback only after the live body geometry resolves.
 void SampleArmIkRightHandProof() noexcept;
 
+// Receives the already verified CInterfaceMgr game state. A witnessed Loading
+// state invalidates both callback chains even when Retail reuses the same
+// player-body address; the next Playing state permits one transactional
+// reinstall on the render path.
+void NotifyArmIkRetailGameState(int gameState) noexcept;
+
 // Publishes the coherent pose already used by Condemned's weighted physical
 // weapon. The callback expires this snapshot after a short freshness window.
 void PublishArmIkRightHandProofTarget(
