@@ -47,15 +47,41 @@ diagnostic paths together with the newer player-collision and Phase-1
 authoring slices. The required x86 game side and x64 host remain separate
 artifacts in one coordinated build; unsafe diagnostics remain opt-in and the
 headset-rejected automatic swing attack remains OFF. The 20 August
-RelWithDebInfo gate passed 25/25 x86 and 21/21 x64 CTest cases, all three
-existing PowerShell regressions plus the new launch-profile resolver suite,
-the M0 helper suite, and the publication audit.
+RelWithDebInfo gate passed 25/25 x86 and 21/21 x64 CTest cases plus the
+launch-profile, foreground-handoff, screenshot-helper, schema-v4 weapon
+watcher, and new release-tool PowerShell regressions.
 The x86 loader SHA-256 is
-`6616209AD372DDBD1E624C96DB45624F679BA840B6FC9474D70CC35778A1EF8B`.
+`F8F4E5F11DCD981830479DEF6ED9A5619682BCA5BEF859EE4000154C2D089CC9`.
 The manifest correctly records base commit
-`9732e0a867ffc3b80bfe909be6411a68367c457e` plus a dirty working tree, so this
+`da0e429aa18ef8a8fe189ef26b64119974a477ec` plus a dirty working tree, so this
 is an **automated-only local platform build**, identified by artifact hashes
 rather than by the commit alone.
+
+M6 end-user packaging is now **implemented and automated/integration-tested,
+awaiting clean-machine and live acceptance**. `tools/make-release.ps1` creates
+a project-authored release folder/ZIP with a hash manifest, guarded launcher,
+clickable install/play/uninstall wrappers, defaults, title image, and notices.
+The package contains no Retail files. On the end-user machine, `Install.cmd`
+strictly verifies Steam `1.0.314.0`, constructs the established isolated
+runtime/module/archive-config layout, and creates a self-contained install
+whose normal `Play.cmd` uses the no-argument Current profile. Updates replace
+only manifest-owned files and preserve userdata/settings; uninstall is a dry
+run until `-Apply`, verifies the exact install marker and Game junction, and
+preserves user data by default.
+
+The 20 August project-local integration smoke used generated package
+`condemned-vr-0.5.0-dev+da0e429` with 25 manifest-owned files. Automatic Steam
+discovery, strict identities, first install, in-place update, custom-directory
+`Play.cmd -VerifyOnly`, uninstall dry-run, and applied uninstall passed against
+the verified Retail copy without changing its critical hashes. The first
+applied-uninstall attempt exposed Windows PowerShell's junction-removal
+null-reference bug before any deletion; the corrected path validates the
+reparse target and removes the junction itself with `IO.Directory.Delete`.
+The generated ZIP was then freshly extracted and repeated strict first
+install, in-place update, installed `Play.cmd -VerifyOnly`, and applied
+uninstall successfully. No headset/game launch, desktop shortcut, or clean
+Windows account has yet accepted the end-user flow. The current dirty-source
+package is diagnostic and must not be published.
 
 The no-feature-parameter launcher is **live exercised through the guarded
 readiness boundary**. Run `run-20260820-041148` invoked exactly
@@ -1244,7 +1270,7 @@ baseline.
 | Arm/hand IK | **PARTIAL** | Initial chains, callback order, wrist placement, locomotion anchoring, empty-hand correction, and five-identity one-press hand/weapon propagation have live evidence; restart/load-state generation and explicit visual collider preservation remain open |
 | Haptics | **PARTIAL** | M4 bounded input-confirmation pulses passed live; melee-impact impulse haptics and verified weapon-event feedback are not implemented |
 | HUD/UI | **PARTIAL** | Retail menu/screen comfort panel and controller navigation passed live; the title-case VR Settings hub, four-row styling, two clean entries/focus-outs, and one explicit Back pass live. The prior opening-Enter leak did not recur, so its defensive suppression branch remains automated-only. Display, VR Features, and Comfort are placeholders; Developer Tools `On -> Off`, save, runtime mutation, immediate native-label refresh, and controller-hotkey suppression pass live, while F12 suppression, On restoration/release capture, and fresh-process persistence remain pending; VR Tools remains developer UI |
-| Installer/release | **NOT STARTED** | Safe developer staging and publication audit exist; no install/update/uninstall package satisfies M6 |
+| Installer/release | **EXPERIMENTAL** | Retail-free folder/ZIP builder, strict install/update, integrity-only Play, dry-run-first uninstall, ownership manifest, and preserved userdata pass automated plus project-local Retail integration smoke; shortcut, clean-account, extracted-ZIP, runtime/headset, and release acceptance remain |
 
 ## Current pipeline
 
@@ -1340,8 +1366,9 @@ with a lifetime-safe, collision-constrained item rendered from its physical pose
   no longer classified as temporary diagnostic scaffolding.
 - **M4 confirmation haptics:** prove transport only; final recoil/impact haptics
   must come from verified game/contact events.
-- **M2-named local stage/launcher:** it is the current M5 developer harness,
-  not an installer or release design.
+- **M2-named stage/launcher:** the internal name remains for compatibility;
+  the M6 package deliberately generates that proven layout behind end-user
+  `Install.cmd` and `Play.cmd` rather than exposing milestone setup steps.
 
 ## Do not work on unless required
 
@@ -1554,8 +1581,9 @@ Still unresolved:
   broader scene-lifecycle behavior remain;
 - complete weapon catalog profiles, representative firearm behavior, impact
   haptics, HUD/full-screen effect classification, and comfort treatment;
-- isolated save persistence, long-session/release regression, installer flow,
-  and support for any game binary other than verified Steam 1.0.314.0.
+- isolated save persistence, long-session/release regression, clean-account
+  installer/shortcut/runtime acceptance, and support for any game binary
+  other than verified Steam 1.0.314.0.
 
 ## Safety invariants
 

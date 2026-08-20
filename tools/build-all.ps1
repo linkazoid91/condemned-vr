@@ -160,6 +160,8 @@ if (-not $SkipTests) {
         '--- PowerShell: weapon diagnostics watcher ---') `
         -ForegroundColor Cyan
     & "$PSScriptRoot\test-condemned-weapon-diagnostics.ps1"
+    Write-Host '--- PowerShell: end-user release tools ---' -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot 'test-condemned-release-tools.ps1')
 }
 
 $artifactCandidates = [ordered]@{

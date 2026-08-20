@@ -27,6 +27,8 @@ powershell -ExecutionPolicy Bypass -File `
   tools\capture-condemned-window.ps1 -ValidateOnly
 powershell -ExecutionPolicy Bypass -File `
   tools\test-condemned-weapon-diagnostics.ps1
+powershell -ExecutionPolicy Bypass -File `
+  tools\test-condemned-release-tools.ps1
 ```
 
 The launch-profile test proves that no feature argument selects `Current`,
@@ -40,13 +42,52 @@ and checks schema v4 hit
 classification, per-target intervals, telegraph split, minimum stand-off,
 player vitals, command-28 edges, blocked/unblocked health attribution, and the
 explicit enemy-health-unobserved boundary. It can be run separately as above
-and neither test launches the game or headset.
+and neither test launches the game or headset. The release-tools test checks
+install-root containment, package path traversal rejection, manifest tamper
+failure, exact install markers, script parsing, and clickable-wrapper
+presence without reading Retail files.
 
 Before a public push or package, also run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\audit-publication.ps1 -RequireClean
 ```
+
+## End-user package gate
+
+Build the package only after the normal gate passes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\make-release.ps1 -SkipBuild
+```
+
+Require `release-manifest.json` to identify the exact source/configuration,
+declare no Retail content, and hash every packaged file. Inspect the generated
+folder and ZIP for `Condemned.exe`, `GameOrig.dll`, `GameServer.dll`,
+`ClientFx.fxd`, archives, saves, logs, and player settings; none may ship.
+
+Against a disposable target outside both the package and Retail roots, run:
+
+1. first install with automatic Steam discovery and `-NoShortcut`;
+2. the same installer again as an in-place update;
+3. installed `Play.cmd -VerifyOnly` from a non-default install directory;
+4. uninstall without `-Apply` and confirm it is a dry run;
+5. uninstall with `-Apply`, preserving userdata; and
+6. verify the exact Retail executable/client/server hashes are unchanged.
+
+The 20 August 2026 project-local smoke completed that sequence against the
+verified Steam build. It initially exposed Windows PowerShell's
+`Remove-Item` junction null-reference failure; the uninstaller now validates
+the exact reparse target and removes the junction itself through
+`IO.Directory.Delete` before recursively deleting its project-local parent.
+The corrected applied uninstall passed and left only the deliberately
+preserved empty userdata plus its install marker, which the test then removed.
+A subsequent fresh extraction of the generated ZIP repeated first install,
+in-place update, installed `Play.cmd -VerifyOnly`, and applied uninstall
+successfully. No headset/game launch or desktop shortcut was exercised. A
+clean Windows account, default-directory shortcut, both documented OpenXR
+runtimes, and release-grade install/play/uninstall acceptance remain required
+before marking M6 live accepted.
 
 ## Retail integrity gate
 

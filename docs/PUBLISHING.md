@@ -11,10 +11,17 @@ squash or recreate the source tree when publishing it: the existing history,
 3. Confirm that `LICENSE`, `ATTRIBUTION.md` and
    `THIRD_PARTY_NOTICES.md` are included at the repository root.
 4. Build and run both test suites with `tools/build-all.ps1`.
-5. Inspect any release archive manually. It may contain project-authored
+5. Create the package with `tools/make-release.ps1 -SkipBuild`. Do not use a
+   package whose manifest reports a dirty working tree for publication.
+6. Inspect the release folder, `release-manifest.json`, and ZIP manually. They
+   may contain project-authored
    binaries, `condemnedvr-defaults.ini`, and notices only. The defaults file
    must sit beside the project `GameClient.dll`.
-6. Create the public repository from this Git history. Do not upload the
+7. From the extracted package, exercise first install, update,
+   `Play.cmd -VerifyOnly`, uninstall dry-run, and uninstall `-Apply` against a
+   disposable isolated target. Confirm the Retail critical hashes remain
+   unchanged and the verified Game junction is removed without traversal.
+8. Create the public repository from this Git history. Do not upload the
    ignored `stage/`, `vendor-local/`, `build/`, `logs/`, `dist/` or
    `local-runtime/` directories through the web interface.
 
@@ -30,6 +37,11 @@ squash or recreate the source tree when publishing it: the existing history,
 - OpenXR-SDK or MinHook checkouts from `vendor-local/`; or
 - third-party mod binaries without a separate license and redistribution
   review.
+
+The release builder must reject `Condemned.exe`, `GameOrig.dll`,
+`GameServer.dll`, and `ClientFx.fxd` anywhere in the generated package. The
+installer may create local copies from the end user's verified Steam install;
+those generated install directories remain non-redistributable.
 
 ## Suggested repository description
 

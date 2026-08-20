@@ -87,6 +87,31 @@ x64 headset-free suites, and writes artifact hashes to
 `stage/condemned-build-manifest.json`. Both `build/` and all locally staged
 game files are ignored by Git.
 
+## End-user release package
+
+After a successful build, create the redistributable folder and ZIP with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\make-release.ps1 -SkipBuild
+```
+
+The archive contains only project-authored binaries, scripts, defaults,
+documentation, and notices. An end user extracts it and double-clicks
+`Install.cmd`. The installer finds Steam App 4720, requires the exact
+`1.0.314.0` Retail identities, creates an isolated installation at
+`%USERPROFILE%\CondemnedVR`, and adds a desktop shortcut. It does not require
+Visual Studio, CMake, Git, or a source checkout on the end-user machine.
+
+Run `Install.cmd` from a newer package to update in place. `Play.cmd` verifies
+the installed package/stage before invoking the same no-argument `Current`
+launcher used by developers. `Uninstall.cmd` is a dry run until `-Apply` is
+supplied and preserves userdata by default. The Steam installation remains
+read-only throughout install, update, play, and uninstall.
+
+See [`tools/release/README-PACKAGE.md`](tools/release/README-PACKAGE.md) for
+the packaged user instructions and [`docs/PUBLISHING.md`](docs/PUBLISHING.md)
+for the release gate.
+
 ## Local staging and developer launch
 
 The current workflow is intentionally developer-oriented:
