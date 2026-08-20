@@ -1916,6 +1916,71 @@ Preserved checkpoint artifacts:
 All live files are under
 `stage/condemned-m2-mono/logs/run-20260811-152219/`.
 
+### Controller-facing contradiction and automatic forward-hand correction
+
+**Implemented and automated-tested; awaiting live validation (20 August
+2026):** a later headset tester report supplied the concrete issue left open
+by the earlier broad usability judgment: after selecting `ALIGN HAND + WEAPON
+TO CONTROLLER`, the Colt remained rigidly attached to the hand but did not
+face the controller direction. No fresh run directory or structured event
+stream accompanies that report, so it does not invalidate the 12 August
+same-sample, persistence, or repeat-use evidence. It does invalidate treating
+those successful events as proof that the weapon frame itself was constrained
+to controller aim.
+
+The tester then supplied the decisive reset observation: with Grip and Hand IK
+both zero, the Colt and hand are perfectly aligned to each other, but both
+point in the wrong direction. The tester explicitly requires automatic
+alignment, not another frozen/manual workflow. This proves the authored reset
+hand-to-gun relationship is the known-good constraint; the whole assembly
+needs a controller-local direction correction.
+
+Two incomplete automatic formulations are therefore rejected. Preserving the
+current `A = G*C` can retain stale guided values, while forcing the authored
+grip directly onto the aim-based driver `D` leaves an identity-reset Colt and
+hand on the same wrong basis. The correction retains the fresh same-sample
+raw grip/aim and source-lifetime gates, targets the already accepted global
+empty-hand correction `E`, and carries the immutable authored/reset attachment
+with it. For raw grip `R`, authored grip `Gb`, and controller driver `D`:
+
+```text
+desired hand Hc = R * E
+authored reset attachment Areset = Gb * identity = Gb
+C1 = inverse(D) * Hc
+G1 = Gb * inverse(C1)
+G1 * C1 = Gb
+T1 = inverse(G1) * G0 * T0
+```
+
+For index 76, `Gb` is identity, so resolved object and hand both land on `Hc`:
+the hand points in its globally calibrated forward direction and the Colt
+follows it with the zero/reset fit intact. Non-identity assets carry their own
+authored reset attachment instead of inheriting a Colt assumption. The action
+does not start a freeze mode or require trigger capture.
+
+`m5_align_held_assembly_to_controller` now records the authored grip and the
+recomposed hand-target and authored-attachment position/rotation errors. The
+action fails closed before applying or saving unless
+`automatic_hand_forward_aligned=1` and both relationships reach 0.001 unit
+and 0.01 degree. The paired attachment event declares
+`model_to_hand_preserved=0` and `authored_reset_attachment_used=1`; stale
+current attachment values are intentionally superseded. Portable coverage
+requires an identity Colt-like reset assembly to follow corrected raw grip
+rather than the 60-degree-displaced aim driver, covers a non-identity authored
+reset fit plus global hand correction, rejects invalid input, and proves
+repeat application is idempotent.
+
+The 20 August full gate passes 25/25 x86 and 21/21 x64 CTest cases plus the
+launch-profile, focus-handoff, screenshot-helper, schema-v4 diagnostics
+watcher, and release-tool PowerShell regressions. Built and project-local
+staged x86 loader copies are byte-identical at SHA-256
+`74B2169CA45D0A8FA013AAA1ACA857473F04009FCF18FCD5F31981B63CF6AAF6`.
+The manifest records base commit
+`503fe3150012762403ce157d136ef047a0e687f8` with a dirty working tree. This
+proves the algebra, guards, compilation, and persistence handoff only. Colt
+forward-hand/weapon alignment, collider placement, firing direction, and
+restart persistence remain live gates.
+
 
 
 While free, the left target uses the raw OpenXR grip pose. On two-hand

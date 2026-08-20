@@ -474,10 +474,10 @@ int main() {
         currentColliderInModel.rotation,
         nextColliderInModel.rotation)) > 0.9999F);
 
-    // The primary one-press workflow samples the unweighted raw grip R and
-    // the hybrid driver D (grip position, aim rotation) from one input frame.
-    // With reset authored values G = C = identity, both the hand and model
-    // must land on the corrected grip target even when grip and aim differ.
+    // Auto alignment must make the complete reset-fit assembly follow the
+    // globally corrected raw hand target. With identity authored/reset values
+    // and a 60-degree grip/aim disagreement, both hand and model must point
+    // with the corrected raw grip rather than the aim-based driver D.
     const condemnedvr::PhysicalMeleeRigidTransform
         onePressRawGripWorld{
             {18.0F, -7.0F, 41.0F},
@@ -491,14 +491,12 @@ int main() {
             {}, {0.0F, 0.0F, 0.0F, 1.0F}};
     const condemnedvr::EmptyRightHandAlignmentSettings
         onePressIdentityHand{};
-    const condemnedvr::EmptyRightHandAlignmentSettings
-        onePressEmptyHand{};
     condemnedvr::HeldObjectAlignmentSolution onePressSolution{};
     assert(condemnedvr::
         SolveHandParentedHeldAssemblyControllerAlignment(
-            onePressIdentityGrip, onePressIdentityHand,
-            onePressRawGripWorld, onePressControllerDriverWorld,
-            onePressEmptyHand, onePressSolution));
+            onePressIdentityGrip, onePressRawGripWorld,
+            onePressControllerDriverWorld, onePressIdentityHand,
+            onePressSolution));
     const auto onePressResolvedObject =
         condemnedvr::ResolvePhysicalMeleeHeldModelTransform(
             onePressControllerDriverWorld,
@@ -539,8 +537,12 @@ int main() {
         onePressSolvedAttachment.rotation,
         onePressIdentityGrip.rotation)) > 0.9999F);
 
-    // Non-identity authored/tuned values retain exactly the same G * C
-    // model-to-hand relationship while the corrected hand reaches R * E.
+    // A non-identity authored reset fit and global hand correction must move
+    // together: the hand reaches R * E and G1 * C1 remains exactly G_base.
+    const condemnedvr::PhysicalMeleeRigidTransform
+        onePressAuthoredGrip{
+            {2.0F, -1.0F, 3.0F},
+            {0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo}};
     condemnedvr::EmptyRightHandAlignmentSettings
         onePressGlobalEmptyHand{};
     onePressGlobalEmptyHand.localPositionOffsetUnits =
@@ -559,9 +561,9 @@ int main() {
         onePressSecondSolution{};
     assert(condemnedvr::
         SolveHandParentedHeldAssemblyControllerAlignment(
-            heldCurrentLocalGrip, heldDesiredHand,
-            onePressSecondRawGrip, onePressSecondDriver,
-            onePressGlobalEmptyHand, onePressSecondSolution));
+            onePressAuthoredGrip, onePressSecondRawGrip,
+            onePressSecondDriver, onePressGlobalEmptyHand,
+            onePressSecondSolution));
     const auto onePressDesiredHand =
         condemnedvr::ResolveEmptyRightHandAlignmentTarget(
             onePressSecondRawGrip, onePressGlobalEmptyHand);
@@ -575,6 +577,24 @@ int main() {
     assert(std::fabs(fearvr::Dot(
         onePressSecondResolvedHand.rotation,
         onePressDesiredHand.rotation)) > 0.9999F);
+    const auto onePressSecondResolvedObject =
+        condemnedvr::ResolvePhysicalMeleeHeldModelTransform(
+            onePressSecondDriver,
+            onePressSecondSolution.modelLocalGrip.positionUnits,
+            onePressSecondSolution.modelLocalGrip.rotation, true);
+    assert(onePressSecondResolvedObject.active);
+    condemnedvr::PhysicalMeleeRigidTransform
+        onePressSecondResolvedAuthoredHand{};
+    assert(condemnedvr::ComposePhysicalMeleeRigidTransforms(
+        onePressSecondResolvedObject.objectWorld,
+        onePressAuthoredGrip,
+        onePressSecondResolvedAuthoredHand));
+    assert(TrackingDistance(
+        onePressSecondResolvedAuthoredHand.positionUnits,
+        onePressSecondResolvedHand.positionUnits) < 0.0001F);
+    assert(std::fabs(fearvr::Dot(
+        onePressSecondResolvedAuthoredHand.rotation,
+        onePressSecondResolvedHand.rotation)) > 0.9999F);
     const condemnedvr::PhysicalMeleeRigidTransform
         onePressSecondHandLocal{
             onePressSecondSolution.rightHandAlignment.
@@ -588,18 +608,48 @@ int main() {
         onePressSecondHandLocal, onePressSecondAttachment));
     assert(TrackingDistance(
         onePressSecondAttachment.positionUnits,
-        currentAttachment.positionUnits) < 0.0001F);
+        onePressAuthoredGrip.positionUnits) < 0.0001F);
     assert(std::fabs(fearvr::Dot(
         onePressSecondAttachment.rotation,
-        currentAttachment.rotation)) > 0.9999F);
+        onePressAuthoredGrip.rotation)) > 0.9999F);
+    condemnedvr::HeldObjectAlignmentSolution
+        onePressRepeatedSolution{};
+    assert(condemnedvr::
+        SolveHandParentedHeldAssemblyControllerAlignment(
+            onePressAuthoredGrip, onePressSecondRawGrip,
+            onePressSecondDriver, onePressGlobalEmptyHand,
+            onePressRepeatedSolution));
+    assert(TrackingDistance(
+        onePressRepeatedSolution.modelLocalGrip.positionUnits,
+        onePressSecondSolution.modelLocalGrip.positionUnits) < 0.0001F);
+    assert(std::fabs(fearvr::Dot(
+        onePressRepeatedSolution.modelLocalGrip.rotation,
+        onePressSecondSolution.modelLocalGrip.rotation)) > 0.9999F);
+    assert(TrackingDistance(
+        onePressRepeatedSolution.rightHandAlignment.
+            localPositionOffsetUnits,
+        onePressSecondSolution.rightHandAlignment.
+            localPositionOffsetUnits) < 0.0001F);
+    assert(std::fabs(fearvr::Dot(
+        onePressRepeatedSolution.rightHandAlignment.
+            localRotationOffset,
+        onePressSecondSolution.rightHandAlignment.
+            localRotationOffset)) > 0.9999F);
+    auto onePressInvalidAuthoredGrip = onePressAuthoredGrip;
+    onePressInvalidAuthoredGrip.positionUnits = {301.0F, 0.0F, 0.0F};
+    assert(!condemnedvr::
+        SolveHandParentedHeldAssemblyControllerAlignment(
+            onePressInvalidAuthoredGrip, onePressSecondRawGrip,
+            onePressSecondDriver, onePressGlobalEmptyHand,
+            onePressSecondSolution));
     auto onePressInvalidEmptyHand = onePressGlobalEmptyHand;
     onePressInvalidEmptyHand.localPositionOffsetUnits =
         {100.0F, 100.0F, 100.0F};
     assert(!condemnedvr::
         SolveHandParentedHeldAssemblyControllerAlignment(
-            heldCurrentLocalGrip, heldDesiredHand,
-            onePressSecondRawGrip, onePressSecondDriver,
-            onePressInvalidEmptyHand, onePressSecondSolution));
+            onePressAuthoredGrip, onePressSecondRawGrip,
+            onePressSecondDriver, onePressInvalidEmptyHand,
+            onePressSecondSolution));
 
     // A weapon/model lifetime transition invalidates an unfinished capture.
     assert(condemnedvr::BeginHeldObjectAlignment(

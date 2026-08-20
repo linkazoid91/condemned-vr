@@ -3599,7 +3599,9 @@ bool ApplyHeldObjectAlignmentSolution(
     const char* action,
     WeaponSettingsStoreResult& gripSaveResult,
     WeaponSettingsStoreResult& handSaveResult,
-    WeaponSettingsStoreResult& colliderSaveResult) noexcept {
+    WeaponSettingsStoreResult& colliderSaveResult,
+    bool currentModelToHandPreserved = true,
+    bool authoredResetAttachmentUsed = false) noexcept {
     gripSaveResult = WeaponSettingsStoreResult::InvalidArgument;
     handSaveResult = WeaponSettingsStoreResult::InvalidArgument;
     colliderSaveResult = WeaponSettingsStoreResult::InvalidArgument;
@@ -3813,7 +3815,8 @@ bool ApplyHeldObjectAlignmentSolution(
         std::snprintf(
             detail, sizeof(detail),
             "action=%s weapon_index=%ld source_generation=%llu "
-            "relationship=hand_parented model_to_hand_preserved=1 "
+            "relationship=%s model_to_hand_preserved=%u "
+            "authored_reset_attachment_used=%u "
             "collider_model_relation_preserved=1 "
             "block_collider_model_relation_preserved=1 "
             "grip_persistence=%s hand_persistence=%s "
@@ -3822,6 +3825,10 @@ bool ApplyHeldObjectAlignmentSolution(
             action != nullptr ? action : "unknown",
             static_cast<long>(expectedWeaponIndex),
             static_cast<unsigned long long>(expectedGeneration),
+            authoredResetAttachmentUsed
+                ? "authored_reset_hand_parented" : "hand_parented",
+            currentModelToHandPreserved ? 1U : 0U,
+            authoredResetAttachmentUsed ? 1U : 0U,
             WeaponSettingsStoreResultName(gripSaveResult),
             WeaponSettingsStoreResultName(handSaveResult),
             WeaponSettingsStoreResultName(colliderSaveResult),
@@ -3879,11 +3886,17 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
     float gripRotation[4]{};
     float aimRotation[4]{};
     PhysicalMeleeRigidTransform currentModelLocalGrip{};
+    PhysicalMeleeRigidTransform authoredModelLocalGrip{};
     EmptyRightHandAlignmentSettings currentHandAlignment{};
     PhysicalMeleeRigidTransform rawGripWorld{};
     PhysicalMeleeRigidTransform controllerDriverWorld{};
     PhysicalMeleeRigidTransform desiredHandWorld{};
     HeldObjectAlignmentSolution solution{};
+    float handTargetPositionErrorUnits = -1.0F;
+    float handTargetRotationErrorDegrees = -1.0F;
+    float authoredAttachmentPositionErrorUnits = -1.0F;
+    float authoredAttachmentRotationErrorDegrees = -1.0F;
+    bool automaticHandForwardAligned = false;
 
     const auto logResult = [&]() noexcept {
         if (g_passThroughLog == nullptr) {
@@ -3896,7 +3909,7 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
         const PhysicalMeleeRigidTransform currentHandLocal{
             currentHandAlignment.localPositionOffsetUnits,
             currentHandAlignment.localRotationOffset};
-        char detail[2048]{};
+        char detail[2560]{};
         std::snprintf(
             detail, sizeof(detail),
             "event=%s weapon_index=%ld source_generation=%llu "
@@ -3908,6 +3921,8 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
             "grip_to_aim_degrees=%.3f "
             "current_grip_position=(%.3f,%.3f,%.3f) "
             "current_grip_q=(%.6f,%.6f,%.6f,%.6f) "
+            "authored_grip_position=(%.3f,%.3f,%.3f) "
+            "authored_grip_q=(%.6f,%.6f,%.6f,%.6f) "
             "current_hand_position=(%.3f,%.3f,%.3f) "
             "current_hand_q=(%.6f,%.6f,%.6f,%.6f) "
             "desired_hand_position=(%.3f,%.3f,%.3f) "
@@ -3916,7 +3931,15 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
             "solved_grip_q=(%.6f,%.6f,%.6f,%.6f) "
             "solved_hand_position=(%.3f,%.3f,%.3f) "
             "solved_hand_q=(%.6f,%.6f,%.6f,%.6f) "
-            "model_to_hand_preserved=1 collider_model_relation_preserved=1 "
+            "alignment_basis=global_corrected_grip_with_authored_reset_attachment "
+            "hand_target_position_error_units=%.6f "
+            "hand_target_rotation_error_degrees=%.6f "
+            "authored_attachment_position_error_units=%.6f "
+            "authored_attachment_rotation_error_degrees=%.6f "
+            "automatic_hand_forward_aligned=%u "
+            "current_model_to_hand_preserved=0 "
+            "authored_reset_attachment_preserved=1 "
+            "collider_model_relation_preserved=1 "
             "grip_persistence=%s hand_persistence=%s "
             "collider_persistence=%s",
             HeldAssemblyControllerAlignmentEventName(
@@ -3943,6 +3966,13 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
             currentModelLocalGrip.rotation.y,
             currentModelLocalGrip.rotation.z,
             currentModelLocalGrip.rotation.w,
+            authoredModelLocalGrip.positionUnits.x,
+            authoredModelLocalGrip.positionUnits.y,
+            authoredModelLocalGrip.positionUnits.z,
+            authoredModelLocalGrip.rotation.x,
+            authoredModelLocalGrip.rotation.y,
+            authoredModelLocalGrip.rotation.z,
+            authoredModelLocalGrip.rotation.w,
             currentHandLocal.positionUnits.x,
             currentHandLocal.positionUnits.y,
             currentHandLocal.positionUnits.z,
@@ -3971,6 +4001,11 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
             solution.rightHandAlignment.localRotationOffset.y,
             solution.rightHandAlignment.localRotationOffset.z,
             solution.rightHandAlignment.localRotationOffset.w,
+            handTargetPositionErrorUnits,
+            handTargetRotationErrorDegrees,
+            authoredAttachmentPositionErrorUnits,
+            authoredAttachmentRotationErrorDegrees,
+            automaticHandForwardAligned ? 1U : 0U,
             WeaponSettingsStoreResultName(
                 g_heldAssemblyControllerAlignmentLastGripSaveResult),
             WeaponSettingsStoreResultName(
@@ -3992,6 +4027,9 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
     currentModelLocalGrip = {
         calibration.positionUnits,
         ResolvePhysicalMeleeGripCalibrationRotation(calibration)};
+    authoredModelLocalGrip = {
+        calibration.basePositionUnits,
+        fearvr::Normalize(calibration.baseRotation)};
     const ToolMenuRightHandIkSettings currentHandSettings =
         CopyToolMenuRightHandIkSettings(weaponIndex);
     currentHandAlignment.localPositionOffsetUnits =
@@ -4020,9 +4058,52 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
     desiredHandWorld = ResolveEmptyRightHandAlignmentTarget(
         rawGripWorld, g_emptyRightHandAlignmentSettings);
     if (!SolveHandParentedHeldAssemblyControllerAlignment(
-            currentModelLocalGrip, currentHandAlignment,
-            rawGripWorld, controllerDriverWorld,
+            authoredModelLocalGrip, rawGripWorld,
+            controllerDriverWorld,
             g_emptyRightHandAlignmentSettings, solution)) {
+        g_heldAssemblyControllerAlignmentLastEvent =
+            HeldAssemblyControllerAlignmentEvent::SolveRejected;
+        logResult();
+        return false;
+    }
+    const PhysicalMeleeRigidTransform solvedHandWorld =
+        ResolveEmptyRightHandAlignmentTarget(
+        controllerDriverWorld, solution.rightHandAlignment);
+    const PhysicalMeleeVisualProxyTransform solvedObject =
+        ResolvePhysicalMeleeHeldModelTransform(
+            controllerDriverWorld,
+            solution.modelLocalGrip.positionUnits,
+            solution.modelLocalGrip.rotation, true);
+    PhysicalMeleeRigidTransform solvedAuthoredHandWorld{};
+    if (solvedObject.active &&
+        ComposePhysicalMeleeRigidTransforms(
+            solvedObject.objectWorld, authoredModelLocalGrip,
+            solvedAuthoredHandWorld)) {
+        handTargetPositionErrorUnits = PhysicalMeleeLength(
+            PhysicalMeleeSubtract(
+                solvedHandWorld.positionUnits,
+                desiredHandWorld.positionUnits));
+        if (RightHandIkQuaternionAngularDifferenceDegrees(
+                solvedHandWorld.rotation,
+                desiredHandWorld.rotation,
+                handTargetRotationErrorDegrees)) {
+            authoredAttachmentPositionErrorUnits =
+                PhysicalMeleeLength(PhysicalMeleeSubtract(
+                    solvedAuthoredHandWorld.positionUnits,
+                    solvedHandWorld.positionUnits));
+            if (RightHandIkQuaternionAngularDifferenceDegrees(
+                    solvedAuthoredHandWorld.rotation,
+                    solvedHandWorld.rotation,
+                    authoredAttachmentRotationErrorDegrees)) {
+                automaticHandForwardAligned =
+                    handTargetPositionErrorUnits <= 0.001F &&
+                    handTargetRotationErrorDegrees <= 0.01F &&
+                    authoredAttachmentPositionErrorUnits <= 0.001F &&
+                    authoredAttachmentRotationErrorDegrees <= 0.01F;
+            }
+        }
+    }
+    if (!automaticHandForwardAligned) {
         g_heldAssemblyControllerAlignmentLastEvent =
             HeldAssemblyControllerAlignmentEvent::SolveRejected;
         logResult();
@@ -4033,7 +4114,8 @@ bool ApplyToolMenuHeldAssemblyControllerAlignmentAction() noexcept {
         "vr_tool_menu_align_assembly_to_controller",
         g_heldAssemblyControllerAlignmentLastGripSaveResult,
         g_heldAssemblyControllerAlignmentLastHandSaveResult,
-        g_heldAssemblyControllerAlignmentLastColliderSaveResult);
+        g_heldAssemblyControllerAlignmentLastColliderSaveResult,
+        false, true);
     g_heldAssemblyControllerAlignmentLastEvent = applied
         ? HeldAssemblyControllerAlignmentEvent::Applied
         : HeldAssemblyControllerAlignmentEvent::ApplyRejected;

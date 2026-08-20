@@ -657,6 +657,39 @@ SHA-256
 the final player-settings snapshot is SHA-256
 `07B4F52D6ED87265F83CB23285B6DF4289920063279E8E157243A7E2A3097CDC`.
 
+A 20 August headset tester report now supplies the concrete issue that the
+earlier broad usability judgment did not test: after the one-press action, the
+Colt remained attached to the hand but did not face the controller direction.
+No fresh structured run accompanies the report, so the prior same-sample,
+write, and repeat-use evidence remains valid; weapon-to-controller direction
+correctness does not. Inspection confirmed that the old solver could preserve
+a stale model-local grip `G` while successfully aligning the hand and
+preserving `G*C`. The tester then clarified that zero Grip and Hand IK values
+place the Colt and hand perfectly relative to each other while both point in
+the wrong direction, and explicitly requested automatic rather than frozen
+alignment. This establishes the authored reset attachment as the known-good
+relationship and moves the fault to the whole assembly's controller-local
+basis.
+
+The working tree contains an **implemented and automated-tested, awaiting live
+validation** automatic correction. It targets the already calibrated global
+raw-grip hand pose, carries each weapon's immutable zero/reset hand-to-model
+attachment, and rebases the collider from the prior model grip. Stale current
+Grip/Hand IK values are intentionally superseded. For index 76 the authored
+attachment is identity, so hand and Colt resolve together onto the corrected
+hand direction rather than the 60-degree-displaced aim driver. The action
+requires no freeze or trigger capture and rejects before persistence unless
+both the hand target and authored attachment recompose within 0.001 unit and
+0.01 degree. The full gate passes 25/25 x86 and 21/21 x64 CTest cases plus all
+five normal PowerShell regression suites. Built and project-local staged x86
+loader copies are byte-identical at SHA-256
+`74B2169CA45D0A8FA013AAA1ACA857473F04009FCF18FCD5F31981B63CF6AAF6`;
+the manifest records base commit
+`503fe3150012762403ce157d136ef047a0e687f8` plus a dirty working tree. No
+headset run has yet accepted Colt/hand forward direction, reset-fit
+preservation, collider placement, fire direction, or restart persistence for
+this correction.
+
 The current combat-investigation diagnostic is **implemented, automated-tested,
 and live exercised**. Its instrumentation is usable; the automatic command-17
 telegraph candidate is headset-rejected because of its delayed Retail attack
@@ -1364,13 +1397,13 @@ baseline.
 | HMD translation | **PASS** | M3 live bounded relative translation; current path limits unsafe travel and falls back on stale tracking |
 | Controller transport/input | **PASS** | M4 base controls and right-stick-up forensic ready selection pass live; the complete forensic lifecycle remains M5 work |
 | Locomotion | **PASS** | M4 live left-stick movement and right-stick turning with keyboard/mouse coexistence |
-| Weapon/fire aiming | **PARTIAL** | HMD flashlight, mapped Scanner/Item Camera aim/action, index-76 visible-barrel direction, and the five-identity one-press held-pose interaction pass live; Flash direction/fire still needs regression under the new saved Grip, while origin/parallax, recoil, and complete coverage remain |
-| Visible weapon pose | **PARTIAL** | Render-only override/restoration remains exact; after the old guided restart contradiction, the one-press hand-parented workflow is live accepted in-session for indices 76, 46, 4, 3, and 32, while restart and dependent collider/camera/fire validation remain |
+| Weapon/fire aiming | **PARTIAL** | HMD flashlight, mapped Scanner/Item Camera aim/action, and the earlier index-76 visible-barrel direction pass live; a later Colt controller-facing report contradicts direction correctness after one-press alignment, and the automatic forward-hand/reset-attachment correction plus Flash/fire regression still need live validation, while origin/parallax, recoil, and complete coverage remain |
+| Visible weapon pose | **PARTIAL** | Render-only override/restoration remains exact; the prior one-press run retains same-sample/write/repeat evidence for indices 76, 46, 4, 3, and 32, but a later Colt-facing report rejects direction correctness and the automated-only forward-hand/reset-attachment correction still needs headset, collider/camera/fire, and restart validation |
 | Simulated weapon weight | **EXPERIMENTAL** | Bounded player-local damped-spring solver is automated-tested and drives visible/collision pose; it is not collision-constrained physics |
 | Melee collision | **PARTIAL** | Pipe reference path and index-29 inherited native geometry/continuous speed-qualified overlap pass live; the other mapped one-handed assets remain unverified |
 | Actor contact qualification | **EXPERIMENTAL** | Pipe ownership, 1 cm overlap, 7.25 m/s Hit Speed, and 0.12 m travel-plus-swing-end rearm pass live with zero same-target reaccepts; the transient-invalid hold is regression-tested but was not naturally invoked in the confirmation run |
 | Native damage handoff | **PARTIAL** | Pipe damage is live-accepted; index 29 produced three clean actor native-forwards across two targets, with explicit headset-visible damage confirmation pending; remaining assets are unproven |
-| Arm/hand IK | **PARTIAL** | Initial chains, callback order, wrist placement, locomotion anchoring, empty-hand correction, and five-identity one-press hand/weapon propagation have live evidence; restart/load-state generation and explicit visual collider preservation remain open |
+| Arm/hand IK | **PARTIAL** | Initial chains, callback order, wrist placement, locomotion anchoring, empty-hand correction, and one-press hand/weapon propagation have live evidence; Colt controller-facing correctness is contradicted, while the automatic forward-hand/reset-attachment correction, restart/load-state generation, and explicit visual collider preservation remain open |
 | Haptics | **PARTIAL** | M4 bounded input-confirmation pulses passed live; melee-impact impulse haptics and verified weapon-event feedback are not implemented |
 | HUD/UI | **PARTIAL** | Retail menu/screen comfort panel and controller navigation passed live; the title-case VR Settings hub, four-row styling, two clean entries/focus-outs, and one explicit Back pass live. The prior opening-Enter leak did not recur, so its defensive suppression branch remains automated-only. Display, VR Features, and Comfort are placeholders; Developer Tools `On -> Off`, save, runtime mutation, immediate native-label refresh, and controller-hotkey suppression pass live, while F12 suppression, On restoration/release capture, and fresh-process persistence remain pending; VR Tools remains developer UI |
 | Installer/release | **EXPERIMENTAL** | Retail-free folder/ZIP builder, strict install/update, integrity-only Play, dry-run-first uninstall, ownership manifest, and preserved userdata pass automated plus project-local Retail integration smoke; shortcut, clean-account, extracted-ZIP, runtime/headset, and release acceptance remain |

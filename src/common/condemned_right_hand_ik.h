@@ -314,32 +314,35 @@ inline bool ResolveHandParentedModelLocalGrip(
     return true;
 }
 
-// Aligns the complete held assembly to the current physical controller while
-// preserving the authored model-to-hand attachment A = G * C. The hand target
-// comes from the raw grip pose plus the global empty-hand correction; the
-// model continues to use the hybrid driver D (grip position, aim rotation).
+// Automatically aligns the complete held assembly to the globally corrected
+// raw-grip hand target. The immutable authored/reset relationship is
+// A_reset = G_base * identity, so stale per-weapon G/C values cannot preserve
+// a bad direction. The solved pair keeps G1 * C1 = G_base: the hand reaches
+// rawGrip * E and the weapon follows the known-good reset fit.
 inline bool SolveHandParentedHeldAssemblyControllerAlignment(
-    const PhysicalMeleeRigidTransform& currentModelLocalGrip,
-    const EmptyRightHandAlignmentSettings& currentHandAlignment,
+    const PhysicalMeleeRigidTransform& authoredModelLocalGrip,
     const PhysicalMeleeRigidTransform& rawGripWorld,
     const PhysicalMeleeRigidTransform& controllerDriverWorld,
     const EmptyRightHandAlignmentSettings& emptyHandAlignment,
     HeldObjectAlignmentSolution& solution) noexcept {
-    if (!PhysicalMeleeRigidTransformIsValid(rawGripWorld) ||
+    if (!PhysicalMeleeRigidTransformIsValid(authoredModelLocalGrip) ||
+        !PhysicalMeleeRigidTransformIsValid(rawGripWorld) ||
         !PhysicalMeleeRigidTransformIsValid(controllerDriverWorld) ||
-        !EmptyRightHandAlignmentSettingsAreValid(emptyHandAlignment)) {
+        !EmptyRightHandAlignmentSettingsAreValid(emptyHandAlignment) ||
+        PhysicalMeleeLength(authoredModelLocalGrip.positionUnits) > 300.0F) {
         return false;
     }
     const PhysicalMeleeRigidTransform desiredHandWorld =
         ResolveEmptyRightHandAlignmentTarget(
             rawGripWorld, emptyHandAlignment);
+    const EmptyRightHandAlignmentSettings authoredResetHand{};
     HeldObjectAlignmentSolution solved{};
     if (!PhysicalMeleeRigidTransformIsValid(desiredHandWorld) ||
         !SolveEmptyRightHandAlignment(
             desiredHandWorld, controllerDriverWorld,
             solved.rightHandAlignment) ||
         !ResolveHandParentedModelLocalGrip(
-            currentModelLocalGrip, currentHandAlignment,
+            authoredModelLocalGrip, authoredResetHand,
             solved.rightHandAlignment, solved.modelLocalGrip)) {
         return false;
     }

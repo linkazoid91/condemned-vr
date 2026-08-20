@@ -520,12 +520,25 @@ explicit identity rollback; use it only when that rollback is intended.
 
 ### Primary one-press held-assembly alignment gate
 
-The immediate one-press interaction is **live verified in-session for indices
-76, 46, 4, 3, and 32**. Run `run-20260811-152219` used staged loader SHA-256
+The immediate one-press interaction retains **live same-sample, persistence,
+and repeat-use evidence for indices 76, 46, 4, 3, and 32**, but controller-
+facing correctness is contradicted for the Colt. Run `run-20260811-152219`
+used staged loader SHA-256
 `2D44888071EA3D360E9A7FB822CBC5EDD5BB6C8DBB1E4DD9AE77FCE1D4237A9E`;
 all 19 applications were same-sample, `applied`, and persisted Grip, Hand IK,
 and Collider as `ok/ok/ok`. The tester accepted the visual result for continued
-use. Portable tests remain 20/20 x86 and 16/16 x64.
+use. A later 20 August headset report says the Colt did not face the controller
+after the action. It has no fresh structured run, but it invalidates treating
+the older successful events as weapon-direction proof.
+
+The automatic forward-hand/reset-attachment correction is **implemented and
+automated-tested, awaiting live validation**. The full gate passes 25/25 x86
+and 21/21 x64; built and
+project-local staged x86 loader copies are byte-identical at SHA-256
+`74B2169CA45D0A8FA013AAA1ACA857473F04009FCF18FCD5F31981B63CF6AAF6`.
+It targets the globally corrected raw-grip hand pose, carries the immutable
+authored zero/reset hand-to-model attachment, and rebases the collider. It is
+one automatic press with no freeze or trigger capture.
 
 The full gate is still **partial**: restart, forced stale/source-change
 rejection, explicit collider/damage observation, forensic optics, and firearm
@@ -547,14 +560,30 @@ the before/after Grip, Hand IK, and Collider records.
 3. Require `m5_align_held_assembly_to_controller event=applied`,
    `raw_pose_fresh_same_sample=1`, one nonzero sample ID/timestamp, finite raw
    grip and aim transforms, and the measured grip/aim angular difference.
-   Require the same stable item index/generation throughout.
+   Require the same stable item index/generation throughout. Require
+   `alignment_basis=global_corrected_grip_with_authored_reset_attachment`,
+   finite authored grip,
+   `hand_target_position_error_units<=0.001`,
+   `hand_target_rotation_error_degrees<=0.01`,
+   `authored_attachment_position_error_units<=0.001`,
+   `authored_attachment_rotation_error_degrees<=0.01`,
+   `automatic_hand_forward_aligned=1`,
+   `current_model_to_hand_preserved=0`, and
+   `authored_reset_attachment_preserved=1`. Index 76 must report the identity
+   authored reset attachment; do not infer the same local frame for another
+   asset.
 4. Require `m5_held_object_attachment_applied` to report
-   `model_to_hand_preserved=1`,
+   `relationship=authored_reset_hand_parented`,
+   `model_to_hand_preserved=0`,
+   `authored_reset_attachment_used=1`,
    `collider_model_relation_preserved=1`, and all three persistence results as
    `ok`. The menu must report `HAND + WEAPON ALIGNED AND SAVED`.
 5. Move through yaw, pitch, roll, reach, and a normal swing. The hand must stay
    rigidly in the same natural model grip while the assembly follows the
-   physical controller without a weight-lag-dependent saved offset.
+   physical controller without a weight-lag-dependent saved offset. For index
+   76, the hand must point in the same forward direction as the already
+   accepted empty hand and the zero/reset Colt must follow it rigidly; neither
+   may remain on the prior right-pointing assembly basis.
 6. Show the collider wireframe and compare it to the model before and after.
    Its model-relative position must not move. Perform the bounded melee
    contact check; index 76 must not create a distant or detached damage volume.
