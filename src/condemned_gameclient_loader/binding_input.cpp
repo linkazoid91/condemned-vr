@@ -26,7 +26,9 @@
 #include "condemned_locomotion.h"
 #include "condemned_menu_input.h"
 #include "condemned_physical_melee.h"
+#include "condemned_player_collision.h"
 #include "head_tracking_math.h"
+#include "module_identity.h"
 #include "protocol.h"
 #include "retail_menu_integration.h"
 #include "weapon_identity_reader.h"
@@ -110,6 +112,15 @@ using MeleeImpactDispatchFunction = std::uintptr_t(__thiscall*)(
 using ResetMeleeTargetReferenceFunction =
     void(__thiscall*)(void*);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
+using PlayerSetDimensionsFunction =
+    void(__thiscall*)(void*, const VectorAbi*);
+using GetObjectDimensionsFunction =
+    std::uint32_t(__thiscall*)(void*, void*, VectorAbi*);
+using SetObjectDimensionsFunction =
+    std::uint32_t(__thiscall*)(
+        void*, void*, VectorAbi*, std::uint32_t);
+using SetVelocityFunction =
+    std::uint32_t(__thiscall*)(void*, void*, const VectorAbi*);
 using ClientShellUpdateFunction = void(__thiscall*)(void*);
 using ClientShellKeyUpFunction = void(__thiscall*)(void*, int);
 using ClientShellKeyDownFunction =
@@ -206,6 +217,59 @@ constexpr std::uintptr_t kMeleeTargetReferenceVectorPushCallRva = 0x0001FB87U;
 constexpr std::uintptr_t kMeleeCollisionLimitTextRva = 0x0013A6B8U;
 constexpr std::uintptr_t kMeleeClientGlobalRva = 0x00168EECU;
 constexpr std::uintptr_t kResetMeleeTargetReferenceRva = 0x00102B80U;
+constexpr std::uintptr_t kPlayerSetDimensionsRva = 0x00031BA0U;
+constexpr std::uintptr_t kClientPhysicsGlobalRva = 0x00172EC4U;
+constexpr std::uintptr_t kClientPhysicsVtableExecutableRva =
+    0x0014ADE0U;
+constexpr std::uintptr_t kGetObjectDimensionsExecutableRva =
+    0x00064530U;
+constexpr std::uintptr_t kSetObjectDimensionsExecutableRva =
+    0x00007FD0U;
+constexpr std::uintptr_t kSetVelocityExecutableRva = 0x00007CD0U;
+constexpr std::size_t kSetVelocityVtableSlot = 0x2CU / 4U;
+constexpr std::uintptr_t kSetVelocityLogTextRva = 0x0014ACD4U;
+constexpr LONG kPlayerCollisionVelocityEventCap = 128;
+constexpr LONG kPlayerCollisionUpdateEventCap = 256;
+constexpr ULONGLONG kPlayerCollisionTargetFreshnessMilliseconds = 2000U;
+constexpr ULONGLONG kPlayerCollisionUpdateLogIntervalMilliseconds = 100U;
+constexpr std::uintptr_t kPlayerColliderAdjacentRoutineRva =
+    0x00031CF0U;
+constexpr std::uintptr_t kPlayerColliderWriterRoutineRva =
+    0x000344E0U;
+constexpr std::uintptr_t kPlayerColliderWriterCallerBranchRva =
+    0x00037FE3U;
+constexpr std::uintptr_t kPlayerColliderWriterCallerReturnRva =
+    0x00037FF4U;
+constexpr std::uintptr_t kSetObjectDimensionsFirstLogTextRva =
+    0x0014AD78U;
+constexpr std::uintptr_t kSetObjectDimensionsSecondLogTextRva =
+    0x0014AD5CU;
+constexpr LONG kPlayerColliderWriterKnownEventCap = 64;
+constexpr LONG kPlayerColliderWriterUnknownGameEventCap = 64;
+constexpr LONG kPlayerColliderWriterExecutableEventCap = 64;
+constexpr LONG kPlayerColliderWriterExternalEventCap = 32;
+constexpr LONG kPlayerColliderWriterUnresolvedEventCap = 32;
+constexpr std::size_t kPlayerObjectOffset = 0x10U;
+constexpr std::size_t kPlayerRequestedDimensionsOffset = 0x1CU;
+// The verified flag-0x20 manager routine can source its primary/retry
+// ILTClientPhysics::SetObjectDims request from the +0x40C triple. The +0x418
+// triple is populated nearby but is not read by that routine. Both runtime
+// meanings remain hypotheses; the drift probe reads them only under neutral
+// labels and never mutates them.
+constexpr std::size_t kPlayerManager40cSourceCandidateOffset =
+    0x40CU;
+constexpr std::size_t kPlayerAdjacentDimensionsCandidateOffset = 0x418U;
+enum class PlayerColliderPendingProcessResult {
+    NotProcessed,
+    AlreadyMatched,
+    NativeSetDimsAttempted,
+};
+constexpr std::size_t kGetObjectDimensionsVtableSlot = 0x20U / 4U;
+constexpr std::size_t kSetObjectDimensionsVtableSlot = 0x24U / 4U;
+constexpr std::uint32_t kLithTechOk = 0U;
+constexpr std::uint32_t kSetDimensionsPushObjects = 1U;
+constexpr LONG kPlayerColliderScaleBasisPointsDefault = 10000;
+constexpr ULONGLONG kPlayerColliderReapplyIntervalMilliseconds = 250U;
 constexpr double kContinuousMeleeCollisionExpiration = 1.0e300;
 constexpr std::size_t kMeleeCollisionRecordOffset = 0x18U;
 constexpr std::size_t kMeleeCollisionRecordStride = 0x60U;
@@ -527,8 +591,100 @@ constexpr unsigned char kPlayerHealthHandlerBody[] = {
 constexpr unsigned char kPlayerHealthRegistrationTail[] = {
     0xFF, 0x90, 0x10, 0x01, 0x00, 0x00};
 constexpr ULONGLONG kPlayerVitalsSampleIntervalMilliseconds = 100U;
+constexpr unsigned char kPlayerSetDimensionsPrefix[] = {
+    0x83, 0xEC, 0x64, 0x56, 0x57, 0x8B, 0xF1, 0x8B, 0x0D};
+constexpr unsigned char kPlayerSetDimensionsAfterPhysicsGlobal[] = {
+    0x8B, 0x01, 0x8D, 0x54, 0x24, 0x2C, 0x52,
+    0x8B, 0x56, 0x10, 0x52, 0xFF, 0x50, 0x20};
+constexpr unsigned char kPlayerSetDimensionsDesiredRead[] = {
+    0x8D, 0x46, 0x1C, 0x8B, 0x08, 0x8B, 0x50,
+    0x04, 0x8B, 0x40, 0x08, 0x6A, 0x01};
+constexpr unsigned char kPlayerSetDimensionsNativeCall[] = {
+    0x8B, 0x11, 0x50, 0xFF, 0x52, 0x24,
+    0x85, 0xC0, 0x74, 0x32};
+constexpr unsigned char kPlayerSetDimensionsFallbackAfterPhysicsGlobal[] = {
+    0x8B, 0x01, 0x6A, 0x00, 0x8D, 0x54, 0x24, 0x30,
+    0x52, 0x8B, 0x56, 0x10, 0x52, 0xFF, 0x50, 0x24};
+constexpr unsigned char kPlayerSetDimensionsReturnTail[] = {
+    0x5F, 0x5E, 0x83, 0xC4, 0x64, 0xC2, 0x04, 0x00};
+
+constexpr unsigned char kGetObjectDimensionsExecutablePrefix[] = {
+    0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x74, 0x21,
+    0x8B, 0x44, 0x24, 0x08, 0x85, 0xC0, 0x74, 0x19,
+    0x8B, 0x51, 0x78};
+constexpr unsigned char kSetObjectDimensionsExecutablePrefix[] = {
+    0x83, 0xEC, 0x68, 0x56, 0x8B, 0x74, 0x24, 0x70,
+    0x85, 0xF6, 0x57, 0x0F, 0x84, 0xF7, 0x00, 0x00,
+    0x00, 0x8B, 0x7C, 0x24, 0x78, 0x85, 0xFF, 0x0F,
+    0x84, 0xEB, 0x00, 0x00, 0x00};
+constexpr unsigned char kSetObjectDimensionsSuccessTail[] = {
+    0x5F, 0x33, 0xC0, 0x5E, 0x83, 0xC4, 0x68, 0xC2,
+    0x0C, 0x00};
+constexpr unsigned char kSetObjectDimensionsAdjustedTail[] = {
+    0x5F, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x5E, 0x83,
+    0xC4, 0x68, 0xC2, 0x0C, 0x00};
+constexpr unsigned char kSetObjectDimensionsInvalidTail[] = {
+    0x5F, 0xB8, 0x3C, 0x00, 0x00, 0x00, 0x5E, 0x83,
+    0xC4, 0x68, 0xC2, 0x0C, 0x00};
+constexpr unsigned char kPlayerColliderAdjacentPrefix[] = {
+    0x83, 0xEC, 0x24, 0x56, 0x8B, 0xF1, 0x8B, 0x0D};
+constexpr unsigned char kPlayerColliderAdjacentAfterPhysicsGlobal[] = {
+    0x8B, 0x01, 0x8D, 0x54, 0x24, 0x04, 0x52,
+    0x8B, 0x56, 0x10, 0x52, 0xFF, 0x50, 0x20};
+constexpr unsigned char kPlayerColliderAdjacentFirstRequest[] = {
+    0x8B, 0x44, 0x24, 0x0C, 0x8B, 0x8E, 0x1C, 0x04,
+    0x00, 0x00, 0x8B, 0x54, 0x24, 0x14, 0x6A, 0x01,
+    0x89, 0x44, 0x24, 0x1C, 0x8B, 0x46, 0x10, 0x89,
+    0x4C, 0x24, 0x20, 0x8B, 0x0D};
+constexpr unsigned char kPlayerColliderAdjacentFirstCallSuffix[] = {
+    0x8D, 0x7C, 0x24, 0x1C, 0x57, 0x89, 0x54, 0x24,
+    0x28, 0x8B, 0x11, 0x50, 0xFF, 0x52, 0x24};
+constexpr unsigned char kPlayerColliderAdjacentRetrySuffix[] = {
+    0x8B, 0xD8, 0x8B, 0x01, 0x6A, 0x00, 0x8D, 0x54,
+    0x24, 0x10, 0x52, 0x8B, 0x56, 0x10, 0xF7, 0xDB,
+    0x1A, 0xDB, 0x52, 0xFE, 0xC3, 0xFF, 0x50, 0x24};
+constexpr unsigned char kPlayerColliderWriterEntry[] = {
+    0x83, 0xEC, 0x58, 0x53, 0x56, 0x57, 0x8B, 0x7C,
+    0x24, 0x68, 0x33, 0xDB, 0x3B, 0xFB, 0x8B, 0xF1,
+    0x0F, 0x84, 0x17, 0x03, 0x00, 0x00, 0x8B, 0x07};
+constexpr unsigned char kPlayerColliderWriterTail[] = {
+    0x5F, 0x5E, 0x5B, 0x83, 0xC4, 0x58, 0xC2, 0x04,
+    0x00};
+constexpr unsigned char kPlayerColliderWriterCallerBranch[] = {
+    0x53, 0x8A, 0x5C, 0x24, 0x34, 0xF6, 0xC3, 0x20,
+    0x55, 0x74, 0x08, 0x56, 0xE8, 0xEC, 0xC4, 0xFF,
+    0xFF, 0xEB, 0x2D};
+constexpr unsigned char kPlayerColliderWriterLiteralSuffix[] = {
+    0x53, 0x8D, 0x54, 0x24, 0x4C, 0x52, 0x8B, 0x56,
+    0x10, 0xC7, 0x44, 0x24, 0x50, 0x00, 0x00, 0x00,
+    0x3F, 0xC7, 0x44, 0x24, 0x54, 0x00, 0x00, 0x00,
+    0x3F, 0xC7, 0x44, 0x24, 0x58, 0x00, 0x00, 0x00,
+    0x3F, 0x8B, 0x01, 0x52, 0xFF, 0x50, 0x24};
+constexpr unsigned char kPlayerColliderWriterPrimarySuffix[] = {
+    0x8B, 0x11, 0xF6, 0xD8, 0x1A, 0xC0, 0xFE, 0xC0,
+    0x88, 0x44, 0x24, 0x68, 0x8B, 0x46, 0x10, 0x89,
+    0x5C, 0x24, 0x68, 0xBB, 0x00, 0x00, 0x00, 0x00,
+    0x0F, 0x95, 0xC3, 0x8D, 0x7C, 0x24, 0x18, 0x53,
+    0x57, 0x50, 0xFF, 0x52, 0x24};
+constexpr unsigned char kPlayerColliderWriterRetrySuffix[] = {
+    0x8B, 0x01, 0x53, 0x8B, 0xD7, 0x52, 0x8B, 0x56,
+    0x10, 0x52, 0xFF, 0x50, 0x24};
+constexpr unsigned char kSetVelocityPrefix[] = {
+    0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x75, 0x39,
+    0x6A, 0x3C, 0xE8, 0xC1, 0x6B, 0x07, 0x00, 0xA1};
+constexpr unsigned char kSetVelocityTail[] = {
+    0x8B, 0x4C, 0x24, 0x08, 0x8B, 0x11,
+    0x89, 0x90, 0xAC, 0x00, 0x00, 0x00,
+    0x8B, 0x51, 0x04, 0x89, 0x90, 0xB0, 0x00, 0x00, 0x00,
+    0x8B, 0x49, 0x08, 0x89, 0x88, 0xB4, 0x00, 0x00, 0x00,
+    0x80, 0x48, 0x5A, 0x40, 0x33, 0xC0, 0xC2, 0x08, 0x00};
 
 SRWLOCK g_bindingLock = SRWLOCK_INIT;
+SRWLOCK g_playerColliderHookInstallLock = SRWLOCK_INIT;
+PlayerSetDimensionsFunction g_originalPlayerSetDimensions = nullptr;
+SetObjectDimensionsFunction
+    g_originalPlayerSetObjectDimensionsTrace = nullptr;
+SetVelocityFunction g_originalPlayerCollisionSetVelocity = nullptr;
 GetBindingValueFunction g_originalGetBindingValue = nullptr;
 GetExtremalCommandValueFunction g_originalGetExtremalCommandValue = nullptr;
 GetFireVectorsFunction g_originalGetFireVectors = nullptr;
@@ -556,6 +712,10 @@ ClientWeaponFireFunction
     g_originalForensicClientWeaponFire = nullptr;
 RendererProbeLogFunction g_log = nullptr;
 void* g_bindingValueHookTarget = nullptr;
+void* g_playerSetDimensionsHookTarget = nullptr;
+void* g_playerSetObjectDimensionsTraceHookTarget = nullptr;
+void* g_playerCollisionSetVelocityHookTarget = nullptr;
+HMODULE g_playerColliderTraceExecutable = nullptr;
 ForensicCollectionActionFunction
     g_originalForensicCollectionAction = nullptr;
 EngineIntersectSegmentFunction
@@ -589,6 +749,9 @@ ULONGLONG g_lastSampleTick = 0;
 std::uint32_t g_lastDirectionMask = 0;
 int g_lastTurnDirection = 0;
 volatile LONG g_locomotionEnabled = 0;
+volatile LONG g_playerColliderScaleBasisPoints =
+    kPlayerColliderScaleBasisPointsDefault;
+volatile LONG g_playerColliderReapplyPending = 1;
 volatile LONG g_interactionEnabled = 0;
 volatile LONG g_coreActionsEnabled = 0;
 volatile LONG g_lastInteractionActive = 0;
@@ -693,6 +856,44 @@ thread_local std::uint32_t g_physicalMeleeNativeCapsuleReadMask = 0U;
 thread_local void* g_physicalMeleeActiveCollisionRecord = nullptr;
 volatile LONG g_weaponCatalogProbeState = 0;
 unsigned char* g_gameClientBase = nullptr;
+SRWLOCK g_playerColliderLock = SRWLOCK_INIT;
+PlayerColliderTelemetry g_playerColliderTelemetry{};
+PlayerColliderDimensions g_playerColliderRetailBaseline{};
+PlayerColliderDimensions g_playerColliderLastObservedDimensions{};
+std::uintptr_t g_playerColliderBaselineObject = 0U;
+std::uintptr_t g_playerColliderLastObservedObject = 0U;
+bool g_playerColliderLastObservedDimensionsValid = false;
+ULONGLONG g_playerColliderNextReapplyTick = 0U;
+volatile LONG g_playerColliderHandoffEvents = 0;
+volatile LONG g_playerColliderDirectApplyEvents = 0;
+volatile LONG g_playerColliderDimensionObservationEvents = 0;
+volatile LONG g_playerColliderPostPendingObservationEvents = 0;
+volatile LONG g_playerColliderWriterKnownEvents = 0;
+volatile LONG g_playerColliderWriterUnknownGameEvents = 0;
+volatile LONG g_playerColliderWriterExecutableEvents = 0;
+volatile LONG g_playerColliderWriterExternalEvents = 0;
+volatile LONG g_playerColliderWriterUnresolvedEvents = 0;
+alignas(8) volatile LONG64 g_playerColliderWriterNextSequence = 0;
+volatile LONG g_playerColliderManagerHookOperational = 0;
+volatile LONG g_playerColliderManagerInstallPoisoned = 0;
+volatile LONG g_playerColliderWriterHookOperational = 0;
+volatile LONG g_playerColliderWriterInstallPoisoned = 0;
+volatile LONG g_enemyColliderObservationEvents = 0;
+SRWLOCK g_playerCollisionXrayLock = SRWLOCK_INIT;
+PlayerCollisionXraySnapshot g_playerCollisionXraySnapshot{};
+PlayerCollisionXraySnapshot g_playerCollisionXrayPreUpdate{};
+std::uintptr_t g_playerCollisionXrayTargetObject = 0U;
+PlayerCollisionDiagnosticPoint g_playerCollisionXrayContactPoint{};
+bool g_playerCollisionXrayContactValid = false;
+ULONGLONG g_playerCollisionXrayTargetTick = 0U;
+ULONGLONG g_playerCollisionXrayLastUpdateLogTick = 0U;
+volatile LONG g_playerCollisionXrayEnabled = 0;
+volatile LONG g_playerCollisionVelocityHookOperational = 0;
+volatile LONG g_playerCollisionVelocityInstallPoisoned = 0;
+volatile LONG g_playerCollisionVelocityEvents = 0;
+volatile LONG g_playerCollisionUpdateEvents = 0;
+alignas(8) volatile LONG64 g_playerCollisionTimelineSequence = 0;
+
 volatile LONG g_combatPlayerVitalsEnabled = 0;
 volatile LONG g_combatPlayerVitalsUnavailableLogged = 0;
 ULONGLONG g_combatPlayerVitalsLastSampleTick = 0U;
@@ -3210,6 +3411,1274 @@ bool DirectionActive(
     }
 }
 
+thread_local bool g_playerColliderSetDimensionsActive = false;
+thread_local bool
+    g_playerColliderSetObjectDimensionsTraceActive = false;
+
+PlayerColliderSettings CurrentPlayerColliderSettings() noexcept {
+    PlayerColliderSettings settings{};
+    settings.widthScale =
+        static_cast<float>(InterlockedCompareExchange(
+            &g_playerColliderScaleBasisPoints, 0, 0)) /
+        10000.0F;
+    if (!PlayerColliderSettingsAreValid(settings)) {
+        settings = {};
+    }
+    return settings;
+}
+
+PlayerColliderDimensions ToPlayerColliderDimensions(
+    const VectorAbi& dimensions) noexcept {
+    return {dimensions.x, dimensions.y, dimensions.z};
+}
+
+VectorAbi ToVectorAbi(
+    const PlayerColliderDimensions& dimensions) noexcept {
+    return {dimensions.x, dimensions.y, dimensions.z};
+}
+
+bool ReadPlayerColliderManagerDimensions(
+    void* moveManager,
+    std::size_t offset,
+    PlayerColliderDimensions& dimensions) noexcept {
+    dimensions = {};
+    if (moveManager == nullptr) {
+        return false;
+    }
+
+    VectorAbi raw{};
+    bool readable = false;
+    __try {
+        std::memcpy(
+            &raw,
+            static_cast<unsigned char*>(moveManager) + offset,
+            sizeof(raw));
+        readable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        readable = false;
+    }
+    const PlayerColliderDimensions observed =
+        ToPlayerColliderDimensions(raw);
+    if (!readable ||
+        !PlayerColliderDimensionsAreValid(observed)) {
+        return false;
+    }
+    dimensions = observed;
+    return true;
+}
+
+bool ResolvePlayerColliderContext(
+    void*& moveManager,
+    void*& playerObject,
+    void*& physics,
+    GetObjectDimensionsFunction& getDimensions,
+    SetObjectDimensionsFunction& setDimensions) noexcept {
+    moveManager = nullptr;
+    playerObject = nullptr;
+    physics = nullptr;
+    getDimensions = nullptr;
+    setDimensions = nullptr;
+    if (g_gameClientBase == nullptr) {
+        return false;
+    }
+
+    void** vtable = nullptr;
+    __try {
+        std::memcpy(
+            &moveManager,
+            g_gameClientBase + kMeleeClientGlobalRva,
+            sizeof(moveManager));
+        std::memcpy(
+            &physics,
+            g_gameClientBase + kClientPhysicsGlobalRva,
+            sizeof(physics));
+        if (moveManager != nullptr) {
+            std::memcpy(
+                &playerObject,
+                static_cast<unsigned char*>(moveManager) +
+                    kPlayerObjectOffset,
+                sizeof(playerObject));
+        }
+        if (physics != nullptr) {
+            vtable = *static_cast<void***>(physics);
+        }
+        if (vtable != nullptr) {
+            getDimensions =
+                reinterpret_cast<GetObjectDimensionsFunction>(
+                    vtable[kGetObjectDimensionsVtableSlot]);
+            setDimensions =
+                reinterpret_cast<SetObjectDimensionsFunction>(
+                    vtable[kSetObjectDimensionsVtableSlot]);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    HMODULE const executable = GetModuleHandleW(nullptr);
+    auto* const executableBase =
+        reinterpret_cast<unsigned char*>(executable);
+    void** const expectedVtable = executableBase != nullptr
+        ? reinterpret_cast<void**>(
+              executableBase +
+              kClientPhysicsVtableExecutableRva)
+        : nullptr;
+    return moveManager != nullptr && playerObject != nullptr &&
+        physics != nullptr && vtable != nullptr &&
+        vtable == expectedVtable &&
+        reinterpret_cast<void*>(getDimensions) ==
+            executableBase + kGetObjectDimensionsExecutableRva &&
+        reinterpret_cast<void*>(setDimensions) ==
+            executableBase + kSetObjectDimensionsExecutableRva &&
+        IsExecutableModuleAddress(getDimensions, executable) &&
+        IsExecutableModuleAddress(setDimensions, executable);
+}
+
+bool ReadPlayerColliderActualDimensions(
+    void* physics,
+    void* playerObject,
+    GetObjectDimensionsFunction getDimensions,
+    PlayerColliderDimensions& dimensions) noexcept {
+    dimensions = {};
+    if (physics == nullptr || playerObject == nullptr ||
+        getDimensions == nullptr) {
+        return false;
+    }
+
+    VectorAbi actual{};
+    std::uint32_t result = ~kLithTechOk;
+    __try {
+        result = getDimensions(physics, playerObject, &actual);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    const PlayerColliderDimensions observed =
+        ToPlayerColliderDimensions(actual);
+    if (result != kLithTechOk ||
+        !PlayerColliderDimensionsAreValid(observed)) {
+        return false;
+    }
+    dimensions = observed;
+    return true;
+}
+
+struct PlayerColliderWriterCaller {
+    void* moduleBase{nullptr};
+    std::uintptr_t returnRva{0U};
+    PlayerColliderSetDimensionsCallsite callsite{
+        PlayerColliderSetDimensionsCallsite::Unknown};
+    bool resolved{false};
+};
+
+bool ResolvePlayerColliderWriterCaller(
+    void* returnAddress,
+    PlayerColliderWriterCaller& caller) noexcept {
+    caller = {};
+    if (returnAddress == nullptr) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION information{};
+    if (VirtualQuery(
+            returnAddress, &information, sizeof(information)) !=
+            sizeof(information) ||
+        information.AllocationBase == nullptr ||
+        information.Type != MEM_IMAGE) {
+        return false;
+    }
+    caller.moduleBase = information.AllocationBase;
+    const std::uintptr_t returnValue =
+        reinterpret_cast<std::uintptr_t>(returnAddress);
+    const std::uintptr_t moduleValue =
+        reinterpret_cast<std::uintptr_t>(caller.moduleBase);
+    if (returnValue < moduleValue) {
+        caller = {};
+        return false;
+    }
+    caller.returnRva = returnValue - moduleValue;
+    if (caller.moduleBase == g_gameClientBase) {
+        caller.callsite =
+            ClassifyPlayerColliderSetDimensionsReturnRva(
+                caller.returnRva);
+    }
+    caller.resolved = true;
+    return true;
+}
+
+bool ReservePlayerColliderWriterEvent(
+    const PlayerColliderWriterCaller& caller,
+    LONG& eventIndex,
+    const char*& stream) noexcept {
+    volatile LONG* counter = nullptr;
+    LONG limit = 0;
+    if (!caller.resolved) {
+        counter = &g_playerColliderWriterUnresolvedEvents;
+        limit = kPlayerColliderWriterUnresolvedEventCap;
+        stream = "unresolved_local";
+    } else if (caller.moduleBase == g_gameClientBase) {
+        if (caller.callsite !=
+                PlayerColliderSetDimensionsCallsite::Unknown) {
+            counter = &g_playerColliderWriterKnownEvents;
+            limit = kPlayerColliderWriterKnownEventCap;
+            stream = "known_gameorig";
+        } else {
+            counter = &g_playerColliderWriterUnknownGameEvents;
+            limit = kPlayerColliderWriterUnknownGameEventCap;
+            stream = "unclassified_gameorig";
+        }
+    } else if (caller.moduleBase ==
+            g_playerColliderTraceExecutable) {
+        counter = &g_playerColliderWriterExecutableEvents;
+        limit = kPlayerColliderWriterExecutableEventCap;
+        stream = "unclassified_executable";
+    } else {
+        counter = &g_playerColliderWriterExternalEvents;
+        limit = kPlayerColliderWriterExternalEventCap;
+        stream = "external_local";
+    }
+    eventIndex = InterlockedIncrement(counter);
+    return eventIndex <= limit;
+}
+
+bool ReadPlayerColliderTraceDimensions(
+    const VectorAbi* source,
+    PlayerColliderDimensions& dimensions,
+    bool& finite) noexcept {
+    dimensions = {};
+    finite = false;
+    if (source == nullptr) {
+        return false;
+    }
+    VectorAbi raw{};
+    __try {
+        std::memcpy(&raw, source, sizeof(raw));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    dimensions = ToPlayerColliderDimensions(raw);
+    finite = std::isfinite(dimensions.x) &&
+        std::isfinite(dimensions.y) &&
+        std::isfinite(dimensions.z);
+    return true;
+}
+
+bool ReadFiniteDiagnosticPoint(
+    const float (&position)[3],
+    PlayerCollisionDiagnosticPoint& point) noexcept {
+    point = {position[0], position[1], position[2]};
+    return std::isfinite(point.x) && std::isfinite(point.y) &&
+        std::isfinite(point.z);
+}
+
+void PublishPlayerCollisionXrayTarget(
+    std::uintptr_t object,
+    const VectorAbi* contact) noexcept {
+    if (InterlockedCompareExchange(
+            &g_playerCollisionXrayEnabled, 0, 0) == 0 ||
+        object == 0U) {
+        return;
+    }
+    PlayerCollisionDiagnosticPoint point{};
+    const bool contactValid = contact != nullptr &&
+        std::isfinite(contact->x) && std::isfinite(contact->y) &&
+        std::isfinite(contact->z);
+    if (contactValid) {
+        point = {contact->x, contact->y, contact->z};
+    }
+    AcquireSRWLockExclusive(&g_playerCollisionXrayLock);
+    g_playerCollisionXrayTargetObject = object;
+    g_playerCollisionXrayContactPoint = point;
+    g_playerCollisionXrayContactValid = contactValid;
+    g_playerCollisionXrayTargetTick = GetTickCount64();
+    g_playerCollisionXraySnapshot.contactPoint = point;
+    g_playerCollisionXraySnapshot.contactValid = contactValid;
+    ReleaseSRWLockExclusive(&g_playerCollisionXrayLock);
+}
+
+bool SamplePlayerCollisionXray(
+    PlayerCollisionXraySnapshot& snapshot) noexcept {
+    snapshot = {};
+    snapshot.enabled = InterlockedCompareExchange(
+        &g_playerCollisionXrayEnabled, 0, 0) != 0;
+    snapshot.movementTraceReady = InterlockedCompareExchange(
+        &g_playerCollisionVelocityHookOperational, 0, 0) != 0;
+    if (!snapshot.enabled || !snapshot.movementTraceReady ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying ||
+        !ProcessOwnsForegroundWindow()) {
+        return false;
+    }
+
+    void* moveManager = nullptr;
+    void* playerObject = nullptr;
+    void* physics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            moveManager, playerObject, physics,
+            getDimensions, setDimensions)) {
+        return false;
+    }
+    (void)moveManager;
+    (void)setDimensions;
+    snapshot.playerObject =
+        reinterpret_cast<std::uintptr_t>(playerObject);
+    snapshot.playerValid = ReadPlayerColliderActualDimensions(
+        physics, playerObject, getDimensions,
+        snapshot.playerDimensions);
+    float playerPosition[3]{};
+    float playerRotation[4]{};
+    PlayerCollisionDiagnosticPoint playerPoint{};
+    snapshot.playerValid = snapshot.playerValid &&
+        ReadDiagnosticObjectRigidTransform(
+            playerObject, playerPosition, playerRotation) &&
+        ReadFiniteDiagnosticPoint(playerPosition, playerPoint);
+    if (snapshot.playerValid) {
+        snapshot.playerOrigin = playerPoint;
+    }
+
+    float headPosition[3]{};
+    float headRotation[4]{};
+    PlayerCollisionDiagnosticPoint headPoint{};
+    snapshot.headValid = ReadTrackedHeadWorldPose(
+            headPosition, headRotation) &&
+        ReadFiniteDiagnosticPoint(headPosition, headPoint);
+    if (snapshot.headValid) {
+        snapshot.headOrigin = headPoint;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    std::uintptr_t targetObject = 0U;
+    ULONGLONG targetTick = 0U;
+    AcquireSRWLockShared(&g_playerCollisionXrayLock);
+    targetObject = g_playerCollisionXrayTargetObject;
+    targetTick = g_playerCollisionXrayTargetTick;
+    snapshot.contactPoint = g_playerCollisionXrayContactPoint;
+    const bool storedContactValid =
+        g_playerCollisionXrayContactValid;
+    ReleaseSRWLockShared(&g_playerCollisionXrayLock);
+    if (targetObject != 0U && targetObject != snapshot.playerObject &&
+        targetTick != 0U && now >= targetTick && now - targetTick <=
+            kPlayerCollisionTargetFreshnessMilliseconds) {
+        snapshot.contactValid = storedContactValid;
+        snapshot.targetAgeMilliseconds =
+            static_cast<std::uint64_t>(now - targetTick);
+        float targetPosition[3]{};
+        float targetRotation[4]{};
+        PlayerCollisionDiagnosticPoint targetPoint{};
+        snapshot.targetObject = targetObject;
+        snapshot.targetValid = ReadPlayerColliderActualDimensions(
+                physics, reinterpret_cast<void*>(targetObject),
+                getDimensions, snapshot.targetDimensions) &&
+            ReadDiagnosticObjectRigidTransform(
+                reinterpret_cast<void*>(targetObject),
+                targetPosition, targetRotation) &&
+            ReadFiniteDiagnosticPoint(targetPosition, targetPoint);
+        if (snapshot.targetValid) {
+            snapshot.targetOrigin = targetPoint;
+        }
+    }
+    AcquireSRWLockShared(&g_bindingLock);
+    snapshot.locomotionDirectionMask = g_lastDirectionMask;
+    ReleaseSRWLockShared(&g_bindingLock);
+    snapshot.tickMilliseconds = now;
+    snapshot.updateSequence = static_cast<std::uint64_t>(
+        InterlockedIncrement64(&g_playerCollisionTimelineSequence));
+    if (snapshot.playerValid && snapshot.headValid) {
+        snapshot.headToPlayerHorizontalUnits =
+            PlayerCollisionDiagnosticHorizontalDistance(
+                snapshot.playerOrigin, snapshot.headOrigin);
+    }
+    if (snapshot.playerValid && snapshot.targetValid) {
+        snapshot.playerToTargetHorizontalUnits =
+            PlayerCollisionDiagnosticHorizontalDistance(
+                snapshot.playerOrigin, snapshot.targetOrigin);
+        snapshot.diagnosticProxyHorizontalGapUnits =
+            PlayerCollisionDiagnosticProxyHorizontalGap(
+                BuildPlayerCollisionDiagnosticProxy(
+                    snapshot.playerOrigin, snapshot.playerDimensions),
+                BuildPlayerCollisionDiagnosticProxy(
+                    snapshot.targetOrigin, snapshot.targetDimensions));
+    }
+    return snapshot.playerValid;
+}
+
+void ObservePlayerCollisionXrayUpdate(bool beforeRetail) noexcept {
+    PlayerCollisionXraySnapshot sample{};
+    if (!SamplePlayerCollisionXray(sample)) {
+        return;
+    }
+    if (beforeRetail) {
+        AcquireSRWLockExclusive(&g_playerCollisionXrayLock);
+        g_playerCollisionXrayPreUpdate = sample;
+        ReleaseSRWLockExclusive(&g_playerCollisionXrayLock);
+        return;
+    }
+
+    PlayerCollisionXraySnapshot before{};
+    AcquireSRWLockExclusive(&g_playerCollisionXrayLock);
+    before = g_playerCollisionXrayPreUpdate;
+    g_playerCollisionXraySnapshot = sample;
+    ReleaseSRWLockExclusive(&g_playerCollisionXrayLock);
+    const ULONGLONG now = sample.tickMilliseconds;
+    if (g_log == nullptr ||
+        (sample.locomotionDirectionMask == 0U && !sample.targetValid) ||
+        now - g_playerCollisionXrayLastUpdateLogTick <
+            kPlayerCollisionUpdateLogIntervalMilliseconds ||
+        InterlockedIncrement(&g_playerCollisionUpdateEvents) >
+            kPlayerCollisionUpdateEventCap) {
+        return;
+    }
+    g_playerCollisionXrayLastUpdateLogTick = now;
+    const float displacement = before.playerValid
+        ? PlayerCollisionDiagnosticHorizontalDistance(
+              before.playerOrigin, sample.playerOrigin)
+        : -1.0F;
+    char detail[2048]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "sequence=%llu tick=%llu player=0x%08lX target=0x%08lX "
+        "locomotion_direction_mask=0x%X "
+        "pre_valid=%u pre_origin=(%.3f,%.3f,%.3f) "
+        "pre_dims=(%.3f,%.3f,%.3f) "
+        "post_origin=(%.3f,%.3f,%.3f) post_dims=(%.3f,%.3f,%.3f) "
+        "post_displacement_horizontal=%.3f "
+        "head_valid=%u head_origin=(%.3f,%.3f,%.3f) "
+        "head_to_player_horizontal=%.3f "
+        "target_valid=%u target_age_ms=%llu "
+        "target_origin=(%.3f,%.3f,%.3f) "
+        "target_dims=(%.3f,%.3f,%.3f) "
+        "player_to_target_horizontal=%.3f "
+        "diagnostic_proxy_horizontal_gap=%.3f contact_valid=%u "
+        "contact=(%.3f,%.3f,%.3f) "
+        "geometry=diagnostic_proxy true_physics_geometry_verified=0 "
+        "hmd_distance_interpreted_as_player_radius=0 mutation=none",
+        static_cast<unsigned long long>(sample.updateSequence),
+        static_cast<unsigned long long>(sample.tickMilliseconds),
+        static_cast<unsigned long>(sample.playerObject),
+        static_cast<unsigned long>(sample.targetObject),
+        static_cast<unsigned int>(sample.locomotionDirectionMask),
+        before.playerValid ? 1U : 0U,
+        before.playerOrigin.x, before.playerOrigin.y,
+        before.playerOrigin.z, before.playerDimensions.x,
+        before.playerDimensions.y, before.playerDimensions.z,
+        sample.playerOrigin.x, sample.playerOrigin.y,
+        sample.playerOrigin.z, sample.playerDimensions.x,
+        sample.playerDimensions.y, sample.playerDimensions.z,
+        displacement, sample.headValid ? 1U : 0U,
+        sample.headOrigin.x, sample.headOrigin.y, sample.headOrigin.z,
+        sample.headToPlayerHorizontalUnits,
+        sample.targetValid ? 1U : 0U,
+        static_cast<unsigned long long>(
+            sample.targetAgeMilliseconds),
+        sample.targetOrigin.x, sample.targetOrigin.y,
+        sample.targetOrigin.z, sample.targetDimensions.x,
+        sample.targetDimensions.y, sample.targetDimensions.z,
+        sample.playerToTargetHorizontalUnits,
+        sample.diagnosticProxyHorizontalGapUnits,
+        sample.contactValid ? 1U : 0U,
+        sample.contactPoint.x, sample.contactPoint.y,
+        sample.contactPoint.z);
+    g_log("m5_player_collision_xray_update", detail);
+}
+
+std::uint32_t __fastcall HookPlayerSetObjectDimensionsTrace(
+    void* physics,
+    void* ignoredEdx,
+    void* object,
+    VectorAbi* dimensions,
+    std::uint32_t flags) {
+    void* const returnAddress = _ReturnAddress();
+    (void)ignoredEdx;
+    const bool operational = InterlockedCompareExchange(
+        &g_playerColliderWriterHookOperational, 0, 0) != 0;
+    SetObjectDimensionsFunction const original =
+        g_originalPlayerSetObjectDimensionsTrace;
+    if (!operational) {
+        return ForwardPlayerColliderSetDimensionsExactlyOnce(
+            original, physics, object, dimensions, flags);
+    }
+    if (g_playerColliderSetObjectDimensionsTraceActive) {
+        return ForwardPlayerColliderSetDimensionsExactlyOnce(
+            original, physics, object, dimensions, flags);
+    }
+
+    const PlayerColliderSettings settings =
+        CurrentPlayerColliderSettings();
+    const bool pending = InterlockedCompareExchange(
+        &g_playerColliderReapplyPending, 0, 0) != 0;
+    if (!PlayerColliderDimensionAuditRequired(settings, pending) ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        return ForwardPlayerColliderSetDimensionsExactlyOnce(
+            original, physics, object, dimensions, flags);
+    }
+
+    void* moveManager = nullptr;
+    void* playerObject = nullptr;
+    void* resolvedPhysics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            moveManager, playerObject, resolvedPhysics,
+            getDimensions, setDimensions) ||
+        physics != resolvedPhysics || object != playerObject ||
+        reinterpret_cast<void*>(setDimensions) !=
+            reinterpret_cast<unsigned char*>(
+                g_playerColliderTraceExecutable) +
+                kSetObjectDimensionsExecutableRva) {
+        return ForwardPlayerColliderSetDimensionsExactlyOnce(
+            original, physics, object, dimensions, flags);
+    }
+
+    PlayerColliderWriterCaller caller{};
+    (void)ResolvePlayerColliderWriterCaller(
+        returnAddress, caller);
+    LONG eventIndex = 0;
+    const char* eventStream = "unknown";
+    if (!ReservePlayerColliderWriterEvent(
+            caller, eventIndex, eventStream)) {
+        return ForwardPlayerColliderSetDimensionsExactlyOnce(
+            original, physics, object, dimensions, flags);
+    }
+
+    const LONG64 sequence = InterlockedIncrement64(
+        &g_playerColliderWriterNextSequence);
+    const LONG64 collisionTimelineSequence = InterlockedIncrement64(
+        &g_playerCollisionTimelineSequence);
+    const DWORD threadId = GetCurrentThreadId();
+    const ULONGLONG tick = GetTickCount64();
+    std::uint32_t directionMask = 0U;
+    AcquireSRWLockShared(&g_bindingLock);
+    directionMask = g_lastDirectionMask;
+    ReleaseSRWLockShared(&g_bindingLock);
+
+    PlayerColliderDimensions requestIn{};
+    bool requestInFinite = false;
+    const bool requestInReadable =
+        ReadPlayerColliderTraceDimensions(
+            dimensions, requestIn, requestInFinite);
+    const bool requestInValid = requestInReadable &&
+        PlayerColliderDimensionsAreValid(requestIn);
+    PlayerColliderDimensions actualBefore{};
+    const bool actualBeforeValid =
+        ReadPlayerColliderActualDimensions(
+            physics, object, getDimensions, actualBefore);
+    PlayerColliderDimensions managerRequested{};
+    PlayerColliderDimensions manager40cSourceCandidate{};
+    PlayerColliderDimensions adjacentDimensionsCandidate{};
+    const bool managerRequestedValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager, kPlayerRequestedDimensionsOffset,
+            managerRequested);
+    const bool manager40cSourceCandidateValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager,
+            kPlayerManager40cSourceCandidateOffset,
+            manager40cSourceCandidate);
+    const bool adjacentDimensionsCandidateValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager, kPlayerAdjacentDimensionsCandidateOffset,
+            adjacentDimensionsCandidate);
+
+    std::uint32_t nativeResult = 0U;
+    g_playerColliderSetObjectDimensionsTraceActive = true;
+    __try {
+        nativeResult =
+            ForwardPlayerColliderSetDimensionsExactlyOnce(
+                original, physics, object, dimensions, flags);
+    } __finally {
+        g_playerColliderSetObjectDimensionsTraceActive = false;
+    }
+
+    PlayerColliderDimensions requestOut{};
+    bool requestOutFinite = false;
+    const bool requestOutReadable =
+        ReadPlayerColliderTraceDimensions(
+            dimensions, requestOut, requestOutFinite);
+    const bool requestOutValid = requestOutReadable &&
+        PlayerColliderDimensionsAreValid(requestOut);
+
+    void* afterManager = nullptr;
+    void* afterPlayerObject = nullptr;
+    void* afterPhysics = nullptr;
+    GetObjectDimensionsFunction afterGetDimensions = nullptr;
+    SetObjectDimensionsFunction afterSetDimensions = nullptr;
+    const bool contextStable =
+        ResolvePlayerColliderContext(
+            afterManager, afterPlayerObject, afterPhysics,
+            afterGetDimensions, afterSetDimensions) &&
+        afterManager == moveManager &&
+        afterPlayerObject == playerObject &&
+        afterPhysics == physics &&
+        reinterpret_cast<void*>(afterSetDimensions) ==
+            reinterpret_cast<unsigned char*>(
+                g_playerColliderTraceExecutable) +
+                kSetObjectDimensionsExecutableRva;
+    PlayerColliderDimensions actualAfter{};
+    const bool actualAfterValid = contextStable &&
+        ReadPlayerColliderActualDimensions(
+            afterPhysics, afterPlayerObject,
+            afterGetDimensions, actualAfter);
+    const bool actualChangedBeyondTolerance =
+        actualBeforeValid && actualAfterValid &&
+        !PlayerColliderDimensionsMatch(
+            actualBefore, actualAfter);
+
+    const bool callerIsGameOrig =
+        caller.moduleBase == g_gameClientBase;
+    const bool callerIsExecutable =
+        caller.moduleBase == g_playerColliderTraceExecutable;
+    const char* const callerModule = !caller.resolved
+        ? "unresolved"
+        : callerIsGameOrig
+            ? "GameOrig"
+            : callerIsExecutable ? "Condemned" : "other";
+    const std::uintptr_t callRva =
+        callerIsGameOrig
+        ? PlayerColliderSetDimensionsCallInstructionRva(
+              caller.callsite)
+        : 0U;
+    const bool callRvaValid = callRva != 0U;
+    const bool writerControlPath =
+        caller.callsite ==
+            PlayerColliderSetDimensionsCallsite::WriterLiteralHalf ||
+        caller.callsite ==
+            PlayerColliderSetDimensionsCallsite::WriterPrimary ||
+        caller.callsite ==
+            PlayerColliderSetDimensionsCallsite::WriterRetry;
+
+    if (g_log != nullptr) {
+        char detail[3072]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "stream=%s count=%ld sequence=%lld "
+            "collision_timeline_sequence=%lld thread=%lu tick=%llu "
+            "caller_module=%s caller_module_base=%p "
+            "caller_return_address=%p return_rva_valid=%u "
+            "return_rva=0x%08lX "
+            "call_rva_valid=%u call_rva=0x%08lX "
+            "callsite=%s control_path=%s "
+            "manager=%p player=%p physics=%p scale=%.2f pending=%u "
+            "locomotion_direction_mask=0x%X "
+            "request_in_readable=%u request_in_finite=%u "
+            "request_in_valid=%u request_in=(%.3f,%.3f,%.3f) "
+            "flags=0x%08X "
+            "actual_before_valid=%u actual_before=(%.3f,%.3f,%.3f) "
+            "manager_requested_valid=%u "
+            "manager_requested=(%.3f,%.3f,%.3f) "
+            "manager_40c_source_candidate_valid=%u "
+            "manager_40c_source_candidate=(%.3f,%.3f,%.3f) "
+            "adjacent_dimensions_candidate_valid=%u "
+            "adjacent_dimensions_candidate=(%.3f,%.3f,%.3f) "
+            "native_result=0x%08X "
+            "request_out_readable=%u request_out_finite=%u "
+            "request_out_valid=%u request_out=(%.3f,%.3f,%.3f) "
+            "context_stable=%u actual_after_valid=%u "
+            "actual_after=(%.3f,%.3f,%.3f) "
+            "actual_changed_beyond_tolerance=%u actual_change_tolerance=0.050 "
+            "native_setdims_executed=1 "
+            "request_pointer_forwarded_unchanged=1 "
+            "flags_forwarded_unchanged=1 "
+            "native_result_preserved=1 observer_added_engine_state_writes=0 "
+            "observer_setdims_calls_added=0",
+            eventStream, static_cast<long>(eventIndex),
+            static_cast<long long>(sequence),
+            static_cast<long long>(collisionTimelineSequence),
+            static_cast<unsigned long>(threadId),
+            static_cast<unsigned long long>(tick),
+            callerModule, caller.moduleBase,
+            returnAddress,
+            caller.resolved ? 1U : 0U,
+            static_cast<unsigned long>(caller.returnRva),
+            callRvaValid ? 1U : 0U,
+            static_cast<unsigned long>(callRva),
+            PlayerColliderSetDimensionsCallsiteName(
+                caller.callsite),
+            writerControlPath
+                ? "verified_344e0_internal" : "other",
+            moveManager, playerObject, physics,
+            settings.widthScale, pending ? 1U : 0U,
+            static_cast<unsigned int>(directionMask),
+            requestInReadable ? 1U : 0U,
+            requestInFinite ? 1U : 0U,
+            requestInValid ? 1U : 0U,
+            requestIn.x, requestIn.y, requestIn.z,
+            static_cast<unsigned int>(flags),
+            actualBeforeValid ? 1U : 0U,
+            actualBefore.x, actualBefore.y, actualBefore.z,
+            managerRequestedValid ? 1U : 0U,
+            managerRequested.x, managerRequested.y,
+            managerRequested.z,
+            manager40cSourceCandidateValid ? 1U : 0U,
+            manager40cSourceCandidate.x,
+            manager40cSourceCandidate.y,
+            manager40cSourceCandidate.z,
+            adjacentDimensionsCandidateValid ? 1U : 0U,
+            adjacentDimensionsCandidate.x,
+            adjacentDimensionsCandidate.y,
+            adjacentDimensionsCandidate.z,
+            static_cast<unsigned int>(nativeResult),
+            requestOutReadable ? 1U : 0U,
+            requestOutFinite ? 1U : 0U,
+            requestOutValid ? 1U : 0U,
+            requestOut.x, requestOut.y, requestOut.z,
+            contextStable ? 1U : 0U,
+            actualAfterValid ? 1U : 0U,
+            actualAfter.x, actualAfter.y, actualAfter.z,
+            actualChangedBeyondTolerance ? 1U : 0U);
+        g_log(
+            "m5_player_collider_setdims_observed",
+            detail);
+    }
+    return nativeResult;
+}
+
+std::uint32_t __fastcall HookPlayerCollisionSetVelocity(
+    void* physics,
+    void* ignoredEdx,
+    void* object,
+    const VectorAbi* velocity) {
+    (void)ignoredEdx;
+    SetVelocityFunction const original =
+        g_originalPlayerCollisionSetVelocity;
+    const bool observing = InterlockedCompareExchange(
+            &g_playerCollisionVelocityHookOperational, 0, 0) != 0 &&
+        InterlockedCompareExchange(
+            &g_playerCollisionXrayEnabled, 0, 0) != 0 &&
+        ReadRetailGameState(g_interfaceManager) ==
+            kCondemnedGameStatePlaying &&
+        ProcessOwnsForegroundWindow();
+    if (!observing) {
+        return ForwardPlayerCollisionSetVelocityExactlyOnce(
+            original, physics, object, velocity);
+    }
+
+    void* moveManager = nullptr;
+    void* playerObject = nullptr;
+    void* resolvedPhysics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            moveManager, playerObject, resolvedPhysics,
+            getDimensions, setDimensions) ||
+        physics != resolvedPhysics || object != playerObject) {
+        return ForwardPlayerCollisionSetVelocityExactlyOnce(
+            original, physics, object, velocity);
+    }
+    (void)moveManager;
+    (void)getDimensions;
+    (void)setDimensions;
+    VectorAbi requested{};
+    bool velocityReadable = false;
+    __try {
+        if (velocity != nullptr) {
+            requested = *velocity;
+            velocityReadable = std::isfinite(requested.x) &&
+                std::isfinite(requested.y) &&
+                std::isfinite(requested.z);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        velocityReadable = false;
+    }
+    if (!velocityReadable) {
+        return ForwardPlayerCollisionSetVelocityExactlyOnce(
+            original, physics, object, velocity);
+    }
+
+    PlayerCollisionXraySnapshot before{};
+    (void)SamplePlayerCollisionXray(before);
+    const std::uint32_t result =
+        ForwardPlayerCollisionSetVelocityExactlyOnce(
+            original, physics, object, velocity);
+    PlayerCollisionXraySnapshot after{};
+    (void)SamplePlayerCollisionXray(after);
+    AcquireSRWLockExclusive(&g_playerCollisionXrayLock);
+    g_playerCollisionXraySnapshot = after;
+    ReleaseSRWLockExclusive(&g_playerCollisionXrayLock);
+
+    const LONG eventIndex = InterlockedIncrement(
+        &g_playerCollisionVelocityEvents);
+    if (eventIndex <= kPlayerCollisionVelocityEventCap &&
+        g_log != nullptr) {
+        char detail[1536]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "count=%ld sequence=%llu thread=%lu tick=%llu "
+            "target=Condemned+0x00007CD0 player=%p physics=%p "
+            "requested_velocity=(%.3f,%.3f,%.3f) "
+            "before_valid=%u before_origin=(%.3f,%.3f,%.3f) "
+            "before_dims=(%.3f,%.3f,%.3f) "
+            "after_valid=%u after_origin=(%.3f,%.3f,%.3f) "
+            "after_dims=(%.3f,%.3f,%.3f) native_result=0x%08X "
+            "object_and_pointer_forwarded_unchanged=1 "
+            "native_call_count=1 collision_result_observed=0 "
+            "movement_semantics=velocity_handoff_not_collision_result "
+            "mutation=none",
+            static_cast<long>(eventIndex),
+            static_cast<unsigned long long>(after.updateSequence),
+            static_cast<unsigned long>(GetCurrentThreadId()),
+            static_cast<unsigned long long>(GetTickCount64()),
+            object, physics, requested.x, requested.y, requested.z,
+            before.playerValid ? 1U : 0U,
+            before.playerOrigin.x, before.playerOrigin.y,
+            before.playerOrigin.z, before.playerDimensions.x,
+            before.playerDimensions.y, before.playerDimensions.z,
+            after.playerValid ? 1U : 0U,
+            after.playerOrigin.x, after.playerOrigin.y,
+            after.playerOrigin.z, after.playerDimensions.x,
+            after.playerDimensions.y, after.playerDimensions.z,
+            static_cast<unsigned int>(result));
+        g_log("m5_player_collision_xray_velocity_handoff", detail);
+    }
+    return result;
+}
+
+void ResetPlayerColliderDimensionObservation() noexcept {
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    if (g_playerColliderLastObservedDimensionsValid) {
+        g_playerColliderLastObservedDimensions = {};
+        g_playerColliderLastObservedObject = 0U;
+        g_playerColliderLastObservedDimensionsValid = false;
+    }
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+}
+
+void ObservePlayerColliderDimensionTransition(
+    const char* phase,
+    bool forceEvent) noexcept {
+    if (g_log == nullptr) {
+        return;
+    }
+
+    const PlayerColliderSettings settings =
+        CurrentPlayerColliderSettings();
+    const bool reapplyPending =
+        InterlockedCompareExchange(
+            &g_playerColliderReapplyPending, 0, 0) != 0;
+    if ((!forceEvent &&
+            !PlayerColliderDimensionAuditRequired(
+                settings, reapplyPending)) ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        ResetPlayerColliderDimensionObservation();
+        return;
+    }
+
+    void* moveManager = nullptr;
+    void* playerObject = nullptr;
+    void* physics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            moveManager, playerObject, physics,
+            getDimensions, setDimensions)) {
+        return;
+    }
+
+    PlayerColliderDimensions actual{};
+    if (!ReadPlayerColliderActualDimensions(
+            physics, playerObject, getDimensions, actual)) {
+        return;
+    }
+
+    PlayerColliderDimensions managerRequested{};
+    PlayerColliderDimensions manager40cSourceCandidate{};
+    PlayerColliderDimensions adjacentDimensionsCandidate{};
+    const bool managerRequestedValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager, kPlayerRequestedDimensionsOffset,
+            managerRequested);
+    const bool manager40cSourceCandidateValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager,
+            kPlayerManager40cSourceCandidateOffset,
+            manager40cSourceCandidate);
+    const bool adjacentDimensionsCandidateValid =
+        ReadPlayerColliderManagerDimensions(
+            moveManager, kPlayerAdjacentDimensionsCandidateOffset,
+            adjacentDimensionsCandidate);
+
+    PlayerColliderDimensions expectedBaseline{};
+    AcquireSRWLockShared(&g_playerColliderLock);
+    if (g_playerColliderBaselineObject ==
+            reinterpret_cast<std::uintptr_t>(playerObject) &&
+        PlayerColliderDimensionsAreValid(
+            g_playerColliderRetailBaseline)) {
+        expectedBaseline = g_playerColliderRetailBaseline;
+    }
+    ReleaseSRWLockShared(&g_playerColliderLock);
+    expectedBaseline.y = actual.y;
+    PlayerColliderDimensions expected{};
+    const bool expectedValid =
+        ResolvePlayerColliderDimensions(
+            expectedBaseline, settings, expected);
+    const bool drifted = expectedValid &&
+        !PlayerColliderDimensionsMatch(actual, expected);
+    const char* const expectedSource =
+        expectedValid ? "cached_retail_baseline" : "none";
+
+    bool changed = false;
+    const std::uintptr_t playerValue =
+        reinterpret_cast<std::uintptr_t>(playerObject);
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    changed = forceEvent ||
+        !g_playerColliderLastObservedDimensionsValid ||
+        g_playerColliderLastObservedObject != playerValue ||
+        !PlayerColliderDimensionsMatch(
+            g_playerColliderLastObservedDimensions, actual);
+    if (changed) {
+        g_playerColliderLastObservedDimensions = actual;
+        g_playerColliderLastObservedObject = playerValue;
+        g_playerColliderLastObservedDimensionsValid = true;
+        g_playerColliderTelemetry.actualDimensions = actual;
+        g_playerColliderTelemetry.actualDimensionsValid = true;
+        g_playerColliderTelemetry.playerObject = playerValue;
+        g_playerColliderTelemetry.widthScale = settings.widthScale;
+        g_playerColliderTelemetry.runtimeDriftObserved = drifted;
+    }
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+    if (!changed) {
+        return;
+    }
+
+    volatile LONG* const observationCounter = forceEvent
+        ? &g_playerColliderPostPendingObservationEvents
+        : &g_playerColliderDimensionObservationEvents;
+    const LONG observation = InterlockedIncrement(
+        observationCounter);
+    const LONG observationLimit = forceEvent ? 32 : 128;
+    if (observation > observationLimit) {
+        return;
+    }
+    const char* const observationStream =
+        forceEvent ? "post_pending" : "boundary";
+    std::uint32_t directionMask = 0U;
+    AcquireSRWLockShared(&g_bindingLock);
+    directionMask = g_lastDirectionMask;
+    ReleaseSRWLockShared(&g_bindingLock);
+    char detail[1024]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "stream=%s count=%ld phase=%s player=%p scale=%.2f pending=%u "
+        "locomotion_direction_mask=0x%X "
+        "actual=(%.3f,%.3f,%.3f) "
+        "manager_requested_valid=%u manager_requested=(%.3f,%.3f,%.3f) "
+        "manager_40c_source_candidate_valid=%u "
+        "manager_40c_source_candidate=(%.3f,%.3f,%.3f) "
+        "adjacent_dimensions_candidate_valid=%u "
+        "adjacent_dimensions_candidate=(%.3f,%.3f,%.3f) "
+        "expected_valid=%u expected_source=%s "
+        "expected=(%.3f,%.3f,%.3f) drift=%u "
+        "query=ILTClientPhysics.GetObjectDims "
+        "manager_reads=read_only mutation=none",
+        observationStream,
+        static_cast<long>(observation),
+        phase != nullptr ? phase : "unknown",
+        playerObject, settings.widthScale,
+        reapplyPending ? 1U : 0U,
+        static_cast<unsigned int>(directionMask),
+        actual.x, actual.y, actual.z,
+        managerRequestedValid ? 1U : 0U,
+        managerRequested.x, managerRequested.y, managerRequested.z,
+        manager40cSourceCandidateValid ? 1U : 0U,
+        manager40cSourceCandidate.x,
+        manager40cSourceCandidate.y,
+        manager40cSourceCandidate.z,
+        adjacentDimensionsCandidateValid ? 1U : 0U,
+        adjacentDimensionsCandidate.x,
+        adjacentDimensionsCandidate.y,
+        adjacentDimensionsCandidate.z,
+        expectedValid ? 1U : 0U,
+        expectedSource,
+        expected.x, expected.y, expected.z,
+        drifted ? 1U : 0U);
+    g_log("m5_player_collider_dimensions_observed", detail);
+}
+
+void RecordPlayerColliderHandoff(
+    const char* source,
+    void* playerObject,
+    const PlayerColliderSettings& settings,
+    const PlayerColliderDimensions& retailDimensions,
+    const PlayerColliderDimensions& requestedDimensions,
+    const PlayerColliderDimensions& actualDimensions,
+    bool actualDimensionsValid,
+    bool succeeded,
+    std::uint32_t nativeResult,
+    bool nativeCallAttempted,
+    bool nativeResultValid,
+    bool directApply) noexcept {
+    std::uint32_t handoffCount = 0U;
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    g_playerColliderTelemetry.retailDimensions = retailDimensions;
+    g_playerColliderTelemetry.requestedDimensions =
+        requestedDimensions;
+    g_playerColliderTelemetry.actualDimensions =
+        actualDimensionsValid ? actualDimensions :
+            PlayerColliderDimensions{};
+    g_playerColliderTelemetry.widthScale = settings.widthScale;
+    g_playerColliderTelemetry.playerObject =
+        reinterpret_cast<std::uintptr_t>(playerObject);
+    if (nativeCallAttempted) {
+        ++g_playerColliderTelemetry.nativeHandoffCount;
+    }
+    handoffCount = g_playerColliderTelemetry.nativeHandoffCount;
+    g_playerColliderTelemetry.retailDimensionsValid =
+        PlayerColliderDimensionsAreValid(retailDimensions);
+    g_playerColliderTelemetry.actualDimensionsValid =
+        actualDimensionsValid;
+    g_playerColliderTelemetry.lastRequestSatisfied = succeeded;
+    if (succeeded) {
+        g_playerColliderTelemetry.runtimeDriftObserved = false;
+    }
+    g_playerColliderTelemetry.reapplyPending =
+        InterlockedCompareExchange(
+            &g_playerColliderReapplyPending, 0, 0) != 0;
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+
+    volatile LONG* const eventCounter = directApply
+        ? &g_playerColliderDirectApplyEvents
+        : &g_playerColliderHandoffEvents;
+    const LONG eventIndex = InterlockedIncrement(eventCounter);
+    if (g_log == nullptr || eventIndex > 128) {
+        return;
+    }
+    char detail[512]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "source=%s handoff=%u player=%p scale=%.2f "
+        "retail=(%.3f,%.3f,%.3f) "
+        "requested=(%.3f,%.3f,%.3f) "
+        "actual_valid=%u actual=(%.3f,%.3f,%.3f) "
+        "native_call_attempted=%u native_result_valid=%u "
+        "native_result=0x%08X succeeded=%u "
+        "height_preserved=%u enemy_objects_changed=0",
+        source != nullptr ? source : "unknown",
+        handoffCount, playerObject, settings.widthScale,
+        retailDimensions.x, retailDimensions.y,
+        retailDimensions.z,
+        requestedDimensions.x, requestedDimensions.y,
+        requestedDimensions.z,
+        actualDimensionsValid ? 1U : 0U,
+        actualDimensions.x, actualDimensions.y,
+        actualDimensions.z,
+        nativeCallAttempted ? 1U : 0U,
+        nativeResultValid ? 1U : 0U,
+        nativeResult, succeeded ? 1U : 0U,
+        requestedDimensions.y == retailDimensions.y ? 1U : 0U);
+    g_log(
+        !directApply
+            ? "m5_player_collider_native_handoff"
+            : nativeCallAttempted
+                ? "m5_player_collider_reapply_attempted"
+                : "m5_player_collider_reapply_not_needed",
+        detail);
+}
+
+void __fastcall HookPlayerSetDimensions(
+    void* moveManager,
+    void* ignoredEdx,
+    const VectorAbi* positionOffset) {
+    (void)ignoredEdx;
+    const bool operational = InterlockedCompareExchange(
+        &g_playerColliderManagerHookOperational, 0, 0) != 0;
+    PlayerSetDimensionsFunction const original =
+        g_originalPlayerSetDimensions;
+    if (original == nullptr) {
+        return;
+    }
+    if (!operational) {
+        original(moveManager, positionOffset);
+        return;
+    }
+    if (g_playerColliderSetDimensionsActive) {
+        original(moveManager, positionOffset);
+        return;
+    }
+
+    void* expectedManager = nullptr;
+    void* playerObject = nullptr;
+    void* physics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            expectedManager, playerObject, physics,
+            getDimensions, setDimensions) ||
+        moveManager != expectedManager) {
+        original(moveManager, positionOffset);
+        return;
+    }
+
+    VectorAbi retailAbi{};
+    bool retailReadable = false;
+    __try {
+        std::memcpy(
+            &retailAbi,
+            static_cast<unsigned char*>(moveManager) +
+                kPlayerRequestedDimensionsOffset,
+            sizeof(retailAbi));
+        retailReadable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        retailReadable = false;
+    }
+    const PlayerColliderDimensions retailDimensions =
+        ToPlayerColliderDimensions(retailAbi);
+    const PlayerColliderSettings settings =
+        CurrentPlayerColliderSettings();
+    PlayerColliderDimensions requestedDimensions{};
+    if (!retailReadable ||
+        !ResolvePlayerColliderDimensions(
+            retailDimensions, settings, requestedDimensions)) {
+        original(moveManager, positionOffset);
+        return;
+    }
+
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    g_playerColliderRetailBaseline = retailDimensions;
+    g_playerColliderBaselineObject =
+        reinterpret_cast<std::uintptr_t>(playerObject);
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+
+    const VectorAbi requestedAbi =
+        ToVectorAbi(requestedDimensions);
+    bool dimensionsReplaced = false;
+    g_playerColliderSetDimensionsActive = true;
+    __try {
+        if (!PlayerColliderDimensionsMatch(
+                retailDimensions, requestedDimensions)) {
+            std::memcpy(
+                static_cast<unsigned char*>(moveManager) +
+                    kPlayerRequestedDimensionsOffset,
+                &requestedAbi, sizeof(requestedAbi));
+            dimensionsReplaced = true;
+        }
+        original(moveManager, positionOffset);
+    } __finally {
+        if (dimensionsReplaced) {
+            std::memcpy(
+                static_cast<unsigned char*>(moveManager) +
+                    kPlayerRequestedDimensionsOffset,
+                &retailAbi, sizeof(retailAbi));
+        }
+        g_playerColliderSetDimensionsActive = false;
+    }
+
+    PlayerColliderDimensions actualDimensions{};
+    const bool actualValid =
+        ReadPlayerColliderActualDimensions(
+            physics, playerObject, getDimensions,
+            actualDimensions);
+    const bool succeeded = actualValid &&
+        PlayerColliderDimensionsMatch(
+            actualDimensions, requestedDimensions);
+    InterlockedExchange(
+        &g_playerColliderReapplyPending, succeeded ? 0 : 1);
+    RecordPlayerColliderHandoff(
+        "retail_cmove_mgr", playerObject, settings,
+        retailDimensions, requestedDimensions,
+        actualDimensions, actualValid, succeeded,
+        kLithTechOk, true, false, false);
+}
+
+PlayerColliderPendingProcessResult
+ProcessPendingPlayerColliderReapply() noexcept {
+    if (g_originalPlayerSetDimensions == nullptr ||
+        InterlockedCompareExchange(
+            &g_playerColliderManagerHookOperational, 0, 0) == 0 ||
+        InterlockedCompareExchange(
+            &g_playerColliderReapplyPending, 0, 0) == 0 ||
+        ReadRetailGameState(g_interfaceManager) !=
+            kCondemnedGameStatePlaying) {
+        return PlayerColliderPendingProcessResult::NotProcessed;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_playerColliderNextReapplyTick) {
+        return PlayerColliderPendingProcessResult::NotProcessed;
+    }
+    g_playerColliderNextReapplyTick =
+        now + kPlayerColliderReapplyIntervalMilliseconds;
+
+    void* moveManager = nullptr;
+    void* playerObject = nullptr;
+    void* physics = nullptr;
+    GetObjectDimensionsFunction getDimensions = nullptr;
+    SetObjectDimensionsFunction setDimensions = nullptr;
+    if (!ResolvePlayerColliderContext(
+            moveManager, playerObject, physics,
+            getDimensions, setDimensions)) {
+        return PlayerColliderPendingProcessResult::NotProcessed;
+    }
+
+    PlayerColliderDimensions actualBefore{};
+    if (!ReadPlayerColliderActualDimensions(
+            physics, playerObject, getDimensions,
+            actualBefore)) {
+        return PlayerColliderPendingProcessResult::NotProcessed;
+    }
+
+    PlayerColliderDimensions baseline{};
+    const std::uintptr_t objectValue =
+        reinterpret_cast<std::uintptr_t>(playerObject);
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    if (g_playerColliderBaselineObject == objectValue &&
+        PlayerColliderDimensionsAreValid(
+            g_playerColliderRetailBaseline)) {
+        baseline = g_playerColliderRetailBaseline;
+    } else {
+        baseline = actualBefore;
+        g_playerColliderRetailBaseline = baseline;
+        g_playerColliderBaselineObject = objectValue;
+    }
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+
+    // Current Y comes from Retail so standing, crouching, and other native
+    // posture transitions remain untouched by a horizontal-width change.
+    baseline.y = actualBefore.y;
+    const PlayerColliderSettings settings =
+        CurrentPlayerColliderSettings();
+    PlayerColliderDimensions requested{};
+    if (!ResolvePlayerColliderDimensions(
+            baseline, settings, requested)) {
+        return PlayerColliderPendingProcessResult::NotProcessed;
+    }
+
+    std::uint32_t nativeResult = kLithTechOk;
+    bool nativeCallAttempted = false;
+    bool nativeResultValid = false;
+    if (!PlayerColliderDimensionsMatch(actualBefore, requested)) {
+        nativeCallAttempted = true;
+        VectorAbi requestedAbi = ToVectorAbi(requested);
+        __try {
+            nativeResult = setDimensions(
+                physics, playerObject, &requestedAbi,
+                kSetDimensionsPushObjects);
+            nativeResultValid = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            nativeResult = ~kLithTechOk;
+        }
+    }
+
+    PlayerColliderDimensions actualAfter{};
+    const bool actualValid =
+        ReadPlayerColliderActualDimensions(
+            physics, playerObject, getDimensions,
+            actualAfter);
+    const bool succeeded =
+        actualValid &&
+        PlayerColliderDimensionsMatch(actualAfter, requested) &&
+        (!nativeCallAttempted ||
+         (nativeResultValid && nativeResult == kLithTechOk));
+    InterlockedExchange(
+        &g_playerColliderReapplyPending, succeeded ? 0 : 1);
+    RecordPlayerColliderHandoff(
+        "settings_change", playerObject, settings,
+        baseline, requested, actualAfter, actualValid,
+        succeeded, nativeResult, nativeCallAttempted,
+        nativeResultValid, true);
+    return nativeCallAttempted
+        ? PlayerColliderPendingProcessResult::NativeSetDimsAttempted
+        : PlayerColliderPendingProcessResult::AlreadyMatched;
+}
+
 float __fastcall HookGetBindingValue(
     const void* bindManager,
     void* ignoredEdx,
@@ -4636,6 +6105,61 @@ std::uintptr_t __fastcall HookMeleeImpactDispatch(
         : (argument8 == controllerAddress + 0xC0U ? 1 : -1);
     const bool actorCandidate = argument3 == 9U &&
         argument2 != static_cast<std::uintptr_t>(-1);
+    if (actorCandidate && physicalContact.accepted) {
+        PublishPlayerCollisionXrayTarget(
+            argument1,
+            contactPositionValid ? &contactPosition : nullptr);
+        const LONG observation = InterlockedIncrement(
+            &g_enemyColliderObservationEvents);
+        if (observation <= 64) {
+            void* moveManager = nullptr;
+            void* playerObject = nullptr;
+            void* physics = nullptr;
+            GetObjectDimensionsFunction getDimensions = nullptr;
+            SetObjectDimensionsFunction setDimensions = nullptr;
+            const bool contextValid = ResolvePlayerColliderContext(
+                moveManager, playerObject, physics,
+                getDimensions, setDimensions);
+            PlayerColliderDimensions playerDimensions{};
+            PlayerColliderDimensions targetDimensions{};
+            const bool playerDimensionsValid = contextValid &&
+                ReadPlayerColliderActualDimensions(
+                    physics, playerObject, getDimensions,
+                    playerDimensions);
+            const bool targetDimensionsValid = contextValid &&
+                argument1 != 0U &&
+                ReadPlayerColliderActualDimensions(
+                    physics, reinterpret_cast<void*>(argument1),
+                    getDimensions, targetDimensions);
+            const PlayerColliderSettings playerSettings =
+                CurrentPlayerColliderSettings();
+            char observationDetail[768]{};
+            std::snprintf(
+                observationDetail, sizeof(observationDetail),
+                "count=%ld target=0x%08lX target_node=0x%08lX "
+                "player=%p width_scale=%.2f "
+                "player_dims_valid=%u player_dims=(%.3f,%.3f,%.3f) "
+                "target_dims_valid=%u target_dims=(%.3f,%.3f,%.3f) "
+                "head_pose_valid=%u "
+                "head_horizontal_to_contact_m=%.4f "
+                "query=ILTClientPhysics.GetObjectDims mutation=none",
+                static_cast<long>(observation),
+                static_cast<unsigned long>(argument1),
+                static_cast<unsigned long>(argument2),
+                playerObject, playerSettings.widthScale,
+                playerDimensionsValid ? 1U : 0U,
+                playerDimensions.x, playerDimensions.y,
+                playerDimensions.z,
+                targetDimensionsValid ? 1U : 0U,
+                targetDimensions.x, targetDimensions.y,
+                targetDimensions.z,
+                contactProximity.headValid ? 1U : 0U,
+                contactProximity.headHorizontalToContactMeters);
+            g_log(
+                "m5_enemy_collider_observed",
+                observationDetail);
+        }
+    }
     char contactDiagnostic[2048]{};
     std::snprintf(
         contactDiagnostic, sizeof(contactDiagnostic),
@@ -6867,9 +8391,26 @@ void __fastcall HookClientShellUpdate(
         }
         PublishMenuRenderState();
     }
+    if (clientShell == g_clientShell) {
+        ObservePlayerCollisionXrayUpdate(true);
+        ObservePlayerColliderDimensionTransition("pre_retail_update", false);
+    }
     g_originalClientShellUpdate(clientShell);
     if (clientShell == g_clientShell) {
+        ObservePlayerColliderDimensionTransition("post_retail_update", false);
+        ObservePlayerCollisionXrayUpdate(false);
         ProcessPhysicalMeleeBlockNativeRelease();
+        const PlayerColliderPendingProcessResult colliderResult =
+            ProcessPendingPlayerColliderReapply();
+        if (colliderResult ==
+                PlayerColliderPendingProcessResult::NativeSetDimsAttempted) {
+            ObservePlayerColliderDimensionTransition(
+                "post_mod_setdims_attempt", true);
+        } else if (colliderResult ==
+                PlayerColliderPendingProcessResult::AlreadyMatched) {
+            ObservePlayerColliderDimensionTransition(
+                "post_pending_noop", true);
+        }
         PublishMenuRenderState();
         SampleForensicMemoryAfterRetailUpdate();
         SampleRetailPlayerVitals();
@@ -6897,6 +8438,343 @@ bool LocomotionTargetMatches(const unsigned char* target) noexcept {
         return false;
     }
 }
+bool PlayerSetDimensionsTargetMatches(
+    HMODULE gameClientModule,
+    const unsigned char* target) noexcept {
+    if (gameClientModule == nullptr || target == nullptr) {
+        return false;
+    }
+    auto* const base =
+        reinterpret_cast<unsigned char*>(gameClientModule);
+    __try {
+        std::uintptr_t firstPhysicsGlobal = 0U;
+        std::uintptr_t secondPhysicsGlobal = 0U;
+        std::memcpy(
+            &firstPhysicsGlobal, target + 0x09,
+            sizeof(firstPhysicsGlobal));
+        std::memcpy(
+            &secondPhysicsGlobal, target + 0x42,
+            sizeof(secondPhysicsGlobal));
+        return IsExecutableModuleAddress(
+                   target, gameClientModule) &&
+            firstPhysicsGlobal ==
+                reinterpret_cast<std::uintptr_t>(
+                    base + kClientPhysicsGlobalRva) &&
+            secondPhysicsGlobal ==
+                reinterpret_cast<std::uintptr_t>(
+                    base + kClientPhysicsGlobalRva) &&
+            std::memcmp(
+                target, kPlayerSetDimensionsPrefix,
+                sizeof(kPlayerSetDimensionsPrefix)) == 0 &&
+            std::memcmp(
+                target + 0x0D,
+                kPlayerSetDimensionsAfterPhysicsGlobal,
+                sizeof(kPlayerSetDimensionsAfterPhysicsGlobal)) == 0 &&
+            std::memcmp(
+                target + 0x2F,
+                kPlayerSetDimensionsDesiredRead,
+                sizeof(kPlayerSetDimensionsDesiredRead)) == 0 &&
+            std::memcmp(
+                target + 0x56,
+                kPlayerSetDimensionsNativeCall,
+                sizeof(kPlayerSetDimensionsNativeCall)) == 0 &&
+            std::memcmp(
+                target + 0x8A,
+                kPlayerSetDimensionsReturnTail,
+                sizeof(kPlayerSetDimensionsReturnTail)) == 0 &&
+            std::memcmp(
+                target + 0x13E,
+                kPlayerSetDimensionsReturnTail,
+                sizeof(kPlayerSetDimensionsReturnTail)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool PlayerCollisionVelocityTraceTargetMatches(
+    HMODULE executableModule,
+    const unsigned char* target) noexcept {
+    if (executableModule == nullptr || target == nullptr ||
+        g_gameClientBase == nullptr) {
+        return false;
+    }
+    auto* const executableBase =
+        reinterpret_cast<unsigned char*>(executableModule);
+    void** const expectedVtable = reinterpret_cast<void**>(
+        executableBase + kClientPhysicsVtableExecutableRva);
+    __try {
+        void* runtimePhysics = nullptr;
+        void** runtimeVtable = nullptr;
+        void* staticSetVelocity = nullptr;
+        std::uintptr_t logText = 0U;
+        std::memcpy(
+            &runtimePhysics,
+            g_gameClientBase + kClientPhysicsGlobalRva,
+            sizeof(runtimePhysics));
+        if (runtimePhysics != nullptr) {
+            std::memcpy(
+                &runtimeVtable, runtimePhysics,
+                sizeof(runtimeVtable));
+        }
+        std::memcpy(
+            &staticSetVelocity,
+            &expectedVtable[kSetVelocityVtableSlot],
+            sizeof(staticSetVelocity));
+        std::memcpy(&logText, target + 0x2CU, sizeof(logText));
+        return target == executableBase + kSetVelocityExecutableRva &&
+            runtimePhysics != nullptr &&
+            runtimeVtable == expectedVtable &&
+            staticSetVelocity == target &&
+            IsExecutableModuleAddress(target, executableModule) &&
+            std::memcmp(target, kSetVelocityPrefix,
+                        sizeof(kSetVelocityPrefix)) == 0 &&
+            target[0x2BU] == 0x68U &&
+            logText == reinterpret_cast<std::uintptr_t>(
+                executableBase + kSetVelocityLogTextRva) &&
+            std::memcmp(target + 0x41U, kSetVelocityTail,
+                        sizeof(kSetVelocityTail)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool PlayerColliderWriterTraceTargetsMatch(
+    HMODULE gameClientModule,
+    HMODULE executableModule,
+    const unsigned char* setObjectDimensionsTarget) noexcept {
+    if (gameClientModule == nullptr ||
+        executableModule == nullptr ||
+        setObjectDimensionsTarget == nullptr) {
+        return false;
+    }
+    auto* const gameBase =
+        reinterpret_cast<unsigned char*>(gameClientModule);
+    auto* const executableBase =
+        reinterpret_cast<unsigned char*>(executableModule);
+    auto* const getObjectDimensionsTarget =
+        executableBase + kGetObjectDimensionsExecutableRva;
+    auto* const expectedSetObjectDimensionsTarget =
+        executableBase + kSetObjectDimensionsExecutableRva;
+    void** const expectedVtable = reinterpret_cast<void**>(
+        executableBase + kClientPhysicsVtableExecutableRva);
+    const std::uintptr_t expectedPhysicsGlobal =
+        reinterpret_cast<std::uintptr_t>(
+            gameBase + kClientPhysicsGlobalRva);
+
+    __try {
+        void* runtimePhysics = nullptr;
+        void** runtimeVtable = nullptr;
+        void* staticGetObjectDimensions = nullptr;
+        void* staticSetObjectDimensions = nullptr;
+        std::memcpy(
+            &runtimePhysics,
+            gameBase + kClientPhysicsGlobalRva,
+            sizeof(runtimePhysics));
+        if (runtimePhysics != nullptr) {
+            std::memcpy(
+                &runtimeVtable, runtimePhysics,
+                sizeof(runtimeVtable));
+        }
+        std::memcpy(
+            &staticGetObjectDimensions,
+            &expectedVtable[kGetObjectDimensionsVtableSlot],
+            sizeof(staticGetObjectDimensions));
+        std::memcpy(
+            &staticSetObjectDimensions,
+            &expectedVtable[kSetObjectDimensionsVtableSlot],
+            sizeof(staticSetObjectDimensions));
+
+        std::uintptr_t moveManagerPrimaryPhysicsGlobal = 0U;
+        std::uintptr_t moveManagerFallbackPhysicsGlobal = 0U;
+        std::uintptr_t adjacentInitialPhysicsGlobal = 0U;
+        std::uintptr_t adjacentFirstPhysicsGlobal = 0U;
+        std::uintptr_t adjacentRetryPhysicsGlobal = 0U;
+        std::uintptr_t writerLiteralPhysicsGlobal = 0U;
+        std::uintptr_t writerPrimaryPhysicsGlobal = 0U;
+        std::uintptr_t writerRetryPhysicsGlobal = 0U;
+        std::memcpy(
+            &moveManagerPrimaryPhysicsGlobal,
+            gameBase + kPlayerSetDimensionsRva + 0x42U,
+            sizeof(moveManagerPrimaryPhysicsGlobal));
+        std::memcpy(
+            &moveManagerFallbackPhysicsGlobal,
+            gameBase + kPlayerSetDimensionsRva + 0x62U,
+            sizeof(moveManagerFallbackPhysicsGlobal));
+        std::memcpy(
+            &adjacentInitialPhysicsGlobal,
+            gameBase + kPlayerColliderAdjacentRoutineRva + 0x08U,
+            sizeof(adjacentInitialPhysicsGlobal));
+        std::memcpy(
+            &adjacentFirstPhysicsGlobal,
+            gameBase + 0x00031D55U,
+            sizeof(adjacentFirstPhysicsGlobal));
+        std::memcpy(
+            &adjacentRetryPhysicsGlobal,
+            gameBase + 0x00031D6AU,
+            sizeof(adjacentRetryPhysicsGlobal));
+        std::memcpy(
+            &writerLiteralPhysicsGlobal,
+            gameBase + 0x00034694U,
+            sizeof(writerLiteralPhysicsGlobal));
+        std::memcpy(
+            &writerPrimaryPhysicsGlobal,
+            gameBase + 0x00034746U,
+            sizeof(writerPrimaryPhysicsGlobal));
+        std::memcpy(
+            &writerRetryPhysicsGlobal,
+            gameBase + 0x00034779U,
+            sizeof(writerRetryPhysicsGlobal));
+
+        std::uintptr_t firstLogText = 0U;
+        std::uintptr_t secondLogText = 0U;
+        std::memcpy(
+            &firstLogText,
+            setObjectDimensionsTarget + 0x55U,
+            sizeof(firstLogText));
+        std::memcpy(
+            &secondLogText,
+            setObjectDimensionsTarget + 0x12DU,
+            sizeof(secondLogText));
+
+        std::int32_t writerCallerDisplacement = 0;
+        std::memcpy(
+            &writerCallerDisplacement,
+            gameBase + 0x00037FF0U,
+            sizeof(writerCallerDisplacement));
+        const std::intptr_t writerCallerTarget =
+            reinterpret_cast<std::intptr_t>(
+                gameBase +
+                kPlayerColliderWriterCallerReturnRva) +
+            writerCallerDisplacement;
+
+        return
+            setObjectDimensionsTarget ==
+                expectedSetObjectDimensionsTarget &&
+            runtimePhysics != nullptr &&
+            runtimeVtable == expectedVtable &&
+            staticGetObjectDimensions ==
+                getObjectDimensionsTarget &&
+            staticSetObjectDimensions ==
+                expectedSetObjectDimensionsTarget &&
+            IsExecutableModuleAddress(
+                getObjectDimensionsTarget, executableModule) &&
+            IsExecutableModuleAddress(
+                setObjectDimensionsTarget, executableModule) &&
+            moveManagerPrimaryPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            moveManagerFallbackPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            adjacentInitialPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            adjacentFirstPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            adjacentRetryPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            writerLiteralPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            writerPrimaryPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            writerRetryPhysicsGlobal ==
+                expectedPhysicsGlobal &&
+            firstLogText ==
+                reinterpret_cast<std::uintptr_t>(
+                    executableBase +
+                    kSetObjectDimensionsFirstLogTextRva) &&
+            secondLogText ==
+                reinterpret_cast<std::uintptr_t>(
+                    executableBase +
+                    kSetObjectDimensionsSecondLogTextRva) &&
+            writerCallerTarget ==
+                reinterpret_cast<std::intptr_t>(
+                    gameBase +
+                    kPlayerColliderWriterRoutineRva) &&
+            std::memcmp(
+                getObjectDimensionsTarget,
+                kGetObjectDimensionsExecutablePrefix,
+                sizeof(kGetObjectDimensionsExecutablePrefix)) == 0 &&
+            std::memcmp(
+                setObjectDimensionsTarget,
+                kSetObjectDimensionsExecutablePrefix,
+                sizeof(kSetObjectDimensionsExecutablePrefix)) == 0 &&
+            setObjectDimensionsTarget[0x54U] == 0x68U &&
+            setObjectDimensionsTarget[0x12CU] == 0x68U &&
+            std::memcmp(
+                setObjectDimensionsTarget + 0xDDU,
+                kSetObjectDimensionsSuccessTail,
+                sizeof(kSetObjectDimensionsSuccessTail)) == 0 &&
+            std::memcmp(
+                setObjectDimensionsTarget + 0xFBU,
+                kSetObjectDimensionsAdjustedTail,
+                sizeof(kSetObjectDimensionsAdjustedTail)) == 0 &&
+            std::memcmp(
+                setObjectDimensionsTarget + 0x13AU,
+                kSetObjectDimensionsInvalidTail,
+                sizeof(kSetObjectDimensionsInvalidTail)) == 0 &&
+            std::memcmp(
+                gameBase + kPlayerSetDimensionsRva + 0x2FU,
+                kPlayerSetDimensionsDesiredRead,
+                sizeof(kPlayerSetDimensionsDesiredRead)) == 0 &&
+            std::memcmp(
+                gameBase + kPlayerSetDimensionsRva + 0x56U,
+                kPlayerSetDimensionsNativeCall,
+                sizeof(kPlayerSetDimensionsNativeCall)) == 0 &&
+            std::memcmp(
+                gameBase + kPlayerSetDimensionsRva + 0x66U,
+                kPlayerSetDimensionsFallbackAfterPhysicsGlobal,
+                sizeof(
+                    kPlayerSetDimensionsFallbackAfterPhysicsGlobal)) == 0 &&
+            std::memcmp(
+                gameBase + kPlayerColliderAdjacentRoutineRva,
+                kPlayerColliderAdjacentPrefix,
+                sizeof(kPlayerColliderAdjacentPrefix)) == 0 &&
+            std::memcmp(
+                gameBase + 0x00031CFCU,
+                kPlayerColliderAdjacentAfterPhysicsGlobal,
+                sizeof(
+                    kPlayerColliderAdjacentAfterPhysicsGlobal)) == 0 &&
+            std::memcmp(
+                gameBase + 0x00031D38U,
+                kPlayerColliderAdjacentFirstRequest,
+                sizeof(kPlayerColliderAdjacentFirstRequest)) == 0 &&
+            std::memcmp(
+                gameBase + 0x00031D59U,
+                kPlayerColliderAdjacentFirstCallSuffix,
+                sizeof(
+                    kPlayerColliderAdjacentFirstCallSuffix)) == 0 &&
+            std::memcmp(
+                gameBase + 0x00031D6EU,
+                kPlayerColliderAdjacentRetrySuffix,
+                sizeof(kPlayerColliderAdjacentRetrySuffix)) == 0 &&
+            std::memcmp(
+                gameBase + kPlayerColliderWriterRoutineRva,
+                kPlayerColliderWriterEntry,
+                sizeof(kPlayerColliderWriterEntry)) == 0 &&
+            std::memcmp(
+                gameBase + 0x0003480DU,
+                kPlayerColliderWriterTail,
+                sizeof(kPlayerColliderWriterTail)) == 0 &&
+            std::memcmp(
+                gameBase +
+                    kPlayerColliderWriterCallerBranchRva,
+                kPlayerColliderWriterCallerBranch,
+                sizeof(kPlayerColliderWriterCallerBranch)) == 0 &&
+            std::memcmp(
+                gameBase + 0x00034698U,
+                kPlayerColliderWriterLiteralSuffix,
+                sizeof(kPlayerColliderWriterLiteralSuffix)) == 0 &&
+            std::memcmp(
+                gameBase + 0x0003474AU,
+                kPlayerColliderWriterPrimarySuffix,
+                sizeof(kPlayerColliderWriterPrimarySuffix)) == 0 &&
+            std::memcmp(
+                gameBase + 0x0003477DU,
+                kPlayerColliderWriterRetrySuffix,
+                sizeof(kPlayerColliderWriterRetrySuffix)) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 
 bool TurningTargetMatches(const unsigned char* target) noexcept {
     if (target == nullptr) {
@@ -8493,7 +10371,579 @@ bool EnsureBindingValueHook(
     return true;
 }
 
+class ScopedPlayerColliderHookInstallLock {
+public:
+    ScopedPlayerColliderHookInstallLock() noexcept {
+        AcquireSRWLockExclusive(
+            &g_playerColliderHookInstallLock);
+    }
+
+    ~ScopedPlayerColliderHookInstallLock() noexcept {
+        ReleaseSRWLockExclusive(
+            &g_playerColliderHookInstallLock);
+    }
+
+    ScopedPlayerColliderHookInstallLock(
+        const ScopedPlayerColliderHookInstallLock&) = delete;
+    ScopedPlayerColliderHookInstallLock& operator=(
+        const ScopedPlayerColliderHookInstallLock&) = delete;
+};
+
+bool EnsurePlayerColliderHook(
+    HMODULE gameClientModule,
+    RendererProbeLogFunction log) noexcept {
+    ScopedPlayerColliderHookInstallLock installLock;
+    (void)installLock;
+    if (gameClientModule == nullptr || log == nullptr) {
+        InterlockedExchange(
+            &g_playerColliderManagerHookOperational, 0);
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_playerColliderManagerInstallPoisoned, 0, 0) != 0) {
+        InterlockedExchange(
+            &g_playerColliderManagerHookOperational, 0);
+        log(
+            "m5_player_collider_rejected",
+            "reason=prior_owned_hook_rollback_uncertain "
+            "retry_suppressed=1 trampoline_retained=1");
+        return false;
+    }
+    auto* const base =
+        reinterpret_cast<unsigned char*>(gameClientModule);
+    auto* const target = base + kPlayerSetDimensionsRva;
+
+    AcquireSRWLockExclusive(&g_bindingLock);
+    const bool alreadyInstalled =
+        g_playerSetDimensionsHookTarget == target &&
+        g_originalPlayerSetDimensions != nullptr &&
+        InterlockedCompareExchange(
+            &g_playerColliderManagerHookOperational, 0, 0) != 0;
+    ReleaseSRWLockExclusive(&g_bindingLock);
+    if (alreadyInstalled) {
+        g_gameClientBase = base;
+        g_log = log;
+        return true;
+    }
+    InterlockedExchange(
+        &g_playerColliderManagerHookOperational, 0);
+    if (!PlayerSetDimensionsTargetMatches(
+            gameClientModule, target)) {
+        log(
+            "m5_player_collider_rejected",
+            "GameOrig_rva_00031ba0_signature_mismatch "
+            "runtime_mutation=0");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        log(
+            "m5_player_collider_rejected",
+            MH_StatusToString(initialize));
+        return false;
+    }
+
+    g_gameClientBase = base;
+    g_log = log;
+    PlayerSetDimensionsFunction trampoline = nullptr;
+    MH_STATUS status = MH_CreateHook(
+        target,
+        reinterpret_cast<void*>(&HookPlayerSetDimensions),
+        reinterpret_cast<void**>(&trampoline));
+    if (status != MH_OK) {
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "step=create status=%s hook_installed=0 "
+            "owned_hook_removed=0 runtime_mutation=0",
+            MH_StatusToString(status));
+        log("m5_player_collider_rejected", detail);
+        return false;
+    }
+
+    g_originalPlayerSetDimensions = trampoline;
+    status = MH_EnableHook(target);
+    if (status != MH_OK) {
+        InterlockedExchange(
+            &g_playerColliderManagerHookOperational, 0);
+        const MH_STATUS removeStatus = MH_RemoveHook(target);
+        const bool removed = removeStatus == MH_OK;
+        if (removed) {
+            g_originalPlayerSetDimensions = nullptr;
+        } else {
+            InterlockedExchange(
+                &g_playerColliderManagerInstallPoisoned, 1);
+        }
+        AcquireSRWLockExclusive(&g_playerColliderLock);
+        g_playerColliderTelemetry.hookReady = false;
+        ReleaseSRWLockExclusive(&g_playerColliderLock);
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "step=enable status=%s hook_installed=%s "
+            "remove_status=%s owned_hook_removed=%u "
+            "hook_state_unknown=%u trampoline_retained=%u "
+            "runtime_mutation=%s",
+            MH_StatusToString(status),
+            removed ? "0" : "unknown",
+            MH_StatusToString(removeStatus),
+            removed ? 1U : 0U,
+            removed ? 0U : 1U,
+            removed ? 0U : 1U,
+            removed ? "0" : "unknown");
+        log("m5_player_collider_rejected", detail);
+        return false;
+    }
+
+    InterlockedExchange(
+        &g_playerColliderManagerHookOperational, 1);
+    AcquireSRWLockExclusive(&g_bindingLock);
+    g_playerSetDimensionsHookTarget = target;
+    ReleaseSRWLockExclusive(&g_bindingLock);
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    g_playerColliderTelemetry.hookReady = true;
+    g_playerColliderTelemetry.widthScale =
+        CurrentPlayerColliderSettings().widthScale;
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+    InterlockedExchange(
+        &g_playerColliderReapplyPending, 1);
+    log(
+        "m5_player_collider_armed",
+        "target=GameOrig+0x00031BA0 "
+        "manager=GameOrig+0x00168EEC player_object_offset=0x10 "
+        "physics=GameOrig+0x00172EC4 "
+        "GetObjectDims=slot8 SetObjectDims=slot9 "
+        "scope=local_player_only axes=x,z y=retail_preserved "
+        "scale_range=0.10-1.00 default=1.00 "
+        "push_objects=1 enemy_objects_changed=0 "
+        "signature_and_module_identity_gated=1 "
+        "fail_closed_operational_gate=1");
+    log(
+        "m5_player_collider_drift_probe_armed",
+        "phases=pre_retail_update,post_retail_update,"
+        "post_mod_setdims_attempt,post_pending_noop "
+        "post_retail_before_pending_process=1 "
+        "boundary_emission=initial_plus_change "
+        "post_pending_emission=forced "
+        "boundary_event_cap=128 post_pending_event_cap=32 "
+        "local_player_only=1 "
+        "manager_requested_offset=0x1C "
+        "manager_40c_source_candidate=0x40C "
+        "adjacent_dimensions_candidate=0x418 mutation=none");
+    return true;
+}
+
+
+bool EnsurePlayerColliderWriterTrace(
+    HMODULE gameClientModule,
+    RendererProbeLogFunction log) noexcept {
+    ScopedPlayerColliderHookInstallLock installLock;
+    (void)installLock;
+    if (gameClientModule == nullptr || log == nullptr) {
+        InterlockedExchange(
+            &g_playerColliderWriterHookOperational, 0);
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_playerColliderWriterInstallPoisoned, 0, 0) != 0) {
+        InterlockedExchange(
+            &g_playerColliderWriterHookOperational, 0);
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            "reason=prior_owned_hook_rollback_uncertain "
+            "retry_suppressed=1 trampoline_retained=1");
+        return false;
+    }
+    HMODULE const executableModule = GetModuleHandleW(nullptr);
+    if (executableModule == nullptr) {
+        InterlockedExchange(
+            &g_playerColliderWriterHookOperational, 0);
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            "reason=executable_module_missing hook_installed=0 "
+            "runtime_mutation=0");
+        return false;
+    }
+    auto* const executableBase =
+        reinterpret_cast<unsigned char*>(executableModule);
+    auto* const target =
+        executableBase + kSetObjectDimensionsExecutableRva;
+
+    AcquireSRWLockShared(&g_bindingLock);
+    const bool managerHookReady =
+        g_playerSetDimensionsHookTarget ==
+            reinterpret_cast<unsigned char*>(
+                gameClientModule) +
+                kPlayerSetDimensionsRva &&
+        g_originalPlayerSetDimensions != nullptr &&
+        InterlockedCompareExchange(
+            &g_playerColliderManagerHookOperational, 0, 0) != 0;
+    const bool alreadyInstalled =
+        g_playerSetObjectDimensionsTraceHookTarget == target &&
+        g_originalPlayerSetObjectDimensionsTrace != nullptr &&
+        g_playerColliderTraceExecutable == executableModule &&
+        InterlockedCompareExchange(
+            &g_playerColliderWriterHookOperational, 0, 0) != 0;
+    ReleaseSRWLockShared(&g_bindingLock);
+    if (alreadyInstalled) {
+        g_log = log;
+        return true;
+    }
+    InterlockedExchange(
+        &g_playerColliderWriterHookOperational, 0);
+    if (!managerHookReady) {
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            "reason=player_collider_manager_hook_unavailable "
+            "hook_installed=0 runtime_mutation=0");
+        return false;
+    }
+
+    wchar_t executablePath[MAX_PATH]{};
+    const DWORD executablePathLength = GetModuleFileNameW(
+        nullptr, executablePath, MAX_PATH);
+    if (executablePathLength == 0U ||
+        executablePathLength >= MAX_PATH) {
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            "reason=executable_path_unavailable hook_installed=0 "
+            "runtime_mutation=0");
+        return false;
+    }
+    const ModuleIdentityResult executableIdentity =
+        VerifyCondemnedExecutable(executablePath);
+    if (executableIdentity != ModuleIdentityResult::ok) {
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "reason=executable_identity_%s hook_installed=0 "
+            "runtime_mutation=0",
+            ModuleIdentityResultName(executableIdentity));
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            detail);
+        return false;
+    }
+    if (!PlayerColliderWriterTraceTargetsMatch(
+            gameClientModule, executableModule, target)) {
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            "reason=executable_vtable_or_callsite_signature_mismatch "
+            "hook_installed=0 runtime_mutation=0");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "step=initialize status=%s hook_installed=0 "
+            "runtime_mutation=0",
+            MH_StatusToString(initialize));
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            detail);
+        return false;
+    }
+
+    g_originalPlayerSetObjectDimensionsTrace = nullptr;
+    MH_STATUS status = MH_CreateHook(
+        target,
+        reinterpret_cast<void*>(
+            &HookPlayerSetObjectDimensionsTrace),
+        reinterpret_cast<void**>(
+            &g_originalPlayerSetObjectDimensionsTrace));
+    if (status != MH_OK) {
+        g_originalPlayerSetObjectDimensionsTrace = nullptr;
+        char detail[256]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "step=create status=%s hook_installed=0 "
+            "owned_hook_removed=0 runtime_mutation=0",
+            MH_StatusToString(status));
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            detail);
+        return false;
+    }
+
+    g_playerColliderTraceExecutable = executableModule;
+    InterlockedExchange(
+        &g_playerColliderWriterKnownEvents, 0);
+    InterlockedExchange(
+        &g_playerColliderWriterUnknownGameEvents, 0);
+    InterlockedExchange(
+        &g_playerColliderWriterExecutableEvents, 0);
+    InterlockedExchange(
+        &g_playerColliderWriterExternalEvents, 0);
+    InterlockedExchange(
+        &g_playerColliderWriterUnresolvedEvents, 0);
+    InterlockedExchange64(
+        &g_playerColliderWriterNextSequence, 0);
+    status = MH_EnableHook(target);
+    if (status != MH_OK) {
+        InterlockedExchange(
+            &g_playerColliderWriterHookOperational, 0);
+        const MH_STATUS removeStatus =
+            MH_RemoveHook(target);
+        const bool removed = removeStatus == MH_OK;
+        if (removed) {
+            g_originalPlayerSetObjectDimensionsTrace = nullptr;
+            g_playerColliderTraceExecutable = nullptr;
+        } else {
+            InterlockedExchange(
+                &g_playerColliderWriterInstallPoisoned, 1);
+        }
+        char detail[384]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "step=enable status=%s hook_installed=%s "
+            "remove_status=%s owned_hook_removed=%u "
+            "hook_state_unknown=%u trampoline_retained=%u "
+            "runtime_mutation=%s",
+            MH_StatusToString(status),
+            removed ? "0" : "unknown",
+            MH_StatusToString(removeStatus),
+            removed ? 1U : 0U,
+            removed ? 0U : 1U,
+            removed ? 0U : 1U,
+            removed ? "0" : "unknown");
+        log(
+            "m5_player_collider_writer_trace_rejected",
+            detail);
+        return false;
+    }
+
+    InterlockedExchange(
+        &g_playerColliderWriterHookOperational, 1);
+    AcquireSRWLockExclusive(&g_bindingLock);
+    g_playerSetObjectDimensionsTraceHookTarget = target;
+    ReleaseSRWLockExclusive(&g_bindingLock);
+    log(
+        "m5_player_collider_writer_trace_armed",
+        "target=Condemned+0x00007FD0 "
+        "exe_identity=sha256_verified "
+        "physics_vtable=Condemned+0x0014ADE0 "
+        "GetObjectDims=Condemned+0x00064530 "
+        "SetObjectDims=Condemned+0x00007FD0 "
+        "known_returns=GameOrig+0x00031BFC,0x00031C16,"
+        "0x00031D68,0x00031D86,0x000346BF,0x0003476F,"
+        "0x0003478A "
+        "known_event_cap=64 unknown_gameorig_event_cap=64 "
+        "executable_local_event_cap=64 external_local_event_cap=32 "
+        "unresolved_local_event_cap=32 "
+        "detour_scope=all_setobjectdims_calls "
+        "telemetry_scope=exact_local_player_reduced_or_pending "
+        "playing_only=1 nonlocal_forwarded_without_observation=1 "
+        "request_pointer_forwarded_unchanged=1 "
+        "flags_forwarded_unchanged=1 native_result_preserved=1 "
+        "observer_added_engine_state_writes=0 "
+        "observer_setdims_calls_added=0 "
+        "fail_closed_operational_gate=1");
+    return true;
+}
+
+bool EnsurePlayerCollisionVelocityTrace(
+    HMODULE gameClientModule,
+    RendererProbeLogFunction log) noexcept {
+    ScopedPlayerColliderHookInstallLock installLock;
+    (void)installLock;
+    InterlockedExchange(
+        &g_playerCollisionVelocityHookOperational, 0);
+    if (gameClientModule == nullptr || log == nullptr ||
+        InterlockedCompareExchange(
+            &g_playerCollisionVelocityInstallPoisoned, 0, 0) != 0) {
+        return false;
+    }
+    HMODULE const executableModule = GetModuleHandleW(nullptr);
+    auto* const executableBase =
+        reinterpret_cast<unsigned char*>(executableModule);
+    auto* const target = executableBase != nullptr
+        ? executableBase + kSetVelocityExecutableRva
+        : nullptr;
+    AcquireSRWLockShared(&g_bindingLock);
+    const bool alreadyInstalled =
+        g_playerCollisionSetVelocityHookTarget == target &&
+        g_originalPlayerCollisionSetVelocity != nullptr;
+    ReleaseSRWLockShared(&g_bindingLock);
+    if (alreadyInstalled) {
+        InterlockedExchange(
+            &g_playerCollisionVelocityHookOperational, 1);
+        return true;
+    }
+
+    wchar_t executablePath[MAX_PATH]{};
+    const DWORD pathLength = GetModuleFileNameW(
+        nullptr, executablePath, MAX_PATH);
+    if (pathLength == 0U || pathLength >= MAX_PATH) {
+        log("m5_player_collision_xray_rejected",
+            "reason=executable_path_unavailable hook_installed=0 runtime_mutation=0");
+        return false;
+    }
+    const ModuleIdentityResult identity =
+        VerifyCondemnedExecutable(executablePath);
+    if (identity != ModuleIdentityResult::ok ||
+        !PlayerCollisionVelocityTraceTargetMatches(
+            executableModule, target)) {
+        char detail[320]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "reason=%s hook_installed=0 runtime_mutation=0",
+            identity != ModuleIdentityResult::ok
+                ? ModuleIdentityResultName(identity)
+                : "executable_vtable_or_signature_mismatch");
+        log("m5_player_collision_xray_rejected", detail);
+        return false;
+    }
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        log("m5_player_collision_xray_rejected",
+            "reason=minhook_initialize hook_installed=0 runtime_mutation=0");
+        return false;
+    }
+    g_originalPlayerCollisionSetVelocity = nullptr;
+    MH_STATUS status = MH_CreateHook(
+        target,
+        reinterpret_cast<void*>(&HookPlayerCollisionSetVelocity),
+        reinterpret_cast<void**>(
+            &g_originalPlayerCollisionSetVelocity));
+    if (status != MH_OK) {
+        g_originalPlayerCollisionSetVelocity = nullptr;
+        log("m5_player_collision_xray_rejected",
+            "reason=minhook_create hook_installed=0 runtime_mutation=0");
+        return false;
+    }
+    status = MH_EnableHook(target);
+    if (status != MH_OK) {
+        const MH_STATUS removeStatus = MH_RemoveHook(target);
+        if (removeStatus == MH_OK) {
+            g_originalPlayerCollisionSetVelocity = nullptr;
+        } else {
+            InterlockedExchange(
+                &g_playerCollisionVelocityInstallPoisoned, 1);
+        }
+        log("m5_player_collision_xray_rejected",
+            removeStatus == MH_OK
+                ? "reason=minhook_enable owned_hook_removed=1 runtime_mutation=0"
+                : "reason=minhook_enable rollback_uncertain=1 runtime_mutation=unknown");
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_bindingLock);
+    g_playerCollisionSetVelocityHookTarget = target;
+    ReleaseSRWLockExclusive(&g_bindingLock);
+    InterlockedExchange(&g_playerCollisionVelocityEvents, 0);
+    InterlockedExchange(&g_playerCollisionUpdateEvents, 0);
+    InterlockedExchange64(&g_playerCollisionTimelineSequence, 0);
+    InterlockedExchange(
+        &g_playerCollisionVelocityHookOperational, 1);
+    log(
+        "m5_player_collision_xray_armed",
+        "SetVelocity=Condemned+0x00007CD0 "
+        "physics_vtable=Condemned+0x0014ADE0 slot=11 "
+        "exe_identity=sha256_verified exact_local_player_only=1 "
+        "playing_foreground_freshness_gated=1 "
+        "movement_semantics=velocity_handoff_not_collision_result "
+        "dimensions_and_origins=read_only "
+        "render_geometry=diagnostic_proxy "
+        "true_physics_geometry_verified=0 enemy_mutation=0 "
+        "observer_engine_state_writes=0 native_call_count=1 "
+        "fallback=retail fail_closed_operational_gate=1");
+    return true;
+}
+
 } // namespace
+bool ConfigurePlayerColliderSettings(
+    const PlayerColliderSettings& settings) noexcept {
+    if (!PlayerColliderSettingsAreValid(settings)) {
+        return false;
+    }
+    const LONG basisPoints = static_cast<LONG>(
+        std::lround(settings.widthScale * 10000.0F));
+    const LONG previous = InterlockedExchange(
+        &g_playerColliderScaleBasisPoints, basisPoints);
+    if (previous != basisPoints) {
+        InterlockedExchange(
+            &g_playerColliderReapplyPending, 1);
+    }
+    AcquireSRWLockExclusive(&g_playerColliderLock);
+    g_playerColliderTelemetry.widthScale =
+        static_cast<float>(basisPoints) / 10000.0F;
+    g_playerColliderTelemetry.reapplyPending =
+        InterlockedCompareExchange(
+            &g_playerColliderReapplyPending, 0, 0) != 0;
+    ReleaseSRWLockExclusive(&g_playerColliderLock);
+    return true;
+}
+
+PlayerColliderSettings ReadPlayerColliderSettings() noexcept {
+    return CurrentPlayerColliderSettings();
+}
+
+void ReadPlayerColliderTelemetry(
+    PlayerColliderTelemetry& telemetry) noexcept {
+    AcquireSRWLockShared(&g_playerColliderLock);
+    telemetry = g_playerColliderTelemetry;
+    ReleaseSRWLockShared(&g_playerColliderLock);
+    telemetry.widthScale =
+        CurrentPlayerColliderSettings().widthScale;
+    telemetry.reapplyPending =
+        InterlockedCompareExchange(
+            &g_playerColliderReapplyPending, 0, 0) != 0;
+}
+
+void SetPlayerCollisionXrayEnabled(bool enabled) noexcept {
+    InterlockedExchange(
+        &g_playerCollisionXrayEnabled, enabled ? 1 : 0);
+    AcquireSRWLockExclusive(&g_playerCollisionXrayLock);
+    g_playerCollisionXraySnapshot = {};
+    g_playerCollisionXraySnapshot.enabled = enabled;
+    g_playerCollisionXraySnapshot.movementTraceReady =
+        InterlockedCompareExchange(
+            &g_playerCollisionVelocityHookOperational, 0, 0) != 0;
+    g_playerCollisionXrayPreUpdate = {};
+    g_playerCollisionXrayTargetObject = 0U;
+    g_playerCollisionXrayContactPoint = {};
+    g_playerCollisionXrayContactValid = false;
+    g_playerCollisionXrayTargetTick = 0U;
+    g_playerCollisionXrayLastUpdateLogTick = 0U;
+    ReleaseSRWLockExclusive(&g_playerCollisionXrayLock);
+    InterlockedExchange(&g_playerCollisionVelocityEvents, 0);
+    InterlockedExchange(&g_playerCollisionUpdateEvents, 0);
+    if (g_log != nullptr) {
+        g_log(
+            "m5_player_collision_xray_state",
+            enabled
+                ? "enabled=1 persistence=session_only mutation=none geometry=diagnostic_proxy true_physics_geometry_verified=0"
+                : "enabled=0 persistence=session_only mutation=none");
+    }
+}
+
+bool PlayerCollisionXrayEnabled() noexcept {
+    return InterlockedCompareExchange(
+        &g_playerCollisionXrayEnabled, 0, 0) != 0;
+}
+
+bool ReadPlayerCollisionXraySnapshot(
+    PlayerCollisionXraySnapshot& snapshot) noexcept {
+    AcquireSRWLockShared(&g_playerCollisionXrayLock);
+    snapshot = g_playerCollisionXraySnapshot;
+    ReleaseSRWLockShared(&g_playerCollisionXrayLock);
+    snapshot.enabled = PlayerCollisionXrayEnabled();
+    snapshot.movementTraceReady = InterlockedCompareExchange(
+        &g_playerCollisionVelocityHookOperational, 0, 0) != 0;
+    return snapshot.enabled && snapshot.playerValid &&
+        snapshot.tickMilliseconds != 0U &&
+        GetTickCount64() >= snapshot.tickMilliseconds &&
+        GetTickCount64() - snapshot.tickMilliseconds <=
+            kInputFreshnessMilliseconds &&
+        ProcessOwnsForegroundWindow();
+}
+
 
 bool InstallBindingLocomotionHook(
     HMODULE gameClientModule,
@@ -8503,6 +10953,14 @@ bool InstallBindingLocomotionHook(
             gameClientModule, bridgeModule, log,
             "m4_binding_locomotion_rejected")) {
         return false;
+    }
+    const bool playerColliderReady = EnsurePlayerColliderHook(
+        gameClientModule, log);
+    if (playerColliderReady) {
+        (void)EnsurePlayerColliderWriterTrace(
+            gameClientModule, log);
+        (void)EnsurePlayerCollisionVelocityTrace(
+            gameClientModule, log);
     }
     InterlockedExchange(&g_locomotionEnabled, 1);
     log(

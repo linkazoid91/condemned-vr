@@ -66,6 +66,9 @@ int main() {
             L"developer", L"tool_menu_shortcut", L"1,1",
             defaultsPath) ||
         !WritePrivateProfileStringW(
+            L"player_collision", L"width_scale", L"1,1",
+            defaultsPath) ||
+        !WritePrivateProfileStringW(
             L"arm_ik", L"empty_right_hand",
             L"1,0,0,0,0,0,0,1",
             defaultsPath)) {
@@ -128,6 +131,25 @@ int main() {
     if (SaveToolMenuShortcutEnabled(true) !=
             WeaponSettingsStoreResult::Ok) {
         return Fail("enabled tool-menu shortcut preference must save");
+    }
+
+    PlayerColliderSettings loadedPlayerCollider{};
+    if (LoadPlayerColliderSettings(loadedPlayerCollider) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedPlayerCollider.widthScale, 1.0F)) {
+        return Fail(
+            "packaged player collision must default to Retail width");
+    }
+    const PlayerColliderSettings expectedPlayerCollider{0.75F};
+    if (SavePlayerColliderSettings(expectedPlayerCollider) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("player collision width must save");
+    }
+    loadedPlayerCollider = {};
+    if (LoadPlayerColliderSettings(loadedPlayerCollider) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(loadedPlayerCollider.widthScale, 0.75F)) {
+        return Fail("player collision width must round-trip");
     }
 
     EmptyRightHandAlignmentSettings loadedEmptyHand{};
@@ -707,6 +729,93 @@ int main() {
         return Fail(
             "malformed Developer Tools values must reject without mutation");
     }
+    if (!WritePrivateProfileStringW(
+            L"player_collision", L"width_scale", L"1,0.05",
+            path)) {
+        return Fail(
+            "malformed player collision fixture must be writable");
+    }
+    PlayerColliderSettings rejectedPlayerCollider{};
+    if (LoadPlayerColliderSettings(rejectedPlayerCollider) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !Near(rejectedPlayerCollider.widthScale, 1.0F)) {
+        return Fail(
+            "out-of-range player width must fail without mutation");
+    }
+
+    MagazineInsertionSocketSettings absentSocket{};
+    absentSocket.positionUnits.x = 99.0F;
+    if (LoadMagazineInsertionSocketSettings(
+            76, "colt45_Unbreakable", absentSocket) !=
+            WeaponSettingsStoreResult::NotFound ||
+        !Near(absentSocket.positionUnits.x, 99.0F)) {
+        return Fail(
+            "a missing magazine socket must remain unconfigured without mutation");
+    }
+    MagazineInsertionSocketSettings expectedSocket{};
+    expectedSocket.configured = true;
+    expectedSocket.positionUnits = {1.25F, -2.5F, 3.75F};
+    expectedSocket.rotationDegrees = {10.0F, -20.0F, 30.0F};
+    expectedSocket.halfExtentsUnits = {1.0F, 2.0F, 3.0F};
+    expectedSocket.approachLengthUnits = 12.0F;
+    expectedSocket.snapDistanceUnits = 2.5F;
+    expectedSocket.snapAngleDegrees = 20.0F;
+    if (SaveMagazineInsertionSocketSettings(
+            76, "colt45_Unbreakable", expectedSocket) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("a valid exact-name magazine socket must save");
+    }
+    MagazineInsertionSocketSettings loadedSocket{};
+    if (LoadMagazineInsertionSocketSettings(
+            76, "colt45_Unbreakable", loadedSocket) !=
+            WeaponSettingsStoreResult::Ok ||
+        !loadedSocket.configured ||
+        !Near(loadedSocket.positionUnits.x, 1.25F) ||
+        !Near(loadedSocket.positionUnits.y, -2.5F) ||
+        !Near(loadedSocket.rotationDegrees.z, 30.0F) ||
+        !Near(loadedSocket.halfExtentsUnits.y, 2.0F) ||
+        !Near(loadedSocket.approachLengthUnits, 12.0F) ||
+        !Near(loadedSocket.snapDistanceUnits, 2.5F) ||
+        !Near(loadedSocket.snapAngleDegrees, 20.0F)) {
+        return Fail(
+            "magazine socket geometry must round-trip per weapon");
+    }
+    if (LoadMagazineInsertionSocketSettings(
+            76, "revolver_Unbreakable", loadedSocket) !=
+            WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "a catalog-name mismatch must reject an index-reused socket");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_76", L"magazine_socket",
+            L"1,colt45_Unbreakable,1,0,0,0,0,0,0,0,1,1,10,2,15",
+            path)) {
+        return Fail(
+            "malformed magazine socket fixture must be writable");
+    }
+    loadedSocket.positionUnits.x = 88.0F;
+    if (LoadMagazineInsertionSocketSettings(
+            76, "colt45_Unbreakable", loadedSocket) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !Near(loadedSocket.positionUnits.x, 88.0F)) {
+        return Fail(
+            "malformed socket data must fail closed without mutation");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_76", L"magazine_socket",
+            L"1,colt45_Unbreakable,1,0,0,0,0,0,0,1,1,1,10,2,15,trailing",
+            path)) {
+        return Fail(
+            "trailing magazine socket fixture must be writable");
+    }
+    loadedSocket.positionUnits.x = 77.0F;
+    if (LoadMagazineInsertionSocketSettings(
+            76, "colt45_Unbreakable", loadedSocket) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !Near(loadedSocket.positionUnits.x, 77.0F)) {
+        return Fail(
+            "trailing socket data must fail closed without mutation");
+    }
 
     DeleteFileW(path);
     DeleteFileW(defaultsPath);
@@ -730,6 +839,15 @@ int main() {
         return Fail(
             "the real packaged Developer Tools preference must parse enabled");
     }
+
+    PlayerColliderSettings shippedPlayerCollider{};
+    if (LoadPlayerColliderSettings(shippedPlayerCollider) !=
+            WeaponSettingsStoreResult::Ok ||
+        !Near(shippedPlayerCollider.widthScale, 1.0F)) {
+        return Fail(
+            "real packaged player collision must preserve Retail width");
+    }
+
 
     ToolMenuMeleeSettings shippedPipe{};
     if (LoadWeaponToolSettings(

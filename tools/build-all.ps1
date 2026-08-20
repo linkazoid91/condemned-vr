@@ -142,6 +142,11 @@ foreach ($target in $targets) {
 
 if (-not $SkipTests) {
     Write-Host (
+        '--- PowerShell: launch feature profile ---') `
+        -ForegroundColor Cyan
+    & $PSScriptRoot\test-condemned-launch-profile.ps1
+
+    Write-Host (
         '--- PowerShell: launcher focus handoff ---') `
         -ForegroundColor Cyan
     & "$PSScriptRoot\test-condemned-window-focus.ps1"

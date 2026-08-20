@@ -10,6 +10,7 @@
 #include "arm_ik.h"
 #include "condemned_block_pose.h"
 #include "condemned_physical_melee.h"
+#include "condemned_player_collision.h"
 #include "condemned_weapon_identity.h"
 #include "input_state.h"
 #include "protocol.h"
@@ -23,6 +24,8 @@ enum class ToolMenuTab : std::uint8_t {
     Weapon,
     Grip,
     Collider,
+    Author,
+    PlayerCollider,
     TwoHand,
     HandIk,
     LeftHandIk,
@@ -47,6 +50,10 @@ inline const char* ToolMenuTabName(ToolMenuTab tab) noexcept {
         return "GRIP";
     case ToolMenuTab::Collider:
         return "COLLIDER";
+    case ToolMenuTab::Author:
+        return "AUTHOR";
+    case ToolMenuTab::PlayerCollider:
+        return "PLAYER COL";
     case ToolMenuTab::TwoHand:
         return "2-HAND";
     case ToolMenuTab::HandIk:
@@ -80,6 +87,10 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
         return 10U;
     case ToolMenuTab::Collider:
         return 10U;
+    case ToolMenuTab::Author:
+        return 7U;
+    case ToolMenuTab::PlayerCollider:
+        return 3U;
     case ToolMenuTab::TwoHand:
         return 8U;
     case ToolMenuTab::HandIk:

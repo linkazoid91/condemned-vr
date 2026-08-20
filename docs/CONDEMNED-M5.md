@@ -354,16 +354,36 @@ After building and refreshing the M2 mono stage, start its guarded headset
 configuration with:
 
 ```powershell
-.\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait
+.\tools\launch-condemned-m2-vr.ps1
 ```
 
-The retained `-WeaponTest Pipe` name selects the accepted Pipe baseline, but
-the preset now exercises any mapped one-handed weapon. It expands the accepted
-M4 controller gates plus physical-melee telemetry, wall and visual proxies,
-grip calibration, full arm IK, recentering, desktop-window support, and
-one-handed contact damage. It deliberately leaves `-TwoHandedMelee` off.
+The no-argument `Current` profile selects the accepted Pipe baseline for any
+mapped one-handed weapon and also exposes the guarded Retail VR Settings entry.
+The retained explicit `-WeaponTest Pipe` name remains a compatible Pipe-only
+diagnostic alias. The current profile expands the accepted M4 controller gates
+plus physical-melee telemetry, wall and visual proxies, grip calibration, full
+arm IK, recentering, desktop-window support, and one-handed contact damage. It
+deliberately leaves `-TwoHandedMelee` off.
 Confirm the Debug tab reports the intended Retail index/profile before judging
 alignment, inertia, sweep speed, or collision behavior.
+
+Run `run-20260820-041148` live-exercised that exact no-argument selection
+through launcher readiness. The report records `FeaturePreset=Current`, the
+internal Pipe baseline, Retail VR Settings, physical melee/contact damage,
+weapon calibration/authoring, and full arm IK enabled; two-hand attachment and
+forensic memory tracing remained disabled. The staged bridge was the expected
+module, no ASI loaded, foreground restoration passed, and both processes were
+responding. This is launcher/stage/hook-readiness evidence only, not perceptual
+or gameplay acceptance for the combined feature set.
+
+The session subsequently exercised active headset input and gameplay/menu
+paths, then ended after approximately one minute in the known Windows
+Application Error bucket `Condemned.exe` / `ClientFx.fxd+0x26EEF`, exception
+`0xc0000005`, report ID `2ea5e501-d7df-4db5-a083-687c6c4a929c`. The host
+observed the game disconnect and shut down cleanly. Treat this as a failed
+combined-profile stability/shutdown gate, not as evidence that Current or the
+Retail VR Settings entry caused the fault: the same bucket is documented before
+that work. A controlled baseline/profile comparison remains required.
 
 The damage gate reuses Retail's verified melee collision body, so Retail must
 create that body once. If `CONTACT DAMAGE ON` is shown but `CALLBACKS` stays
@@ -2185,3 +2205,285 @@ loader SHA-256
 `08F10AE3C302D6C7D616DE2B10C01D3F44389B9F362FCCD2EC717AF55BE346E4`.
 This is **implemented, awaiting live validation**. No game/headset run has yet
 proven automatic pickup readiness or perception.
+
+## Player locomotion collision-width probe (19 August 2026)
+
+Stick locomotion stopped the HMD too far from enemies, so weapon `COLLIDER`
+and `BLOCK COL` geometry were excluded first: neither owns the character body.
+Static evidence in the supported Retail `GameOrig.dll` established the local
+`CMoveMgr` singleton at `GameOrig+0x00168EEC`, its player HOBJECT at manager
+`+0x10`, the desired dimensions at `+0x1C`, and the identity/signature-gated
+dimension handoff at `GameOrig+0x00031BA0`. The engine interface uses verified
+`ILTClientPhysics` slots 8/9 for `GetObjectDims`/`SetObjectDims`;
+`SETDIMS_PUSHOBJECTS` remains native.
+
+The first candidate added a global `PLAYER COL` menu page. It scales only
+Retail X/Z, preserves Retail/current stance Y, defaults and resets to exact
+100%, filters on the exact local manager/player object, and restores the
+manager request field after the native call. Settings changes are reapplied on
+the game thread and remain pending after native failure. Enemy and other
+objects are never passed to `SetObjectDims`. The pre-live full gate passed
+24/24 x86 and 20/20 x64 tests.
+
+Run `run-20260819-115942` supplied the first live evidence:
+
+- the hook armed on the supported binary and loaded a 100% default;
+- Retail requested and reported `(40,95,40)`, with native result zero;
+- every successful step down reported exact requested/actual agreement;
+- at the initial 50% floor, native actual dimensions were `(20,95,20)`, Y
+  remained 95, and telemetry reported `enemy_objects_changed=0`;
+- attempts to expand while obstructed returned native result 1 and retained
+  `(20,95,20)` until the player moved clear, after which expansion succeeded;
+- after returning to 50%, accepted actor contacts recorded HMD-XZ distances
+  of 0.7137 m and 0.7939 m to their contact points. Those values are not a
+  nearest-body or object-centre distance; and
+- the headset tester reported that 50% did not materially improve the
+  stick-locomotion approach gap.
+
+This is **live verification of the local-player dimension handoff**, but a
+**live rejection of 50% width as a sufficient proximity fix**. It does not
+establish that enemy dimensions or an AI/server push rule owns the remainder.
+
+The next diagnostic checkpoint lowered only the positive floor from 50% to
+10%, which requests `(4,95,4)` for the observed Retail body. On an accepted
+actor contact it also reads, but does not mutate, the local-player and target
+dimensions through the same verified `GetObjectDims` interface and emits
+`m5_enemy_collider_observed` with `mutation=none`. Retail 100% remains the
+default/reset. The full headset-free gate on 2026-08-19 passed 24/24 x86 and
+20/20 x64 CTest cases plus the launcher-focus, screenshot-helper, and
+schema-v4 diagnostics-watcher checks. At that checkpoint the follow-up was
+**automated only, awaiting live validation**. The built x86 loader SHA-256 is
+`2710B2B87F14B8FD0DCCA0F0B31ACDC2D0CC4A43D47DE880C40B50FFBD8FF3C8`;
+the build manifest records a dirty working tree, so that hash rather than a
+commit identifies this candidate. The exact candidate was staged at
+2026-08-19T12:27:03Z in `stage/condemned-m2-mono` after both compiled Retail
+identity verifiers passed.
+
+Run `run-20260819-122852` supplied the second live gate with the staged loader
+above:
+
+- the persisted 50% setting first reapplied `(20,95,20)` successfully;
+- menu steps down to 10% each reported exact native requested/actual
+  agreement, ending at `(4,95,4)` with result zero and preserved Y;
+- the tester then reported that enemy approach distance felt unchanged;
+- three accepted actor contacts on the same player HOBJECT later read the
+  player at `(40,95,40)` while the configured scale still reported 10%;
+- the corresponding target reads were `(40,95,40)`,
+  `(39.022,91.3,39.022)`, and `(39,91,39)`; and
+- no `m5_player_collider_native_handoff` or retry/reapply event explained the
+  transition back to full width.
+
+This is **live verification that the one-shot 10% handoff did not persist**.
+The tester's unchanged-distance report therefore does not yet reject a
+continuously retained 10% player width; by contact time the live player body
+was back at Retail dimensions. Enemy dimensions were observed read-only and
+remain unmodified.
+
+Read-only GNU objdump inspection of the same verified stock client SHA-256
+`0AC9798CA460C3E24EFC6D103D5FD258CCA6C921E0BD2A3FD9119D1C7C5228CC`
+found a concrete bypass candidate. The flag-`0x20` branch at
+`GameOrig+0x00037FE8` calls manager routine `+0x000344E0`, which writes the
+same manager `+0x10` HOBJECT through physics slot 9 at `+0x000346BC`,
+`+0x0003476C`, and retry `+0x00034787`. A branch can source dimensions from
+manager triple `+0x40C/+0x410/+0x414`. A separately populated triple starts
+at `+0x418`, but `+0x344E0` does not read it. These code facts are static
+verified. Whether that branch fired in the live run, and the runtime semantics
+of either triple, remain hypotheses.
+
+The current working tree adds `GetObjectDims` observations immediately before
+and after the verified client-shell update, emitting the initial boundary
+value and later changes. A processed pending request gets a forced readback.
+The probe reads only the exact local HOBJECT and labels manager `+0x1C`, the
+manager-`+0x40C` source candidate, and the separate adjacent candidate at
+`+0x418`. The post-Retail sample precedes pending processing.
+`post_mod_setdims_attempt` means a slot-9 call was attempted, and
+`native_result_valid` says whether it returned; `post_pending_noop` means
+the requested dimensions already matched and no setter was called. The audit
+itself performs no new engine mutation, cannot identify which writer caused a
+boundary change, and cannot reveal a write-and-restore wholly inside one
+Retail update. Its two queries per update while reduced plus one per processed
+pending request remain a live performance gate. Independent event caps keep
+repeated retries from consuming the boundary stream. It also fixes the stale
+armed range text. The full headset-free gate completed at
+2026-08-19T13:30:55Z with 24/24 x86 and 20/20 x64 CTest cases passing, plus
+the launcher-focus, screenshot-helper, and schema-v4 diagnostics-watcher
+checks. The x86 loader SHA-256 is
+`D780B2DB6BC9C8A79824B4E24E0DF8E5C21E75A0F7234638B987CD954BEF8A3C`;
+the manifest records base commit
+`9732e0a867ffc3b80bfe909be6411a68367c457e` with a dirty working tree.
+
+### Live boundary-classification run
+
+Run `run-20260819-133507` exercised that exact loader with
+`-WeaponTest Pipe -Wait` on VirtualDesktopXR 1.0.10 and Meta Quest 3. The
+preserved loader log SHA-256 is
+`69B71F6F38D097DF1595BACA4C099A983EA431D6F9D9C7344E685ED5AF4BC984`.
+
+- the 10% setting loaded successfully on player HOBJECT `0CC25FC0`;
+- the first pending setter returned zero, reported requested/actual
+  `(4,95,4)`, and the forced `post_mod_setdims_attempt` readback confirmed
+  `(4,95,4)` with `pending=0` and `drift=0`;
+- the next changed boundary was `phase=post_retail_update` at
+  `(40,95,40)`, `pending=0`, and `drift=1`, with locomotion mask zero and no
+  intervening collider handoff, reapply, rejection, or failure;
+- a controlled 15%-to-10% sequence again confirmed `(4,95,4)`. After the
+  menu closed, the first `directions=0x5` stick edge was immediately followed
+  by a post-Retail sample at `(40,95,40)`; the following direction was
+  straight forward (`0x1`);
+- across the controlled restoration, manager `+0x1C=(1,1,1)`, the
+  `+0x40C` candidate was `(24,31.5,24)`, and the `+0x418` candidate was
+  `(40,95,40)`. The actual/candidate equality does not attribute the writer;
+- two accepted, native-forwarded contacts observed the player at full
+  `(40,95,40)` while the setting remained 10%. Their read-only target
+  dimensions were `(39.022,91.3,39.022)` and `(39,91,39)`, with
+  contact-point distances 0.5989 m and 0.4548 m and `mutation=none`; and
+- all 18 emitted reapply attempts returned zero. The run ended with a saved
+  100% setting, requested/actual `(40,95,40)`, `pending=0`, and `drift=0`,
+  followed by a clean game exit and OpenXR host shutdown.
+
+This is **live verification of the attempted-slot-9/post-pending route, the
+boundary audit, and restoration becoming visible inside a Retail client
+update**. It does not identify the exact writer or prove which dimensions
+movement collision consumed inside that update. The no-op and
+native-result-unknown routes, cap exhaustion, menu warning presentation, and
+subjective proximity/performance remain unvalidated; the tester supplied no
+subjective result for this run.
+
+Forced per-frame post-update reapply remains intentionally absent. It could
+run after movement collision has already consumed full dimensions and would
+invoke `SETDIMS_PUSHOBJECTS` every frame.
+
+### Exact `SetObjectDims` observer (20 August 2026)
+
+Static inspection of verified `Condemned.exe` SHA-256
+`45A1404F213EDBDEAD16168B6E005B245B93105F7345AAF4FB83ECB6A7C5AE02`
+identified the `CLTPhysicsClient` vtable at executable RVA `+0x0014ADE0`,
+slot 8 `GetObjectDims` at `+0x00064530`, and slot 9 `SetObjectDims` at
+`+0x00007FD0`. The setter has the verified x86
+`uint32_t __thiscall(physics, object, Vector*, flags)` ABI, ends in
+`ret 0x0C`, and may copy adjusted values back into its dimensions buffer on
+native failure.
+
+The working tree now adds a MinHook observer at the exact slot-9 target.
+Installation requires the full executable identity, exact vtable/slot
+pointers, anchored getter/setter bodies and return tails, both embedded setter
+diagnostic-string pointers, and verified GameOrig writer/caller/callsite byte
+windows. Relocated absolute operands are decoded and compared with their
+module-base-plus-RVA targets; no scan or approximate fallback exists. A
+mismatch rejects only this diagnostic and leaves locomotion and the existing
+`+0x31BA0` collider hook available.
+Both collider detours remain native-pass-through until their respective enable
+operations succeed. An uncertain owned-hook rollback poisons future retries
+but retains the trampoline for native-only forwarding.
+
+The detour executes for every native `SetObjectDims` call but forwards the
+same physics/object pointers, in/out request pointer, and raw slot-9 flags
+exactly once and returns the raw native result. Calls outside Playing, outside
+reduced-or-pending audit state, or outside the fresh exact local-player
+HOBJECT are forwarded without observation. Bounded exact-local telemetry
+records thread/sequence and raw caller address; module/return RVA is valid only
+when the caller resolves to a loaded image. It also records a verified call RVA
+when known, request input/output, raw slot-9 flags, native result, actual
+dimensions before/after, context stability, and read-only manager candidates.
+
+Verified GameOrig mappings are calls/returns
+`+0x31BF9/+0x31BFC`, `+0x31C13/+0x31C16`,
+`+0x31D65/+0x31D68`, `+0x31D83/+0x31D86`,
+`+0x346BC/+0x346BF`, `+0x3476C/+0x3476F`, and
+`+0x34787/+0x3478A`. The three `+0x344E0` internal returns identify that
+verified routine, not a runtime copy of the outer flag byte. Known GameOrig,
+unknown GameOrig, unknown executable, other-module local, and unresolved local
+calls use independent caps of 64, 64, 64, 32, and 32. Cap exhaustion remains
+inconclusive, and an other-module or unresolved record must be resolved before
+attribution to an authority writer.
+
+This candidate is **automated-only**. The portable exact-return classifier and
+exact-once forwarding tests pass, and the normal headset-free gate passed
+before the next diagnostic was added. The x86 hook's live filters, event
+stream, runtime cost, and native in/out behavior remain unverified. No staged
+observer run exists, and `+0x344E0` remains only a restoration candidate.
+
+### Read-only Collision X-ray (20 August 2026)
+
+The smallest follow-up is a session-only `PLAYER COL` toggle. It adds a
+separately executable-identity/vtable/body-gated observer at verified
+`ILTClientPhysics` slot 11, `Condemned.exe+0x00007CD0`. The detour observes
+only the exact resolved local-player physics/object pair while Playing and in
+the foreground, forwards the original physics/object/velocity pointers once,
+and returns the raw result. Telemetry explicitly calls this a velocity handoff,
+not a collision result.
+
+At the existing client-update boundary, read-only samples capture actual
+player dimensions and object origin before and after Retail, fresh HMD origin,
+locomotion mask, and a fresh local-player-owned actor-contact target's
+dimensions, origin, and contact point. The target expires after two seconds;
+invalid or non-finite data fails closed. The display draws the player in
+magenta, target in orange, HMD in cyan, and contact in yellow. Every box is a
+**diagnostic proxy** built from object origin plus/minus `GetObjectDims`; true
+physics geometry and orientation remain unverified. HMD-to-player horizontal
+distance measures origin offset only and is never interpreted as radius.
+
+The diagnostic adds no `SetObjectDims`, post-update correction, enemy write,
+offset, or persisted setting. It is **automated-only**: the full headset-free
+gate passes 25/25 x86 and 21/21 x64 tests plus all three PowerShell validation
+suites. Live validation remains pending. Success requires a
+single trace to separate update-boundary restoration, the object/dimensions
+receiving movement, target separation/proximity behavior, and HMD/player
+origin offset. Reject on identity mismatch, non-exact forwarding, proxy
+mislabeling, unbounded/stale data, or performance regression; rollback is the
+session toggle OFF.
+
+## Phase-1 magazine insertion authoring slice (20 August 2026)
+
+The working tree now has one deliberately narrow interaction-authoring
+vertical slice. The existing `-WeaponGripCalibration` / VR Tools boundary
+adds an `AUTHOR` page for only a model-local magazine insertion socket. A
+fresh left-grip pose can explicitly capture the seated pose; selectable
+components then edit position, rotation, box half-extents, approach-rail
+length, snap distance, and snap angle with 0.1/1 cm and 0.25/5 degree steps.
+A 32-entry snapshot stack supplies undo, and reset restores the immutable
+record loaded for that source generation.
+
+The overlay reuses both generic controller wireframes. The socket is an
+oriented wire box with RGB axes and a finite local rail. The off-hand cursor is
+transformed through the existing validated displayed-model pose; projection
+onto the rail changes only a mod-owned ghost. No Retail magazine object, child,
+bone, socket, layout, offset, RVA, vtable slot, or native action function is
+read or inferred.
+
+Persistence adds an independent `magazine_socket` key under the existing
+`[weapon_<index>]` section. Load/save requires both the stable index and
+case-sensitive resolved catalog name. It has no Pipe, profile, or cross-weapon
+fallback; the existing player-over-package precedence can supply only an exact
+same-identity record. A missing record is unconfigured; the neutral primitive
+dimensions become visible only after explicit capture. Malformed player data
+or an identity mismatch fails closed.
+
+The existing per-run alignment file preserves Collider version 1 and now
+accepts a separately parsed version-2 socket command with revision,
+base-revision, PID, exact index/name, configured bit, and all numeric fields.
+The runtime persists before publishing, rolls back failed saves, and emits an
+applied/rejected acknowledgement. The helper
+`tools/set-condemned-magazine-socket.ps1` resolves the active exact state and
+waits on that acknowledgement. Every Phase-1 event explicitly reports
+`engine_handoff=none ammo_mutation=0 weapon_state_mutation=0
+retail_state_mutation=0`.
+
+Headset-free evidence is complete for this source state. The normal
+`tools\build-all.ps1` gate at 2026-08-20T03:21:53Z passed 25/25 x86 and
+21/21 x64 CTest cases plus launcher-focus, screenshot-helper, and
+weapon-diagnostics schema-v4 PowerShell suites. The focused settings test
+covers exact-name round trip, mismatch, missing-record non-mutation, and
+malformed fail-closed behavior. The common authoring test covers bounds,
+fine/coarse edits, undo/reset, model-local transform, rail snapping, line
+budget, and strict version-2 parsing. The new sender also passes a PowerShell
+syntax parse. The dirty-tree x86 loader SHA-256 is
+`1E317E2FCE5C3AADC10775BBA13821982C44985BED0463159C6D096ADD6A49D4`
+at base commit `9732e0a867ffc3b80bfe909be6411a68367c457e`.
+
+This is **implemented and automated-tested, awaiting live validation**. No
+headset/game run has proven both-eye presentation, capture timing, input
+isolation, persistence across a fresh live process, acknowledged external
+edits, performance, or absence of a perceived gameplay regression. Phase 2
+gesture logging remains unimplemented. Phase 3 remains blocked until a
+separately verified Retail reload/action handoff exists.

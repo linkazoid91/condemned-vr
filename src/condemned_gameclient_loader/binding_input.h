@@ -5,6 +5,7 @@
 #endif
 #include <Windows.h>
 
+#include "condemned_player_collision.h"
 #include "condemned_tool_menu.h"
 #include "renderer_probe.h"
 
@@ -17,6 +18,65 @@ bool InstallBindingLocomotionHook(
     HMODULE gameClientModule,
     HMODULE bridgeModule,
     RendererProbeLogFunction log) noexcept;
+
+// Retail's verified CMoveMgr handoff and every other native dimension update
+// remain authoritative. This option scales only the local player's requested
+// horizontal X/Z dimensions; the live Retail Y dimension, posture changes,
+// collision interface, and failure result remain engine-owned. A readback
+// audit reports initial/changed update-boundary values and separately labels
+// the forced readback after a processed pending setter attempt or no-op.
+// A scale of 1.0 is exact pass-through.
+struct PlayerColliderTelemetry {
+    PlayerColliderDimensions retailDimensions{};
+    PlayerColliderDimensions requestedDimensions{};
+    PlayerColliderDimensions actualDimensions{};
+    float widthScale{kPlayerColliderWidthScaleDefault};
+    std::uintptr_t playerObject{0U};
+    std::uint32_t nativeHandoffCount{0U};
+    bool hookReady{false};
+    bool retailDimensionsValid{false};
+    bool actualDimensionsValid{false};
+    bool lastRequestSatisfied{false};
+    bool reapplyPending{false};
+    bool runtimeDriftObserved{false};
+};
+
+bool ConfigurePlayerColliderSettings(
+    const PlayerColliderSettings& settings) noexcept;
+
+PlayerColliderSettings ReadPlayerColliderSettings() noexcept;
+
+void ReadPlayerColliderTelemetry(
+    PlayerColliderTelemetry& telemetry) noexcept;
+
+struct PlayerCollisionXraySnapshot {
+    PlayerCollisionDiagnosticPoint playerOrigin{};
+    PlayerCollisionDiagnosticPoint targetOrigin{};
+    PlayerCollisionDiagnosticPoint headOrigin{};
+    PlayerCollisionDiagnosticPoint contactPoint{};
+    PlayerColliderDimensions playerDimensions{};
+    PlayerColliderDimensions targetDimensions{};
+    std::uintptr_t playerObject{0U};
+    std::uintptr_t targetObject{0U};
+    std::uint64_t updateSequence{0U};
+    std::uint64_t tickMilliseconds{0U};
+    std::uint64_t targetAgeMilliseconds{0U};
+    std::uint32_t locomotionDirectionMask{0U};
+    float headToPlayerHorizontalUnits{-1.0F};
+    float playerToTargetHorizontalUnits{-1.0F};
+    float diagnosticProxyHorizontalGapUnits{-1.0F};
+    bool enabled{false};
+    bool movementTraceReady{false};
+    bool playerValid{false};
+    bool targetValid{false};
+    bool headValid{false};
+    bool contactValid{false};
+};
+
+void SetPlayerCollisionXrayEnabled(bool enabled) noexcept;
+bool PlayerCollisionXrayEnabled() noexcept;
+bool ReadPlayerCollisionXraySnapshot(
+    PlayerCollisionXraySnapshot& snapshot) noexcept;
 
 // Overlays only the verified Retail YawAccel extremal command query. A
 // stronger Retail command-23 value wins; mouse command 12 remains untouched

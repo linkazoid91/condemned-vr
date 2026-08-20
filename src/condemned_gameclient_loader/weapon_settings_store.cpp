@@ -23,11 +23,13 @@ constexpr unsigned int kBlockTimingSettingsFormatVersion = 1U;
 constexpr unsigned int kColliderSettingsFormatVersion = 1U;
 constexpr unsigned int kEmptyRightHandAlignmentFormatVersion = 1U;
 constexpr unsigned int kGripSettingsFormatVersion = 1U;
+constexpr unsigned int kMagazineSocketSettingsFormatVersion = 1U;
 constexpr unsigned int kRightHandIkSettingsFormatVersion = 1U;
 constexpr unsigned int kArmIkTuningFormatVersion = 2U;
 constexpr unsigned int kDebugDrawSettingsFormatVersion = 2U;
 constexpr unsigned int kLegacyDebugDrawSettingsFormatVersion = 1U;
 constexpr unsigned int kToolMenuShortcutSettingsFormatVersion = 1U;
+constexpr unsigned int kPlayerColliderSettingsFormatVersion = 1U;
 constexpr wchar_t kSettingsPathOverride[] =
     L"CONDEMNEDVR_SETTINGS_PATH";
 constexpr wchar_t kDefaultSettingsPathOverride[] =
@@ -171,6 +173,46 @@ bool FormatWeaponSection(
         swprintf_s(
             section, L"weapon_%ld",
             static_cast<long>(weaponIndex)) > 0;
+}
+
+bool CopyMagazineSocketWeaponNameToWide(
+    const char* source,
+    wchar_t (&destination)[
+        kMagazineSocketWeaponNameCapacity]) noexcept {
+    destination[0] = L'\0';
+    if (!MagazineSocketWeaponNameIsValid(source)) {
+        return false;
+    }
+    std::size_t index = 0U;
+    for (; index + 1U < std::size(destination) &&
+           source[index] != '\0'; ++index) {
+        destination[index] =
+            static_cast<unsigned char>(source[index]);
+    }
+    destination[index] = L'\0';
+    return source[index] == '\0';
+}
+
+bool MagazineSocketWeaponNameMatches(
+    const wchar_t* stored,
+    const char* expected) noexcept {
+    if (stored == nullptr ||
+        !MagazineSocketWeaponNameIsValid(expected)) {
+        return false;
+    }
+    std::size_t index = 0U;
+    for (; index < kMagazineSocketWeaponNameCapacity; ++index) {
+        const wchar_t left = stored[index];
+        const unsigned char right =
+            static_cast<unsigned char>(expected[index]);
+        if (left != static_cast<wchar_t>(right)) {
+            return false;
+        }
+        if (left == L'\0') {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool WeaponGripSettingsAreValid(
@@ -885,6 +927,123 @@ WeaponSettingsStoreResult SaveWeaponGripSettings(
         : WeaponSettingsStoreResult::WriteFailed;
 }
 
+WeaponSettingsStoreResult LoadMagazineInsertionSocketSettings(
+    std::int32_t weaponIndex,
+    const char* expectedWeaponName,
+    MagazineInsertionSocketSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !MagazineSocketWeaponNameIsValid(expectedWeaponName)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t section[32]{};
+    if (!FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[512]{};
+    const WeaponSettingsStoreResult readResult =
+        ReadSettingsValue(
+            section, L"magazine_socket", value,
+            std::size(value));
+    if (readResult != WeaponSettingsStoreResult::Ok) {
+        return readResult;
+    }
+
+    unsigned int version = 0U;
+    unsigned int configured = 0U;
+    wchar_t storedWeaponName[
+        kMagazineSocketWeaponNameCapacity]{};
+    wchar_t trailing[2]{};
+    MagazineInsertionSocketSettings loaded{};
+    const int fields = swscanf_s(
+        value,
+        L"%u,%63[^,],%u,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f %1s",
+        &version,
+        storedWeaponName,
+        static_cast<unsigned int>(
+            std::size(storedWeaponName)),
+        &configured,
+        &loaded.positionUnits.x,
+        &loaded.positionUnits.y,
+        &loaded.positionUnits.z,
+        &loaded.rotationDegrees.x,
+        &loaded.rotationDegrees.y,
+        &loaded.rotationDegrees.z,
+        &loaded.halfExtentsUnits.x,
+        &loaded.halfExtentsUnits.y,
+        &loaded.halfExtentsUnits.z,
+        &loaded.approachLengthUnits,
+        &loaded.snapDistanceUnits,
+        &loaded.snapAngleDegrees,
+        trailing,
+        static_cast<unsigned int>(std::size(trailing)));
+    if (fields != 15 ||
+        version != kMagazineSocketSettingsFormatVersion ||
+        configured > 1U) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    if (!MagazineSocketWeaponNameMatches(
+            storedWeaponName, expectedWeaponName)) {
+        return WeaponSettingsStoreResult::ProfileMismatch;
+    }
+    loaded.configured = configured != 0U;
+    if (!MagazineInsertionSocketSettingsAreValid(loaded)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    settings = loaded;
+    return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult SaveMagazineInsertionSocketSettings(
+    std::int32_t weaponIndex,
+    const char* weaponName,
+    const MagazineInsertionSocketSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !MagazineSocketWeaponNameIsValid(weaponName) ||
+        !MagazineInsertionSocketSettingsAreValid(settings)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    wchar_t storedWeaponName[
+        kMagazineSocketWeaponNameCapacity]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    if (!CopyMagazineSocketWeaponNameToWide(
+            weaponName, storedWeaponName)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t value[512]{};
+    const int length = swprintf_s(
+        value,
+        L"%u,%s,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+        L"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+        kMagazineSocketSettingsFormatVersion,
+        storedWeaponName,
+        settings.configured ? 1U : 0U,
+        static_cast<double>(settings.positionUnits.x),
+        static_cast<double>(settings.positionUnits.y),
+        static_cast<double>(settings.positionUnits.z),
+        static_cast<double>(settings.rotationDegrees.x),
+        static_cast<double>(settings.rotationDegrees.y),
+        static_cast<double>(settings.rotationDegrees.z),
+        static_cast<double>(settings.halfExtentsUnits.x),
+        static_cast<double>(settings.halfExtentsUnits.y),
+        static_cast<double>(settings.halfExtentsUnits.z),
+        static_cast<double>(settings.approachLengthUnits),
+        static_cast<double>(settings.snapDistanceUnits),
+        static_cast<double>(settings.snapAngleDegrees));
+    if (length <= 0 ||
+        static_cast<std::size_t>(length) >= std::size(value)) {
+        return WeaponSettingsStoreResult::WriteFailed;
+    }
+    return WritePrivateProfileStringW(
+               section, L"magazine_socket", value, path)
+        ? WeaponSettingsStoreResult::Ok
+        : WeaponSettingsStoreResult::WriteFailed;
+}
+
 WeaponSettingsStoreResult LoadWeaponRightHandIkSettings(
     std::int32_t weaponIndex,
     PhysicalMeleeProfileId expectedProfileId,
@@ -1158,6 +1317,55 @@ WeaponSettingsStoreResult SaveToolMenuShortcutEnabled(
     }
     return WritePrivateProfileStringW(
                L"developer", L"tool_menu_shortcut", value, path)
+        ? WeaponSettingsStoreResult::Ok
+        : WeaponSettingsStoreResult::WriteFailed;
+}
+
+WeaponSettingsStoreResult LoadPlayerColliderSettings(
+    PlayerColliderSettings& settings) noexcept {
+    wchar_t value[64]{};
+    const WeaponSettingsStoreResult readResult =
+        ReadSettingsValue(
+            L"player_collision", L"width_scale",
+            value, std::size(value));
+    if (readResult != WeaponSettingsStoreResult::Ok) {
+        return readResult;
+    }
+
+    unsigned int version = 0U;
+    PlayerColliderSettings loaded = settings;
+    const int fields = swscanf_s(
+        value, L"%u,%f", &version, &loaded.widthScale);
+    if (fields != 2 ||
+        version != kPlayerColliderSettingsFormatVersion ||
+        !PlayerColliderSettingsAreValid(loaded)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    settings = loaded;
+    return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult SavePlayerColliderSettings(
+    const PlayerColliderSettings& settings) noexcept {
+    if (!PlayerColliderSettingsAreValid(settings)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    if (!ResolveWeaponSettingsPath(path)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[64]{};
+    const int length = swprintf_s(
+        value, L"%u,%.9g",
+        kPlayerColliderSettingsFormatVersion,
+        static_cast<double>(settings.widthScale));
+    if (length <= 0 ||
+        static_cast<std::size_t>(length) >= std::size(value)) {
+        return WeaponSettingsStoreResult::WriteFailed;
+    }
+    return WritePrivateProfileStringW(
+               L"player_collision", L"width_scale",
+               value, path)
         ? WeaponSettingsStoreResult::Ok
         : WeaponSettingsStoreResult::WriteFailed;
 }

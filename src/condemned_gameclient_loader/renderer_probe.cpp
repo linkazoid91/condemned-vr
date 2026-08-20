@@ -20,6 +20,7 @@
 #include "arm_ik_integration.h"
 #include "binding_input.h"
 #include "condemned_calibration_gizmo.h"
+#include "condemned_interaction_authoring.h"
 #include "condemned_physical_melee_collider_gizmo.h"
 #include "condemned_controller_input.h"
 #include "condemned_physical_melee.h"
@@ -310,6 +311,30 @@ FILETIME g_liveColliderCommandLastWriteTime{};
 ULONGLONG g_liveColliderCommandLastPollTick = 0U;
 std::uint64_t g_liveColliderCommandLastRevision = 0U;
 std::int32_t g_liveColliderCommandArmedWeaponIndex = -1;
+
+struct MagazineSocketAuthoringRuntimeState {
+    MagazineSocketEditorState editor{};
+    PhysicalMeleeRigidTransform modelWorld{};
+    PhysicalMeleeRigidTransform cursorModelLocal{};
+    MagazineSocketSnapPreview preview{};
+    WeaponSettingsStoreResult lastLoadResult{
+        WeaponSettingsStoreResult::NotFound};
+    WeaponSettingsStoreResult lastSaveResult{
+        WeaponSettingsStoreResult::NotFound};
+    std::int32_t weaponIndex{-1};
+    std::uint64_t sourceGeneration{0U};
+    std::uint64_t revision{0U};
+    ULONGLONG visualTick{0U};
+    char weaponName[kMagazineSocketWeaponNameCapacity]{};
+    bool identityReady{false};
+    bool visualReady{false};
+};
+SRWLOCK g_magazineSocketAuthoringLock = SRWLOCK_INIT;
+MagazineSocketAuthoringRuntimeState
+    g_magazineSocketAuthoringState{};
+std::uint64_t g_liveMagazineSocketCommandLastRevision = 0U;
+volatile LONG g_magazineSocketAuthoringGizmoLogged = 0;
+volatile LONG g_magazineSocketAuthoringGizmoFailureLogged = 0;
 
 std::size_t g_rightHandIkCalibrationStepIndex = 2U;
 ToolMenuState g_toolMenuState{};
@@ -1874,6 +1899,401 @@ bool StoreToolMenuBlockColliderSettings(
     return stored;
 }
 
+void LogMagazineSocketAuthoring(
+    const char* event,
+    const char* action,
+    const MagazineSocketAuthoringRuntimeState& state) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    const MagazineInsertionSocketSettings& settings =
+        state.editor.current;
+    char detail[768]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "action=%s phase=1 engine_handoff=none "
+        "ammo_mutation=0 weapon_state_mutation=0 "
+        "retail_state_mutation=0 "
+        "revision=%llu process_id=%lu "
+        "weapon_index=%ld weapon_name=%s "
+        "source_generation=%llu configured=%u "
+        "position_cm=(%.3f,%.3f,%.3f) "
+        "rotation_deg=(%.3f,%.3f,%.3f) "
+        "half_extents_cm=(%.3f,%.3f,%.3f) "
+        "rail_cm=%.3f snap_cm=%.3f snap_deg=%.3f "
+        "load=%s save=%s",
+        action != nullptr ? action : "unknown",
+        static_cast<unsigned long long>(state.revision),
+        static_cast<unsigned long>(
+            GetCurrentProcessId()),
+        static_cast<long>(state.weaponIndex),
+        state.weaponName[0] != '\0'
+            ? state.weaponName : "unknown",
+        static_cast<unsigned long long>(
+            state.sourceGeneration),
+        settings.configured ? 1U : 0U,
+        settings.positionUnits.x,
+        settings.positionUnits.y,
+        settings.positionUnits.z,
+        settings.rotationDegrees.x,
+        settings.rotationDegrees.y,
+        settings.rotationDegrees.z,
+        settings.halfExtentsUnits.x,
+        settings.halfExtentsUnits.y,
+        settings.halfExtentsUnits.z,
+        settings.approachLengthUnits,
+        settings.snapDistanceUnits,
+        settings.snapAngleDegrees,
+        WeaponSettingsStoreResultName(state.lastLoadResult),
+        WeaponSettingsStoreResultName(state.lastSaveResult));
+    g_passThroughLog(event, detail);
+}
+
+bool ResolveMagazineSocketAuthoringIdentity(
+    ToolMenuMeleeTelemetry& telemetry,
+    std::int32_t& weaponIndex,
+    std::uint64_t& sourceGeneration) noexcept {
+    telemetry = {};
+    weaponIndex = -1;
+    sourceGeneration = 0U;
+    ReadPhysicalMeleeToolTelemetry(telemetry);
+    if (telemetry.weaponIndex < 0 ||
+        telemetry.weaponIndex == kCondemnedUnarmedWeaponIndex ||
+        !telemetry.weaponNameResolved ||
+        !MagazineSocketWeaponNameIsValid(
+            telemetry.weaponName)) {
+        return false;
+    }
+    PhysicalMeleeGripCalibration calibration{};
+    void* weapon = nullptr;
+    void* modelObject = nullptr;
+    if (!CopyActiveWeaponGripCalibration(
+            calibration, weapon, weaponIndex, modelObject,
+            sourceGeneration) ||
+        weaponIndex != telemetry.weaponIndex ||
+        sourceGeneration == 0U) {
+        weaponIndex = -1;
+        sourceGeneration = 0U;
+        return false;
+    }
+    return true;
+}
+
+bool EnsureMagazineSocketAuthoringIdentity() noexcept {
+    ToolMenuMeleeTelemetry telemetry{};
+    std::int32_t weaponIndex = -1;
+    std::uint64_t sourceGeneration = 0U;
+    if (!ResolveMagazineSocketAuthoringIdentity(
+            telemetry, weaponIndex, sourceGeneration)) {
+        AcquireSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        g_magazineSocketAuthoringState.visualReady = false;
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return false;
+    }
+
+    AcquireSRWLockShared(&g_magazineSocketAuthoringLock);
+    const bool alreadyBound =
+        g_magazineSocketAuthoringState.weaponIndex ==
+            weaponIndex &&
+        g_magazineSocketAuthoringState.sourceGeneration ==
+            sourceGeneration &&
+        std::strcmp(
+            g_magazineSocketAuthoringState.weaponName,
+            telemetry.weaponName) == 0;
+    const bool alreadyReady =
+        g_magazineSocketAuthoringState.identityReady;
+    ReleaseSRWLockShared(&g_magazineSocketAuthoringLock);
+    if (alreadyBound) {
+        return alreadyReady;
+    }
+
+    MagazineInsertionSocketSettings loaded{};
+    const WeaponSettingsStoreResult loadResult =
+        LoadMagazineInsertionSocketSettings(
+            weaponIndex, telemetry.weaponName, loaded);
+    const bool loadAccepted =
+        loadResult == WeaponSettingsStoreResult::Ok ||
+        loadResult == WeaponSettingsStoreResult::NotFound;
+    if (loadResult == WeaponSettingsStoreResult::NotFound) {
+        loaded = {};
+    }
+
+    AcquireSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    g_magazineSocketAuthoringState = {};
+    g_magazineSocketAuthoringState.weaponIndex = weaponIndex;
+    g_magazineSocketAuthoringState.sourceGeneration =
+        sourceGeneration;
+    strcpy_s(
+        g_magazineSocketAuthoringState.weaponName,
+        telemetry.weaponName);
+    g_magazineSocketAuthoringState.lastLoadResult = loadResult;
+    g_magazineSocketAuthoringState.identityReady = loadAccepted;
+    SetMagazineSocketEditorValue(
+        g_magazineSocketAuthoringState.editor,
+        loaded, true);
+    const MagazineSocketAuthoringRuntimeState logState =
+        g_magazineSocketAuthoringState;
+    ReleaseSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    LogMagazineSocketAuthoring(
+        loadAccepted
+            ? "m5_magazine_socket_settings_loaded"
+            : "m5_magazine_socket_settings_load_rejected",
+        loadResult == WeaponSettingsStoreResult::Ok
+            ? "weapon_record"
+            : loadResult == WeaponSettingsStoreResult::NotFound
+                ? "unconfigured"
+                : "fail_closed",
+        logState);
+    if (loadAccepted) {
+        LogMagazineSocketAuthoring(
+            "m5_live_magazine_socket_armed",
+            "ready", logState);
+    }
+    return loadAccepted;
+}
+
+MagazineSocketAuthoringRuntimeState
+CopyMagazineSocketAuthoringState() noexcept {
+    AcquireSRWLockShared(&g_magazineSocketAuthoringLock);
+    const MagazineSocketAuthoringRuntimeState copy =
+        g_magazineSocketAuthoringState;
+    ReleaseSRWLockShared(&g_magazineSocketAuthoringLock);
+    return copy;
+}
+
+void UpdateMagazineSocketAuthoringVisual(
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const PhysicalMeleeRigidTransform& modelWorld,
+    const PhysicalMeleeRigidTransform& cursorWorld,
+    bool posesFresh) noexcept {
+    if (!EnsureMagazineSocketAuthoringIdentity()) {
+        return;
+    }
+    PhysicalMeleeRigidTransform cursorModelLocal{};
+    const bool visualReady = posesFresh &&
+        ResolveMagazineSocketCursorModelLocal(
+            modelWorld, cursorWorld, cursorModelLocal);
+    AcquireSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    if (g_magazineSocketAuthoringState.weaponIndex !=
+            weaponIndex ||
+        g_magazineSocketAuthoringState.sourceGeneration !=
+            sourceGeneration) {
+        g_magazineSocketAuthoringState.visualReady = false;
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return;
+    }
+    g_magazineSocketAuthoringState.visualReady = visualReady;
+    if (visualReady) {
+        g_magazineSocketAuthoringState.modelWorld = modelWorld;
+        g_magazineSocketAuthoringState.cursorModelLocal =
+            cursorModelLocal;
+        g_magazineSocketAuthoringState.preview =
+            ResolveMagazineSocketSnapPreview(
+                g_magazineSocketAuthoringState.editor.current,
+                cursorModelLocal);
+        g_magazineSocketAuthoringState.visualTick =
+            GetTickCount64();
+    }
+    ReleaseSRWLockExclusive(&g_magazineSocketAuthoringLock);
+}
+
+bool SaveMagazineSocketAuthoringEdit(
+    MagazineSocketAuthoringRuntimeState& state,
+    const MagazineSocketEditorState& previous) noexcept {
+    state.lastSaveResult =
+        SaveMagazineInsertionSocketSettings(
+            state.weaponIndex, state.weaponName,
+            state.editor.current);
+    if (state.lastSaveResult !=
+        WeaponSettingsStoreResult::Ok) {
+        state.editor = previous;
+        return false;
+    }
+    ++state.revision;
+    state.preview = ResolveMagazineSocketSnapPreview(
+        state.editor.current, state.cursorModelLocal);
+    return true;
+}
+
+bool ApplyToolMenuMagazineSocketAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    if (InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        !EnsureMagazineSocketAuthoringIdentity()) {
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    MagazineSocketAuthoringRuntimeState& state =
+        g_magazineSocketAuthoringState;
+    if (!state.identityReady) {
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return false;
+    }
+    if (row == 1U && (delta != 0 || activate)) {
+        CycleMagazineSocketComponent(
+            state.editor, delta != 0 ? delta : 1);
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return true;
+    }
+    if (row == 3U && (delta != 0 || activate)) {
+        state.editor.coarse = !state.editor.coarse;
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return true;
+    }
+
+    const MagazineSocketEditorState previous = state.editor;
+    bool changed = false;
+    const char* action = "unknown";
+    if (row == 2U && delta != 0 &&
+        state.editor.current.configured) {
+        changed = AdjustMagazineSocketComponent(
+            state.editor, delta);
+        action = "menu_adjust";
+    } else if (row == 4U && activate) {
+        fearvr::TrackingVector rotationDegrees{};
+        const bool fresh = state.visualReady &&
+            GetTickCount64() - state.visualTick <=
+                kHeadAimFreshnessMilliseconds;
+        if (fresh &&
+            PhysicalMeleeLocalRotationDegreesFromQuaternion(
+                state.cursorModelLocal.rotation,
+                rotationDegrees)) {
+            PushMagazineSocketUndo(state.editor);
+            state.editor.current.positionUnits =
+                state.cursorModelLocal.positionUnits;
+            state.editor.current.rotationDegrees =
+                rotationDegrees;
+            state.editor.current.configured = true;
+            changed = true;
+            action = "capture_off_hand_grip";
+        }
+    } else if (row == 5U && activate) {
+        changed = UndoMagazineSocketEdit(state.editor);
+        action = "undo";
+    } else if (row == 6U && activate) {
+        changed = ResetMagazineSocketEdit(state.editor);
+        action = "reset_loaded_baseline";
+    }
+    if (!changed) {
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        return false;
+    }
+    const bool saved = SaveMagazineSocketAuthoringEdit(
+        state, previous);
+    const MagazineSocketAuthoringRuntimeState logState = state;
+    ReleaseSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    LogMagazineSocketAuthoring(
+        saved
+            ? "m5_magazine_socket_authoring_applied"
+            : "m5_magazine_socket_authoring_save_failed",
+        action, logState);
+    return saved;
+}
+
+void LogLiveMagazineSocketRejected(
+    const LiveMagazineSocketCommand* command,
+    const char* reason) noexcept {
+    if (g_passThroughLog == nullptr) {
+        return;
+    }
+    const MagazineSocketAuthoringRuntimeState state =
+        CopyMagazineSocketAuthoringState();
+    char detail[640]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "revision=%llu base_revision=%llu reason=%s "
+        "process_id=%lu target_process_id=%lu "
+        "target_weapon_index=%ld active_weapon_index=%ld "
+        "target_weapon_name=%s active_weapon_name=%s "
+        "active_source_generation=%llu active_revision=%llu "
+        "phase=1 engine_handoff=none ammo_mutation=0 "
+        "weapon_state_mutation=0 retail_state_mutation=0",
+        static_cast<unsigned long long>(
+            command != nullptr ? command->revision : 0U),
+        static_cast<unsigned long long>(
+            command != nullptr ? command->baseRevision : 0U),
+        reason != nullptr ? reason : "unknown",
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(
+            command != nullptr ? command->processId : 0U),
+        static_cast<long>(
+            command != nullptr ? command->weaponIndex : -1),
+        static_cast<long>(state.weaponIndex),
+        command != nullptr ? command->weaponName : "unknown",
+        state.weaponName[0] != '\0'
+            ? state.weaponName : "unknown",
+        static_cast<unsigned long long>(
+            state.sourceGeneration),
+        static_cast<unsigned long long>(
+            state.revision));
+    g_passThroughLog(
+        "m5_live_magazine_socket_rejected", detail);
+}
+
+bool ApplyLiveMagazineSocketCommand(
+    const LiveMagazineSocketCommand& command) noexcept {
+    if (!EnsureMagazineSocketAuthoringIdentity()) {
+        LogLiveMagazineSocketRejected(
+            &command, "active_identity_unavailable");
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    MagazineSocketAuthoringRuntimeState& state =
+        g_magazineSocketAuthoringState;
+    const bool targetMatches =
+        command.processId == GetCurrentProcessId() &&
+        command.weaponIndex == state.weaponIndex &&
+        std::strcmp(command.weaponName, state.weaponName) == 0;
+    if (!targetMatches ||
+        command.baseRevision != state.revision ||
+        command.revision <= state.revision) {
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        LogLiveMagazineSocketRejected(
+            &command,
+            !targetMatches ? "target_mismatch"
+                : command.baseRevision != state.revision
+                    ? "base_revision_mismatch"
+                    : "revision_not_newer");
+        return false;
+    }
+    const MagazineSocketEditorState previous = state.editor;
+    PushMagazineSocketUndo(state.editor);
+    state.editor.current = command.settings;
+    state.lastSaveResult =
+        SaveMagazineInsertionSocketSettings(
+            state.weaponIndex, state.weaponName,
+            state.editor.current);
+    if (state.lastSaveResult !=
+        WeaponSettingsStoreResult::Ok) {
+        state.editor = previous;
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        LogLiveMagazineSocketRejected(
+            &command, "save_failed");
+        return false;
+    }
+    state.revision = command.revision;
+    state.preview = ResolveMagazineSocketSnapPreview(
+        state.editor.current, state.cursorModelLocal);
+    const MagazineSocketAuthoringRuntimeState logState = state;
+    ReleaseSRWLockExclusive(&g_magazineSocketAuthoringLock);
+    LogMagazineSocketAuthoring(
+        "m5_live_magazine_socket_applied",
+        "acknowledged_command", logState);
+    return true;
+}
+
 bool SameFileTime(const FILETIME& left, const FILETIME& right) noexcept {
     return left.dwLowDateTime == right.dwLowDateTime &&
         left.dwHighDateTime == right.dwHighDateTime;
@@ -2030,6 +2450,37 @@ void ProcessLiveColliderAlignmentCommand(
         LogLiveColliderAlignmentRejected(
             0U, "read_failed", 0U, -1, weaponIndex);
         ReleaseSRWLockExclusive(&g_liveColliderCommandLock);
+        return;
+    }
+    if (std::strncmp(text, "version=2 ", 10U) == 0) {
+        LiveMagazineSocketCommand magazineCommand{};
+        const LiveMagazineSocketCommandParseResult parseResult =
+            ParseLiveMagazineSocketCommand(
+                text, magazineCommand);
+        if (parseResult !=
+            LiveMagazineSocketCommandParseResult::Ok) {
+            const LiveMagazineSocketCommand* const rejectedCommand =
+                parseResult == LiveMagazineSocketCommandParseResult::InvalidValue
+                    ? &magazineCommand : nullptr;
+            LogLiveMagazineSocketRejected(
+                rejectedCommand,
+                LiveMagazineSocketCommandParseResultName(
+                    parseResult));
+            ReleaseSRWLockExclusive(
+                &g_liveColliderCommandLock);
+            return;
+        }
+        if (magazineCommand.revision <=
+            g_liveMagazineSocketCommandLastRevision) {
+            ReleaseSRWLockExclusive(
+                &g_liveColliderCommandLock);
+            return;
+        }
+        g_liveMagazineSocketCommandLastRevision =
+            magazineCommand.revision;
+        ApplyLiveMagazineSocketCommand(magazineCommand);
+        ReleaseSRWLockExclusive(
+            &g_liveColliderCommandLock);
         return;
     }
     LiveColliderAlignmentCommand command{};
@@ -3269,6 +3720,7 @@ void UpdateToolMenuCalibrationVisibility() noexcept {
     const bool calibrationVisible =
         InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 &&
         (g_toolMenuState.tab == ToolMenuTab::Grip ||
+         g_toolMenuState.tab == ToolMenuTab::Author ||
          g_toolMenuState.tab == ToolMenuTab::TwoHand ||
          g_toolMenuState.tab == ToolMenuTab::HandIk ||
          g_toolMenuState.tab == ToolMenuTab::LeftHandIk) &&
@@ -3284,6 +3736,15 @@ void SetToolMenuOpen(bool open) noexcept {
     InterlockedExchange(&g_toolMenuOpen, open ? 1 : 0);
     if (!open) {
         InterlockedExchange(&g_toolMenuReleaseCapture, 1);
+    }
+    if (!open || g_toolMenuState.tab != ToolMenuTab::Author) {
+        AcquireSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
+        g_magazineSocketAuthoringState.visualReady = false;
+        g_magazineSocketAuthoringState.visualTick = 0U;
+        g_magazineSocketAuthoringState.preview = {};
+        ReleaseSRWLockExclusive(
+            &g_magazineSocketAuthoringLock);
     }
     UpdateToolMenuCalibrationVisibility();
 }
@@ -4060,6 +4521,45 @@ bool ApplyToolMenuDisplayAdjustment(
     }
     return changed;
 }
+bool ApplyToolMenuPlayerColliderAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    if (row == 2U) {
+        if (!activate && delta == 0) {
+            return false;
+        }
+        SetPlayerCollisionXrayEnabled(
+            !PlayerCollisionXrayEnabled());
+        return true;
+    }
+    PlayerColliderSettings settings =
+        ReadPlayerColliderSettings();
+    if (!UpdatePlayerColliderSettings(
+            settings, row, delta, activate) ||
+        !ConfigurePlayerColliderSettings(settings)) {
+        return false;
+    }
+
+    const WeaponSettingsStoreResult saveResult =
+        SavePlayerColliderSettings(settings);
+    if (g_passThroughLog != nullptr) {
+        char detail[192]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "result=%s width_scale=%.2f runtime_configured=1 "
+            "height_policy=retail_preserved",
+            WeaponSettingsStoreResultName(saveResult),
+            settings.widthScale);
+        g_passThroughLog(
+            saveResult == WeaponSettingsStoreResult::Ok
+                ? "m5_player_collider_settings_saved"
+                : "m5_player_collider_settings_save_failed",
+            detail);
+    }
+    return true;
+}
+
 
 bool ApplyVrToolMenuDebugDrawAdjustment(
     std::uint32_t row,
@@ -4335,6 +4835,15 @@ void HandleVrToolMenuControls() noexcept {
             g_toolMenuState.row, transition.valueDelta,
             transition.activate, telemetry.weaponIndex,
             g_toolMenuState.tab == ToolMenuTab::BlockCollider);
+    } else if (g_toolMenuState.tab == ToolMenuTab::Author) {
+        valueChanged = ApplyToolMenuMagazineSocketAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
+    } else if (
+        g_toolMenuState.tab == ToolMenuTab::PlayerCollider) {
+        valueChanged = ApplyToolMenuPlayerColliderAdjustment(
+            g_toolMenuState.row, transition.valueDelta,
+            transition.activate);
     } else if (g_toolMenuState.tab == ToolMenuTab::TwoHand) {
         valueChanged = ApplyToolMenuTwoHandAdjustment(
             g_toolMenuState.row, transition.valueDelta,
@@ -4481,6 +4990,8 @@ void DrawVrToolMenuOverlay(
     const ToolMenuRightHandIkSettings rightHandIkSettings =
         CopyToolMenuRightHandIkSettings(telemetry.weaponIndex);
     const fearvr::ArmIkTuning armIkTuning = ReadArmIkTuning();
+    PlayerColliderTelemetry playerColliderTelemetry{};
+    ReadPlayerColliderTelemetry(playerColliderTelemetry);
     const bool emptyHandIkPage =
         ToolMenuUsesEmptyRightHandAlignmentPage();
     PhysicalMeleeGripCalibration grip{};
@@ -4528,7 +5039,11 @@ void DrawVrToolMenuOverlay(
             row == g_toolMenuState.row);
     };
 
-    if (telemetry.weaponIndex >= 0) {
+    if (g_toolMenuState.tab == ToolMenuTab::PlayerCollider) {
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "LOCAL PLAYER STICK-LOCOMOTION COLLIDER");
+    } else if (telemetry.weaponIndex >= 0) {
         std::snprintf(
             rowText, sizeof(rowText),
             "EQUIPPED  %s   INDEX %ld",
@@ -4542,7 +5057,8 @@ void DrawVrToolMenuOverlay(
     }
     AddToolMenuText(
         overlay, -0.75F, 0.405F, 0.0041F, 0.0068F,
-        rowText, telemetry.weaponIndex >= 0
+        rowText, g_toolMenuState.tab == ToolMenuTab::PlayerCollider ||
+                telemetry.weaponIndex >= 0
             ? 0xFF76DBF4U : 0xFFFFB060U);
 
     switch (g_toolMenuState.tab) {
@@ -4898,6 +5414,221 @@ void DrawVrToolMenuOverlay(
         Row(8U, rowText);
         Row(9U, "RESET COLLIDER DEFAULTS");
         break;
+    case ToolMenuTab::Author: {
+        const bool identityReady =
+            EnsureMagazineSocketAuthoringIdentity();
+        const MagazineSocketAuthoringRuntimeState authoring =
+            CopyMagazineSocketAuthoringState();
+        if (!identityReady) {
+            AddToolMenuRow(
+                overlay, 0U,
+                "EXACT HELD WEAPON IDENTITY UNAVAILABLE",
+                false, 0xFFFFB060U);
+            AddToolMenuRow(
+                overlay, 1U,
+                "REQUIRES RESOLVED CATALOG NAME + LIVE MODEL",
+                false, 0xFF95A5B2U);
+            AddToolMenuRow(
+                overlay, 2U,
+                "NO OFFSETS, BONES OR LAYOUTS ARE INFERRED",
+                false, 0xFF76DBF4U);
+            break;
+        }
+        const MagazineInsertionSocketSettings& socket =
+            authoring.editor.current;
+        Row(0U, "PRIMITIVE                     MAG INSERT SOCKET");
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "COMPONENT                     %s",
+            MagazineSocketComponentName(
+                authoring.editor.component));
+        Row(1U, rowText);
+        if (socket.configured) {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "VALUE                         %.3F %s",
+                MagazineSocketComponentValue(
+                    socket, authoring.editor.component),
+                MagazineSocketComponentUsesDegrees(
+                    authoring.editor.component)
+                    ? "DEG" : "CM");
+        } else {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "VALUE                         CAPTURE FIRST");
+        }
+        Row(2U, rowText);
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "MOVEMENT                      %s  %.2F CM / %.2F DEG",
+            authoring.editor.coarse ? "COARSE" : "FINE",
+            authoring.editor.coarse ? 1.0F : 0.1F,
+            authoring.editor.coarse ? 5.0F : 0.25F);
+        Row(3U, rowText);
+        Row(4U, "CAPTURE SOCKET FROM LEFT GRIP");
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "UNDO                          %s  (%zu)",
+            authoring.editor.undoCount != 0U
+                ? "AVAILABLE" : "EMPTY",
+            authoring.editor.undoCount);
+        Row(5U, rowText);
+        Row(6U, "RESET TO LAST LOADED RECORD");
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "PERSIST LOAD %s  SAVE %s  REV %llu  %s",
+            WeaponSettingsStoreResultName(
+                authoring.lastLoadResult),
+            WeaponSettingsStoreResultName(
+                authoring.lastSaveResult),
+            static_cast<unsigned long long>(
+                authoring.revision),
+            socket.configured ? "CONFIGURED" : "NOT CONFIGURED");
+        AddToolMenuRow(
+            overlay, 7U, rowText, false,
+            socket.configured ? 0xFF50FF80U : 0xFFFFB060U);
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "POSE CM %.2F %.2F %.2F   DEG %.1F %.1F %.1F",
+            socket.positionUnits.x,
+            socket.positionUnits.y,
+            socket.positionUnits.z,
+            socket.rotationDegrees.x,
+            socket.rotationDegrees.y,
+            socket.rotationDegrees.z);
+        AddToolMenuRow(overlay, 8U, rowText, false);
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "BOX HALF CM %.2F %.2F %.2F   RAIL %.2F CM",
+            socket.halfExtentsUnits.x,
+            socket.halfExtentsUnits.y,
+            socket.halfExtentsUnits.z,
+            socket.approachLengthUnits);
+        AddToolMenuRow(overlay, 9U, rowText, false);
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "GHOST %s  RAIL %.2F/%.2F CM  ERR %.2F CM %.1F DEG",
+            !authoring.visualReady ? "TRACKING WAIT"
+                : authoring.preview.seated ? "SEATED"
+                : authoring.preview.snapped ? "RAIL SNAP"
+                : "FREE",
+            authoring.preview.railProgress *
+                socket.approachLengthUnits,
+            socket.approachLengthUnits,
+            authoring.preview.lateralErrorUnits,
+            authoring.preview.angleErrorDegrees);
+        AddToolMenuRow(
+            overlay, 10U, rowText, false,
+            authoring.preview.seated ? 0xFF50FF80U
+                : authoring.preview.snapped ? 0xFF70E8FFU
+                                            : 0xFF95A5B2U);
+        AddToolMenuRow(
+            overlay, 11U,
+            "PHASE 1: VISUAL + MOD SETTINGS ONLY; RETAIL STATE READ-ONLY",
+            false, 0xFF76DBF4U);
+        break;
+    }
+    case ToolMenuTab::PlayerCollider: {
+        const PlayerColliderSettings playerColliderSettings =
+            ReadPlayerColliderSettings();
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "PLAYER WIDTH SCALE            %.0F %%",
+            playerColliderSettings.widthScale * 100.0F);
+        Row(0U, rowText);
+        Row(1U, "RESET TO RETAIL WIDTH");
+        PlayerCollisionXraySnapshot xrayStatus{};
+        (void)ReadPlayerCollisionXraySnapshot(xrayStatus);
+        std::snprintf(
+            rowText, sizeof(rowText),
+            "COLLISION X-RAY              %s",
+            !PlayerCollisionXrayEnabled()
+                ? "OFF"
+                : xrayStatus.movementTraceReady
+                    ? "ON" : "UNAVAILABLE");
+        Row(2U, rowText);
+        const char* const status =
+            !playerColliderTelemetry.hookReady
+                ? "UNAVAILABLE - RETAIL PASS-THROUGH"
+                : playerColliderTelemetry.reapplyPending
+                    ? "APPLY PENDING"
+                    : playerColliderTelemetry.runtimeDriftObserved
+                        ? "WIDTH OVERRIDE LOST"
+                        : !playerColliderTelemetry.actualDimensionsValid
+                            ? "WAITING FOR PLAYER"
+                        : playerColliderTelemetry
+                                  .lastRequestSatisfied
+                            ? "LIVE"
+                            : "REQUEST NOT SATISFIED";
+        AddToolMenuRow(
+            overlay, 3U, status, false,
+            !playerColliderTelemetry.hookReady ||
+                    (playerColliderTelemetry.actualDimensionsValid &&
+                     !playerColliderTelemetry
+                          .lastRequestSatisfied)
+                ? 0xFFFF8080U
+                : playerColliderTelemetry.reapplyPending
+                    ? 0xFFFFD060U
+                    : playerColliderTelemetry.runtimeDriftObserved
+                        ? 0xFFFF8080U
+                        : 0xFF50FF80U);
+        if (playerColliderTelemetry.retailDimensionsValid) {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "RETAIL DIMS X %.2F  Y %.2F  Z %.2F",
+                playerColliderTelemetry.retailDimensions.x,
+                playerColliderTelemetry.retailDimensions.y,
+                playerColliderTelemetry.retailDimensions.z);
+        } else {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "RETAIL DIMS WAITING FOR NATIVE REQUEST");
+        }
+        AddToolMenuRow(
+            overlay, 4U, rowText, false, 0xFF76DBF4U);
+        if (playerColliderTelemetry.retailDimensionsValid) {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "REQUESTED X %.2F  Y %.2F  Z %.2F",
+                playerColliderTelemetry.requestedDimensions.x,
+                playerColliderTelemetry.requestedDimensions.y,
+                playerColliderTelemetry.requestedDimensions.z);
+        } else {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "REQUESTED DIMS WAITING");
+        }
+        AddToolMenuRow(
+            overlay, 5U, rowText, false, 0xFF76DBF4U);
+        if (playerColliderTelemetry.actualDimensionsValid) {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "ACTUAL DIMS X %.2F  Y %.2F  Z %.2F",
+                playerColliderTelemetry.actualDimensions.x,
+                playerColliderTelemetry.actualDimensions.y,
+                playerColliderTelemetry.actualDimensions.z);
+        } else {
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "ACTUAL DIMS WAITING");
+        }
+        AddToolMenuRow(
+            overlay, 6U, rowText, false,
+            !playerColliderTelemetry.actualDimensionsValid
+                ? 0xFF95A5B2U
+                : playerColliderTelemetry.runtimeDriftObserved
+                    ? 0xFFFF8080U
+                    : 0xFF50FF80U);
+        AddToolMenuRow(
+            overlay, 7U,
+            "X/Z ONLY - RETAIL HEIGHT AND STANCE PRESERVED",
+            false, 0xFF95A5B2U);
+        AddToolMenuRow(
+            overlay, 8U,
+            "X-RAY BOXES ARE DIAGNOSTIC PROXIES - PHYSICS UNVERIFIED",
+            false, 0xFFFFB060U);
+        break;
+    }
     case ToolMenuTab::BlockCollider:
         if (!PhysicalMeleeProfileMatchesOneHandedWeaponIndex(
                 telemetry.weaponIndex, baseProfile.id)) {
@@ -5351,8 +6082,12 @@ bool DrawWeaponGripCalibrationControllerGizmo(
     bool secondaryAttached,
     float horizontalFovRadians,
     float verticalFovRadians) noexcept {
-    if (InterlockedCompareExchange(
-            &g_weaponGripControllerDebugDrawVisible, 0, 0) == 0 ||
+    const bool authorPageVisible =
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 &&
+        g_toolMenuState.tab == ToolMenuTab::Author;
+    if ((InterlockedCompareExchange(
+             &g_weaponGripControllerDebugDrawVisible, 0, 0) == 0 &&
+         !authorPageVisible) ||
         g_drawOverlayLines == nullptr ||
         InterlockedCompareExchange(
             &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
@@ -5427,6 +6162,64 @@ bool DrawWeaponGripCalibrationControllerGizmo(
     return drawn;
 }
 
+bool DrawMagazineSocketAuthoringGizmo(
+    const RigidTransformAbi& eyeCamera,
+    float horizontalFovRadians,
+    float verticalFovRadians) noexcept {
+    if (g_drawOverlayLines == nullptr ||
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) == 0 ||
+        g_toolMenuState.tab != ToolMenuTab::Author) {
+        return false;
+    }
+    const MagazineSocketAuthoringRuntimeState state =
+        CopyMagazineSocketAuthoringState();
+    if (!state.identityReady ||
+        !state.visualReady ||
+        GetTickCount64() - state.visualTick >
+            kHeadAimFreshnessMilliseconds ||
+        !state.editor.current.configured) {
+        return false;
+    }
+    const WeaponGripCalibrationGizmo gizmo =
+        BuildMagazineSocketAuthoringGizmo(
+            state.editor.current, state.modelWorld,
+            &state.preview);
+    const WeaponGripCalibrationGizmoCamera camera{
+        {eyeCamera.position[0], eyeCamera.position[1],
+         eyeCamera.position[2]},
+        {eyeCamera.rotation[0], eyeCamera.rotation[1],
+         eyeCamera.rotation[2], eyeCamera.rotation[3]},
+        horizontalFovRadians, verticalFovRadians};
+    FearVrOverlayLineVertex projected[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t vertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            gizmo, camera, projected,
+            sizeof(projected) / sizeof(projected[0]));
+    const bool drawn = vertexCount != 0U &&
+        g_drawOverlayLines(
+            projected,
+            static_cast<std::uint32_t>(vertexCount)) != FALSE;
+    if (drawn && InterlockedCompareExchange(
+                     &g_magazineSocketAuthoringGizmoLogged,
+                     1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        LogMagazineSocketAuthoring(
+            "m5_magazine_socket_authoring_gizmo_active",
+            "gizmo_active", state);
+    } else if (!drawn && InterlockedCompareExchange(
+                            &g_magazineSocketAuthoringGizmoFailureLogged,
+                            1, 0) == 0 &&
+               g_passThroughLog != nullptr) {
+        LogMagazineSocketAuthoring(
+            "m5_magazine_socket_authoring_gizmo_failed",
+            "projection_or_bridge_draw_rejected", state);
+    }
+    return drawn;
+}
+
 bool DrawPhysicalMeleeColliderGizmo(
     const RigidTransformAbi& eyeCamera,
     float horizontalFovRadians,
@@ -5485,6 +6278,107 @@ bool DrawPhysicalMeleeColliderGizmo(
         g_passThroughLog(
             "m5_physical_melee_collider_debug_failed",
             "projection_or_bridge_draw_rejected=1 gameplay_continues=1");
+    }
+    return drawn;
+}
+
+bool DrawPlayerCollisionXrayGizmo(
+    const RigidTransformAbi& eyeCamera,
+    float horizontalFovRadians,
+    float verticalFovRadians) noexcept {
+    if (g_drawOverlayLines == nullptr) {
+        return false;
+    }
+    PlayerCollisionXraySnapshot snapshot{};
+    if (!ReadPlayerCollisionXraySnapshot(snapshot)) {
+        return false;
+    }
+    WeaponGripCalibrationGizmo gizmo{};
+    const auto AddProxy = [&gizmo](
+        const PlayerCollisionDiagnosticProxy& proxy,
+        std::uint32_t color) noexcept {
+        if (!proxy.valid) {
+            return;
+        }
+        const fearvr::TrackingVector corners[8]{
+            {proxy.minimum.x, proxy.minimum.y, proxy.minimum.z},
+            {proxy.maximum.x, proxy.minimum.y, proxy.minimum.z},
+            {proxy.maximum.x, proxy.maximum.y, proxy.minimum.z},
+            {proxy.minimum.x, proxy.maximum.y, proxy.minimum.z},
+            {proxy.minimum.x, proxy.minimum.y, proxy.maximum.z},
+            {proxy.maximum.x, proxy.minimum.y, proxy.maximum.z},
+            {proxy.maximum.x, proxy.maximum.y, proxy.maximum.z},
+            {proxy.minimum.x, proxy.maximum.y, proxy.maximum.z}};
+        constexpr std::size_t edges[12][2]{
+            {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+            {0,4},{1,5},{2,6},{3,7}};
+        for (const auto& edge : edges) {
+            AddWeaponGripCalibrationGizmoLine(
+                gizmo, corners[edge[0]], corners[edge[1]], color);
+        }
+    };
+    const auto AddCross = [&gizmo](
+        const PlayerCollisionDiagnosticPoint& point,
+        float halfExtent,
+        std::uint32_t color) noexcept {
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo, {point.x - halfExtent, point.y, point.z},
+            {point.x + halfExtent, point.y, point.z}, color);
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo, {point.x, point.y - halfExtent, point.z},
+            {point.x, point.y + halfExtent, point.z}, color);
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo, {point.x, point.y, point.z - halfExtent},
+            {point.x, point.y, point.z + halfExtent}, color);
+    };
+    AddProxy(
+        BuildPlayerCollisionDiagnosticProxy(
+            snapshot.playerOrigin, snapshot.playerDimensions),
+        0xFFFF40E0U);
+    if (snapshot.targetValid) {
+        AddProxy(
+            BuildPlayerCollisionDiagnosticProxy(
+                snapshot.targetOrigin, snapshot.targetDimensions),
+            0xFFFF9040U);
+    }
+    if (snapshot.headValid) {
+        AddCross(snapshot.headOrigin, 5.0F, 0xFF40E8FFU);
+        AddWeaponGripCalibrationGizmoLine(
+            gizmo,
+            {snapshot.playerOrigin.x, snapshot.playerOrigin.y,
+             snapshot.playerOrigin.z},
+            {snapshot.headOrigin.x, snapshot.headOrigin.y,
+             snapshot.headOrigin.z},
+            0xFF40E8FFU);
+    }
+    if (snapshot.contactValid) {
+        AddCross(snapshot.contactPoint, 4.0F, 0xFFFFFF40U);
+    }
+    const WeaponGripCalibrationGizmoCamera camera{
+        {eyeCamera.position[0], eyeCamera.position[1],
+         eyeCamera.position[2]},
+        {eyeCamera.rotation[0], eyeCamera.rotation[1],
+         eyeCamera.rotation[2], eyeCamera.rotation[3]},
+        horizontalFovRadians, verticalFovRadians};
+    FearVrOverlayLineVertex projected[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t vertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            gizmo, camera, projected,
+            sizeof(projected) / sizeof(projected[0]));
+    const bool drawn = vertexCount != 0U &&
+        g_drawOverlayLines(
+            projected,
+            static_cast<std::uint32_t>(vertexCount)) != FALSE;
+    static volatile LONG activeLogged = 0;
+    if (drawn && InterlockedCompareExchange(
+                     &activeLogged, 1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        g_passThroughLog(
+            "m5_player_collision_xray_rendered",
+            "player=magenta target=orange hmd=cyan contact=yellow "
+            "all_boxes=diagnostic_proxy true_physics_geometry_verified=0 "
+            "depth=always_visible mutation=none");
     }
     return drawn;
 }
@@ -7386,6 +8280,34 @@ bool TryDoubleRenderDiagnostic(
                 desiredHeldControllerPose, displayedObjectWorld);
         }
     }
+    const bool magazineAuthoringVisualRequested =
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) != 0 &&
+        g_toolMenuState.tab == ToolMenuTab::Author &&
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) != 0 &&
+        heldWeaponSource;
+    if (magazineAuthoringVisualRequested &&
+        !displayedObjectReady) {
+        displayedObjectReady =
+            ResolveActiveHeldObjectWorldPose(
+                equippedWeaponSource.weaponIndex,
+                equippedWeaponSource.sourceGeneration,
+                desiredHeldControllerPose,
+                displayedObjectWorld);
+    }
+    if (magazineAuthoringVisualRequested) {
+        const PhysicalMeleeRigidTransform offHandCursorWorld{
+            secondaryGripWorldPosition,
+            secondaryGripWorldRotation};
+        UpdateMagazineSocketAuthoringVisual(
+            equippedWeaponSource.weaponIndex,
+            equippedWeaponSource.sourceGeneration,
+            displayedObjectWorld,
+            offHandCursorWorld,
+            displayedObjectReady &&
+                controllerWeaponReady &&
+                secondaryGripReady);
+    }
     const bool armIkTargetValid =
         selectedRightHandTarget.valid &&
         PhysicalMeleeRigidTransformIsValid(armIkTarget);
@@ -7608,6 +8530,14 @@ bool TryDoubleRenderDiagnostic(
                         stereoFovX, stereoFovY);
                 }
                 if (eyeResult[eye] == 0UL) {
+                    DrawMagazineSocketAuthoringGizmo(
+                        renderedEyeTransform,
+                        stereoFovX, stereoFovY);
+                }
+                if (eyeResult[eye] == 0UL) {
+                    DrawPlayerCollisionXrayGizmo(
+                        renderedEyeTransform,
+                        stereoFovX, stereoFovY);
                     DrawPhysicalMeleeColliderGizmo(
                         renderedEyeTransform,
                         stereoFovX, stereoFovY);
@@ -8441,6 +9371,34 @@ bool InstallRendererPassThroughProbe(
                 ? "malformed_fail_closed_disabled"
                 : "missing_preserve_enabled");
     log("m6_vr_tool_menu_shortcut_loaded", toolMenuShortcutDetail);
+    PlayerColliderSettings playerColliderSettings{};
+    const WeaponSettingsStoreResult playerColliderLoadResult =
+        LoadPlayerColliderSettings(playerColliderSettings);
+    if (playerColliderLoadResult !=
+            WeaponSettingsStoreResult::Ok) {
+        playerColliderSettings = {};
+    }
+    const bool playerColliderConfigured =
+        ConfigurePlayerColliderSettings(
+            playerColliderSettings);
+    PlayerColliderTelemetry playerColliderTelemetry{};
+    ReadPlayerColliderTelemetry(playerColliderTelemetry);
+    char playerColliderDetail[256]{};
+    std::snprintf(
+        playerColliderDetail, sizeof(playerColliderDetail),
+        "result=%s width_scale=%.2f configured=%u hook_ready=%u "
+        "failure_default=retail_width",
+        WeaponSettingsStoreResultName(
+            playerColliderLoadResult),
+        playerColliderSettings.widthScale,
+        playerColliderConfigured ? 1U : 0U,
+        playerColliderTelemetry.hookReady ? 1U : 0U);
+    log(
+        playerColliderConfigured
+            ? "m5_player_collider_settings_loaded"
+            : "m5_player_collider_settings_load_failed",
+        playerColliderDetail);
+
 
     EmptyRightHandAlignmentSettings emptyHandSettings{};
     const WeaponSettingsStoreResult emptyHandLoadResult =
@@ -8543,12 +9501,14 @@ bool InstallRendererPassThroughProbe(
         log(
             "m5_vr_tool_menu_armed",
             "toggle=both_grips_plus_y keyboard=F12 "
-            "tabs=melee,weapon,grip,collider,2-hand,hand-ik,left-ik,"
-            "elbow,display,controls,debug "
+            "tabs=melee,block,block-collider,weapon,grip,collider,"
+            "player-collider,2-hand,hand-ik,left-ik,elbow,display,"
+            "controls,debug "
             "navigation=triggers,left_stick,right_stick,a,b "
             "render=depth_aware_stereo_ndc_triangle_overlay "
             "menu_scale_percent=62 menu_distance_m=1.50 "
             "settings_scope=retail_weapon_index settings_slots=64 "
+            "player_collider_scope=global_local_player "
             "empty_hand_alignment=two_pose_right_trigger "
             "empty_hand_persistence=arm_ik.empty_right_hand "
             "held_object_alignment=two_pose_right_trigger "
@@ -8589,6 +9549,38 @@ bool ReadTrackedHeadWorldPose(
     float (&position)[3],
     float (&rotation)[4]) noexcept {
     return CopyFreshTrackedHeadWorldPose(position, rotation);
+}
+
+bool ReadDiagnosticObjectRigidTransform(
+    void* object,
+    float (&position)[3],
+    float (&rotation)[4]) noexcept {
+    std::memset(position, 0, sizeof(position));
+    std::memset(rotation, 0, sizeof(rotation));
+    if (object == nullptr || g_client == nullptr ||
+        g_getRigidTransform == nullptr) {
+        return false;
+    }
+    RigidTransformAbi transform{};
+    unsigned long result = ~0UL;
+    __try {
+        result = g_getRigidTransform(g_client, object, &transform);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (result != 0UL ||
+        !std::isfinite(transform.position[0]) ||
+        !std::isfinite(transform.position[1]) ||
+        !std::isfinite(transform.position[2]) ||
+        !std::isfinite(transform.rotation[0]) ||
+        !std::isfinite(transform.rotation[1]) ||
+        !std::isfinite(transform.rotation[2]) ||
+        !std::isfinite(transform.rotation[3])) {
+        return false;
+    }
+    std::memcpy(position, transform.position, sizeof(position));
+    std::memcpy(rotation, transform.rotation, sizeof(rotation));
+    return true;
 }
 
 bool ReadTrackedControllerAimRotation(float (&rotation)[4]) noexcept {

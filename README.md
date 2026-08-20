@@ -75,8 +75,17 @@ powershell -ExecutionPolicy Bypass -File tools\prepare-dependencies.ps1
 powershell -ExecutionPolicy Bypass -File tools\build-all.ps1
 ```
 
-The build produces project-authored binaries under `build/`; both `build/`
-and all locally staged game files are ignored by Git.
+This is the consolidated developer feature-platform build. It compiles the
+complete current source state into one coordinated artifact set: the required
+x86 loader/bridges and the x64 OpenXR host. It deliberately does not collapse
+the two process architectures into one executable. Experimental diagnostics
+and rejected gameplay adapters remain compiled but retain their fail-closed,
+opt-in, or default-off gates.
+
+The build produces project-authored binaries under `build/`, runs the x86 and
+x64 headset-free suites, and writes artifact hashes to
+`stage/condemned-build-manifest.json`. Both `build/` and all locally staged
+game files are ignored by Git.
 
 ## Local staging and developer launch
 
@@ -88,22 +97,23 @@ powershell -ExecutionPolicy Bypass -File tools\prepare-condemned-m0-stock-stage.
 powershell -ExecutionPolicy Bypass -File tools\prepare-condemned-m2-mono-stage.ps1
 ```
 
-Then launch the tested feature set:
+Then launch the consolidated current feature platform:
 
 ```powershell
-.\tools\launch-condemned-m2-vr.ps1 `
-  -StereoTuning -RenderScale 100 `
-  -LocomotionProbe -TurningProbe -MenuProbe -MenuControlsProbe `
-  -InteractionProbe -CoreActionsProbe -HapticsProbe `
-  -HeadAimProbe -RecenterProbe -DesktopWindow
+.\tools\launch-condemned-m2-vr.ps1
 ```
 
-M5 melee gates are opt-in diagnostics; their exact switches and safety
-constraints are documented in [`docs/CONDEMNED-M5.md`](docs/CONDEMNED-M5.md).
-Do not enable write-oriented probes on an unsupported executable build.
+No feature parameter is required for the normal developer platform. The
+no-argument launch selects the canonical mapped one-handed/Pipe feature set
+plus the guarded Retail VR Settings entry. `-Wait` is optional and only keeps
+the launcher attached until exit. `-Minimal` retains the bare transport for a
+bounded fallback, while any explicit feature-selection switch retains the
+existing custom diagnostic behavior. Mutually exclusive A/B probes, high-cost
+observers, and headset-rejected behavior remain out of the default.
 
-For the one-handed physical-weapon baseline, launch the guarded pipe test
-preset and equip `pipe_lever` (Retail weapon index 32):
+For the one-handed physical-weapon baseline, equip `pipe_lever` (Retail weapon
+index 32) after the normal launch. The former explicit command remains a
+compatible alias when a Pipe-only diagnostic run is required:
 
 ```powershell
 .\tools\launch-condemned-m2-vr.ps1 -WeaponTest Pipe -Wait

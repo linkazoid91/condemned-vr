@@ -43,6 +43,14 @@ bool ReadTrackedHeadWorldPose(
     float (&position)[3],
     float (&rotation)[4]) noexcept;
 
+// Game-thread-only read used by the Collision X-ray. This reuses the already
+// identity-verified ILTClient GetRigidTransform interface and never writes the
+// object. Unknown, stale, or invalid objects simply return false.
+bool ReadDiagnosticObjectRigidTransform(
+    void* object,
+    float (&position)[3],
+    float (&rotation)[4]) noexcept;
+
 // Returns the separately tracked right-controller aim rotation in the same
 // world basis. Weapon fire vectors use this snapshot, never the HMD snapshot.
 bool ReadTrackedControllerAimRotation(float (&rotation)[4]) noexcept;

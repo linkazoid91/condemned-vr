@@ -10,23 +10,33 @@ powershell -ExecutionPolicy Bypass -File tools\build-all.ps1
 ```
 
 The x86 build additionally tests module identity, loader fail-closed behavior
-and bridge product guards. Both architectures run the shared protocol, pose,
+and bridge product guards. The current consolidated gate passes 25/25 x86 and
+21/21 x64 CTest cases. Both architectures run the shared protocol, pose,
 stereo, input, render-scale, weapon-weight, physical-melee/firearm-muzzle,
-tool-menu, Retail-menu mapping, and background-render tests.
+interaction-authoring, player-collision, tool-menu, Retail-menu mapping, and
+background-render tests.
 
 The standard build also runs these self-contained PowerShell regressions:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File `
+  tools\test-condemned-launch-profile.ps1
+powershell -ExecutionPolicy Bypass -File `
   tools\test-condemned-window-focus.ps1
+powershell -ExecutionPolicy Bypass -File `
+  tools\capture-condemned-window.ps1 -ValidateOnly
 powershell -ExecutionPolicy Bypass -File `
   tools\test-condemned-weapon-diagnostics.ps1
 ```
 
-The focus test exercises invalid targets, bounded retries, and the final
-fallback/cleanup contract through deterministic substitutes; it never changes
-the real foreground window. The watcher test synthesizes only project-local
-temporary JSONL and checks schema v4 hit
+The launch-profile test proves that no feature argument selects `Current`,
+that wait/rollback-only options retain it, and that explicit, Pipe, Minimal,
+and invalid mixed modes remain distinct. The focus test exercises invalid
+targets, bounded retries, and the final fallback/cleanup contract through
+deterministic substitutes; it never changes the real foreground window. The
+screenshot-helper validation checks its guarded command path without capturing
+a live window. The watcher test synthesizes only project-local temporary JSONL
+and checks schema v4 hit
 classification, per-target intervals, telegraph split, minimum stand-off,
 player vitals, command-28 edges, blocked/unblocked health attribution, and the
 explicit enemy-health-unobserved boundary. It can be run separately as above
@@ -66,6 +76,36 @@ Run live tests only against the verified `1.0.314.0` Steam build.
 | Device reset | Resolution/window changes and return from desktop do not lose the bridge or session |
 | Save lifecycle | Load, death/respawn and level transition invalidate stale object pointers safely |
 | Exit | Game and host terminate without a hang or persistent system-wide runtime change |
+
+### Default feature-platform launch gate
+
+Run the launcher with no feature-selection parameters:
+
+```powershell
+.\tools\launch-condemned-m2-vr.ps1
+```
+
+Require the report to record `FeaturePreset=Current`,
+`WeaponTestPreset=Pipe`, Retail VR Settings, physical melee/contact damage,
+weapon-grip calibration, and full arm IK enabled. Two-hand attachment,
+forensic-memory tracing, mutually exclusive A/B probes, and rejected automatic
+swing attack must remain disabled or governed by their existing saved/default
+gate. Require the exact staged bridge, no ASI modules, successful final focus,
+and responsive game/host processes. `-Minimal` must preserve the bare transport;
+any explicit feature-selection parameter must resolve to Pipe or Custom rather
+than silently inheriting Current.
+
+Run `run-20260820-041148` passes only the no-argument selection and guarded
+readiness portion. Headset rendering, input, melee, IK, settings UI, persistence,
+performance, and shutdown still require their matching rows and feature gates
+below before the combined profile can be called live accepted.
+
+The same run later ended in `Condemned.exe` /
+`ClientFx.fxd+0x26EEF` (`0xc0000005`; Windows report ID
+`2ea5e501-d7df-4db5-a083-687c6c4a929c`). The host handled the disconnect and
+exited, but the stability/shutdown portion therefore fails. Because this exact
+fault bucket predates the Current profile and Retail VR Settings work, do not
+assign causality without a controlled baseline/profile comparison.
 
 ### Startup foreground handoff gate
 
@@ -1463,6 +1503,214 @@ visually better set.
 
 The detailed design, current fire-axe values and in-headset calibration
 controls are in [`CONDEMNED-M5.md`](CONDEMNED-M5.md).
+
+
+## Player locomotion collider / enemy-approach live gate
+
+Evidence status: run `run-20260819-133507` used x86 loader SHA-256
+`D780B2DB6BC9C8A79824B4E24E0DF8E5C21E75A0F7234638B987CD954BEF8A3C`
+from base commit `9732e0a867ffc3b80bfe909be6411a68367c457e` plus the
+recorded dirty working tree. The preserved loader log SHA-256 is
+`69B71F6F38D097DF1595BACA4C099A983EA431D6F9D9C7344E685ED5AF4BC984`.
+
+The run **live verified the attempted-slot-9/post-pending route and the
+Retail-update boundary audit**:
+
+- the probe armed with both event caps and loaded 10%;
+- a successful reapply and forced readback established `(4,95,4)` on the
+  exact local player;
+- the next changed boundary was `phase=post_retail_update` at
+  `(40,95,40)`, `pending=0`, and `drift=1`, first with no stick input;
+- a controlled 15%-to-10% reapply again established `(4,95,4)`, and the
+  first `directions=0x5` stick edge after menu close was immediately followed
+  by the same post-Retail restoration;
+- two accepted contacts read the player at full width and enemy dimensions
+  read-only with `mutation=none`; and
+- the final saved 100% setting reported requested/actual `(40,95,40)`,
+  `pending=0`, and `drift=0`, followed by clean game and host shutdown.
+
+This locates restoration inside a Retail client update but does not identify
+its exact writer or show which dimensions movement collision consumed.
+`post_pending_noop`, the native-result-unknown handoff route, cap exhaustion,
+the reset-row action, menu warning presentation, and subjective
+proximity/performance remain unvalidated. The tester supplied no subjective
+result for this run.
+
+The exact setter extension is **automated-only**. It observes the exact
+verified `Condemned.exe+0x00007FD0`
+slot-9 target, forwards native arguments/results unchanged, and bounds
+read-only telemetry to the fresh exact local player while Playing and reduced
+or pending. Its portable return-RVA and forwarding tests and normal headset-
+free gate pass. No staged hash, arm event, native request/result observation,
+or performance evidence exists for this observer. The prior boundary evidence
+remains live; the exact restoration writer remains unknown.
+
+Use the following procedure as a regression gate for the boundary diagnostic:
+
+1. Stage and launch the built candidate only after the tester requests each
+   action. Preserve the exact source state, staged loader hash, launch report,
+   host/bridge logs, and loader log.
+2. Launch a fresh supported headset run. Require
+   `m5_player_collider_armed`, `m5_player_collider_drift_probe_armed`,
+   `m5_player_collider_writer_trace_armed`, and a successful settings-load
+   event. Both collider arm records must report
+   `fail_closed_operational_gate=1`. The probe arm records must report
+   `boundary_event_cap=128 post_pending_event_cap=32` and writer budgets
+   `known_event_cap=64 unknown_gameorig_event_cap=64`,
+   `executable_local_event_cap=64 external_local_event_cap=32`, and
+   `unresolved_local_event_cap=32`. The local profile has a latest preserved
+   save of 100%; record that load before
+   changing it.
+3. In clear open space, select `RESET TO RETAIL WIDTH`. Require requested and
+   actual `(40,95,40)`, `succeeded=1`, and preserved height. Then reduce to
+   10% and require requested/actual `(4,95,4)`, preserved Y,
+   `enemy_objects_changed=0`, and exactly classified evidence through one of
+   these routes:
+
+   - `m5_player_collider_native_handoff` with
+     `native_call_attempted=1 native_result_valid=0 succeeded=1`, followed by
+     a `stream=boundary phase=post_retail_update` observation at `(4,95,4)`;
+   - `m5_player_collider_reapply_attempted` with
+     `native_call_attempted=1 native_result_valid=1 native_result=0x00000000`,
+     followed by `stream=post_pending phase=post_mod_setdims_attempt` at
+     `(4,95,4)`; or
+   - `m5_player_collider_reapply_not_needed` with
+     `native_call_attempted=0 native_result_valid=0 succeeded=1`, followed by
+     `stream=post_pending phase=post_pending_noop` at `(4,95,4)`.
+
+4. Close VR Tools and make one straight forward stick approach to a live
+   enemy. This candidate is diagnostic; do not expect it to force dimensions
+   after a native restoration. Note any frame-time or headset-performance
+   regression because the probe queries dimensions twice per update while the
+   reduced setting is active, plus once after each processed pending request;
+   each in-budget exact-local setter observation also makes bounded before/
+   after dimension queries.
+5. Use the accepted observation from step 3 to establish `(4,95,4)`, then
+   require the first later `stream=boundary` change at
+   `phase=pre_retail_update` or
+   `phase=post_retail_update`. It must report the exact player HOBJECT,
+   locomotion direction mask, current scale, actual dimensions, manager
+   `+0x1C`, the manager-`+0x40C` source candidate, and the separate adjacent
+   candidate at `+0x418`. A post-Retail change is visible after Retail and
+   before pending processing but does not identify the writer; a pre-Retail
+   change occurred since the preceding post sample. Do not use absent drift to
+   exclude a write-and-restore inside one update. Boundary samples emit the
+   initial value and changes; `stream=post_pending` samples are forced and
+   must use `post_mod_setdims_attempt` or `post_pending_noop` consistently
+   with their matching event. Every observation record must say
+   `mutation=none`.
+6. If practical, make one accepted physical strike. Require
+   `m5_enemy_collider_observed` with valid player/target dimensions and
+   `mutation=none`; treat its contact-point distance separately from
+   nearest-body or object-centre separation.
+7. Move clear of obstacles and reset to 100% before exit. If
+   `native_result_valid=1 native_result=0x00000001` leaves smaller actual
+   dimensions in place, require the pending retry to reach `(40,95,40)` once
+   unobstructed.
+8. Validate the slot-9 observer before any write-enabled retention candidate.
+   After an accepted `(4,95,4)` readback, require completed
+   `m5_player_collider_setdims_observed` records to carry sequence/thread,
+   exact manager/player/physics, raw caller address, caller module and return-
+   RVA validity, a verified call RVA only for known mappings, request input/
+   output readability and values, raw slot-9 `flags`, native result, context
+   stability, actual before/after, locomotion mask, and read-only manager
+   candidates. Every record must say
+   `native_setdims_executed=1`,
+   `request_pointer_forwarded_unchanged=1`,
+   `flags_forwarded_unchanged=1`,
+   `native_result_preserved=1`,
+   `observer_added_engine_state_writes=0`, and
+   `observer_setdims_calls_added=0`.
+
+   Correlate the record by sequence/thread and update timing with the boundary
+   drift. A verified GameOrig call that bridges `(4,95,4)` to `(40,95,40)`
+   identifies that native handoff as the restoration. The raw slot-9 flags do
+   not prove the outer manager flag `0x20`. An unclassified, other-module, or
+   unresolved record requires surrounding-code/module inspection before
+   attribution.
+   Boundary restoration without a qualifying event means only that it was not
+   observed through `Condemned.exe+0x00007FD0` when all relevant caps
+   remained below their limits. Do not shrink or de-solidify enemies, and do
+   not use an
+   unconditional post-update `SETDIMS_PUSHOBJECTS` loop as the corrective
+   gate.
+
+9. Enable the session-only `COLLISION X-RAY`. Require
+   `m5_player_collision_xray_armed` to name verified slot 11
+   `Condemned+0x00007CD0`, exact-local/Playing/foreground gates,
+   `native_call_count=1`, `enemy_mutation=0`, and
+   `true_physics_geometry_verified=0`. The menu and render log must call every
+   box a **diagnostic proxy**. No X-ray state may be written to settings.
+10. Make one accepted actor contact, then repeat one straight approach within
+    the two-second target-freshness window. Correlate bounded
+    `m5_player_collision_xray_velocity_handoff` and
+    `m5_player_collision_xray_update` records. Require requested velocity,
+    exact player/physics identity, pre/post player origin and actual
+    dimensions, native result, locomotion mask, fresh HMD origin, fresh target
+    origin/dimensions/contact when available, player-to-target origin distance,
+    proxy horizontal gap, and HMD-to-player horizontal origin offset. Treat
+    neither proxy gap nor HMD/contact distance as a verified radius or nearest-
+    body separation.
+11. Interpret only the bounded alternatives: full dimensions before the
+    velocity/update sample support restoration before movement; retained
+    reduced dimensions plus a stopped player with nonzero velocity and a
+    positive proxy gap support another movement volume/rule; target dimensions
+    or contact/proximity correlation support target geometry/push behavior;
+    stable HMD-to-player origin offset explains a misleading headset-based
+    measurement. These are diagnostic discriminators, not live facts until
+    observed.
+12. Success requires stable identity, exact-once native forwarding, finite
+    fresh records, no enemy/object mutation, and no material performance or
+    locomotion regression. Reject on any gate violation, ambiguous proxy
+    labeling, unexplained target reuse, or cost. Roll back by toggling X-ray
+    OFF; because it is session-only and read-only, no settings or engine-state
+    restoration is required.
+
+## Phase-1 magazine insertion authoring live gate
+
+Evidence status: **implemented and headset-free tested, awaiting live
+validation**. The slice is mod-owned visual authoring only. No test result,
+persisted socket, or convincing ghost proves a Retail magazine interaction.
+
+1. Build and stage the exact source state, then launch the smallest canonical
+   headset configuration with `-WeaponGripCalibration`. Manually equip a
+   positively identified held firearm; do not add a launcher preset, model
+   offset, bone, or socket assumption to force the representative.
+2. Open VR Tools and select `AUTHOR`. Require
+   `m5_live_magazine_socket_armed` for the exact game PID, stable Retail
+   index, resolved catalog name, and current live source generation. Unarmed,
+   unknown identity, a missing visible model, or stale off-hand tracking must
+   remain unavailable.
+3. With no saved record, require `NOT CONFIGURED` and no socket wireframe.
+   Place the left grip at the intended seated pose and activate capture. Verify
+   the model-local box, RGB axes, constrained rail, raw/snapped ghost, and
+   centimetre/degree readouts in both eyes. The controller and held weapon must
+   not move because of the authoring geometry.
+4. Exercise Fine (0.1 cm / 0.25 degree) and Coarse (1 cm / 5 degree)
+   component edits, all position/rotation/half-extent/rail/tolerance
+   components, one undo, and reset to the loaded baseline. A failed or
+   out-of-range edit must leave the prior runtime and persisted value
+   authoritative.
+5. During menu navigation, capture, snapping, undo, reset, and close, require
+   no Retail Fire, Activate, reload, block, inventory, ammo, animation, or
+   weapon-action edge, including no delayed edge after the menu closes. Every
+   authoring event must report `phase=1 engine_handoff=none ammo_mutation=0
+   weapon_state_mutation=0 retail_state_mutation=0`.
+6. Drop/reacquire the weapon and start a fresh process. The record may reload
+   only for the exact same stable index and case-sensitive catalog name; a
+   malformed player record or name mismatch must fail closed without using a
+   packaged or another-weapon fallback.
+7. Use `tools/set-condemned-magazine-socket.ps1` once with a valid edit, then
+   deliberately exercise stale-base, wrong-PID/index/name, and invalid-value
+   commands. Require the matching `m5_live_magazine_socket_applied` or
+   `_rejected` revision and verify the INI/runtime value changes only after a
+   successful save.
+8. Regress Grip, 2-Hand, Collider, Hand IK, firearm aim/fire, tool-menu input,
+   keyboard/mouse, host-absent fallback, exact model restoration, both-eye
+   overlay presentation, and frame timing. Preserve the launch report,
+   host/bridge/loader logs, source state, staged hashes, exact weapon identity,
+   before/after player INI, expected observation, actual observation, and
+   rollback.
 
 ## Evidence collection
 

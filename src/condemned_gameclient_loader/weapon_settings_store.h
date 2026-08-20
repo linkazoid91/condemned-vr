@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "arm_ik.h"
+#include "condemned_interaction_authoring.h"
 #include "condemned_tool_menu.h"
 #include "condemned_right_hand_ik.h"
 
@@ -146,6 +147,20 @@ WeaponSettingsStoreResult SaveWeaponGripSettings(
     PhysicalMeleeProfileId profileId,
     const WeaponGripSettings& settings) noexcept;
 
+// Phase-1 interaction authoring is keyed by both the stable Retail catalog
+// index and the exact resolved catalog name. Unlike melee profile settings it
+// never inherits another weapon's record: an absent or mismatched name remains
+// unconfigured until explicitly captured for that exact held model.
+WeaponSettingsStoreResult LoadMagazineInsertionSocketSettings(
+    std::int32_t weaponIndex,
+    const char* expectedWeaponName,
+    MagazineInsertionSocketSettings& settings) noexcept;
+
+WeaponSettingsStoreResult SaveMagazineInsertionSocketSettings(
+    std::int32_t weaponIndex,
+    const char* weaponName,
+    const MagazineInsertionSocketSettings& settings) noexcept;
+
 // Stored independently from the Melee/Weapon record so existing user tuning
 // remains backward-compatible while hand alignment can evolve on its own.
 WeaponSettingsStoreResult LoadWeaponRightHandIkSettings(
@@ -191,6 +206,15 @@ WeaponSettingsStoreResult LoadToolMenuShortcutEnabled(
 
 WeaponSettingsStoreResult SaveToolMenuShortcutEnabled(
     bool enabled) noexcept;
+
+// Player collision width is global locomotion tuning, not weapon geometry.
+// Versioned values default to exact Retail width (1.0); malformed player
+// overrides fail closed and never silently fall through to packaged data.
+WeaponSettingsStoreResult LoadPlayerColliderSettings(
+    PlayerColliderSettings& settings) noexcept;
+
+WeaponSettingsStoreResult SavePlayerColliderSettings(
+    const PlayerColliderSettings& settings) noexcept;
 
 // Arm anatomy is global rather than weapon-specific. It lives in the same
 // portable INI, but under its own section so changing weapons cannot move the

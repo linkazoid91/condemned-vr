@@ -37,6 +37,10 @@ add_condemnedvr_test(test_condemned_block_pose
   test_condemned_block_pose.cpp condemned_block_pose)
 add_condemnedvr_test(test_condemned_tool_menu
   test_condemned_tool_menu.cpp condemned_tool_menu)
+add_condemnedvr_test(test_condemned_interaction_authoring
+  test_condemned_interaction_authoring.cpp condemned_interaction_authoring)
+add_condemnedvr_test(test_condemned_player_collision
+  test_condemned_player_collision.cpp condemned_player_collision)
 add_condemnedvr_test(test_condemned_menu_input
   test_condemned_menu_input.cpp condemned_menu_input)
 add_condemnedvr_test(test_condemned_retail_menu

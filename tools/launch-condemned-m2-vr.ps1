@@ -1,6 +1,13 @@
 <#
 .SYNOPSIS
-    Launches the isolated Condemned M2 mono OpenXR transport.
+    Launches the current Condemned VR feature platform.
+
+.DESCRIPTION
+    With no feature-selection parameters, launches the consolidated Current
+    profile: the canonical mapped one-handed/Pipe platform plus the guarded
+    Retail VR Settings entry. Explicit feature-selection parameters preserve
+    the existing custom diagnostic behavior. Use -Minimal for the legacy bare
+    transport launch.
 
 .PARAMETER RuntimeManifest
     Optional OpenXR runtime JSON applied only to the new host process. When
@@ -12,6 +19,10 @@
 
 .PARAMETER ValidateOnly
     Validates the host/runtime/session/swapchains without launching Condemned.
+
+.PARAMETER Minimal
+    Disables the implicit Current feature profile and launches only the bare
+    transport. It cannot be combined with a feature-selection parameter.
 
 .PARAMETER DesktopWindow
     Runs Condemned in a smaller desktop window so other applications remain
@@ -193,6 +204,7 @@ param(
     [ValidateSet('Pipe')]
     [string]$WeaponTest,
     [switch]$ValidateOnly,
+    [switch]$Minimal,
     [switch]$RendererProbe,
     [switch]$RendererPassThrough,
     [switch]$StereoDiagnostic,
@@ -243,6 +255,16 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\_condemnedvr-env.ps1"
 $cfg = Get-CondemnedVrConfig
+
+. (Join-Path $PSScriptRoot '_condemnedvr-launch-profile.ps1')
+$featurePlatformProfile =
+    Resolve-CondemnedVrLaunchProfile $PSBoundParameters
+if ($featurePlatformProfile.ApplyPipePreset) {
+    $WeaponTest = 'Pipe'
+}
+if ($featurePlatformProfile.EnableRetailVrSettings) {
+    $RetailVrSettingsProbe = $true
+}
 
 if ($PSBoundParameters.ContainsKey('StartupImage')) {
     $StartupImage = [IO.Path]::GetFullPath($StartupImage.Trim('"'))
@@ -442,7 +464,7 @@ $runLogDirectory = Assert-UnderCondemnedVrProjectRoot (
 New-Item -ItemType Directory -Force -Path @(
     $runLogDirectory, $deployment.UserDirectory) | Out-Null
 $liveColliderCommandPath = $null
-if ($WeaponTest -eq 'Pipe') {
+if ($WeaponTest -eq 'Pipe' -or $WeaponGripCalibration) {
     $liveColliderCommandPath = Assert-UnderCondemnedVrProjectRoot (
         Join-Path $runLogDirectory 'weapon-alignment-command.txt')
 }
@@ -1053,6 +1075,7 @@ try {
         SchemaVersion = 1
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Session = $sessionText
+        FeaturePreset = $featurePlatformProfile.Name
         WeaponTestPreset = $WeaponTest
         GameProcessId = $game.Id
         HostProcessId = $hostProcess.Id
@@ -1104,6 +1127,7 @@ try {
         StereoEnabled = $false
     }
     Write-Host 'Condemned M2 mono OpenXR transport is live.' -ForegroundColor Green
+    Write-Host ('Feature preset: {0}' -f $featurePlatformProfile.Name)
     Write-Host "Game PID: $($game.Id)  Host PID: $($hostProcess.Id)"
     Write-Host "Host log:  $($hostLog.FullName)"
     Write-Host "Proxy log: $($proxyLog.FullName)"
@@ -1185,6 +1209,11 @@ try {
             -ForegroundColor Cyan
     }
     if ($WeaponGripCalibration) {
+        if ($WeaponTest -ne 'Pipe') {
+            Write-Host (
+                "Live authoring commands: $liveColliderCommandPath") `
+                -ForegroundColor Cyan
+        }
         Write-Host 'Live weapon-grip calibration is active:' `
             -ForegroundColor Cyan
         Write-Host '  Hold BOTH grips: right stick = X/Y; left-stick up/down = Z'

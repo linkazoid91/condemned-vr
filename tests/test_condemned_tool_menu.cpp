@@ -109,6 +109,20 @@ int main() {
             "COLLIDER") != 0) {
         return Fail("collider setup must have a dedicated bounded menu tab");
     }
+    if (ToolMenuRowCount(ToolMenuTab::Author) != 7U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::Author),
+            "AUTHOR") != 0) {
+        return Fail(
+            "interaction authoring must have a dedicated bounded menu tab");
+    }
+    if (ToolMenuRowCount(ToolMenuTab::PlayerCollider) != 3U ||
+        std::strcmp(
+            ToolMenuTabName(ToolMenuTab::PlayerCollider),
+            "PLAYER COL") != 0) {
+        return Fail(
+            "player collision must be separate from weapon geometry");
+    }
     if (ToolMenuRowCount(ToolMenuTab::BlockCollider) != 10U ||
         std::strcmp(
             ToolMenuTabName(ToolMenuTab::BlockCollider),
