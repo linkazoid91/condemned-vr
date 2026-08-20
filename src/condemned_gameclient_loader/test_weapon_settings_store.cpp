@@ -817,6 +817,85 @@ int main() {
             "trailing socket data must fail closed without mutation");
     }
 
+    SlideGrabRailSettings absentSlide{};
+    absentSlide.maximumTravelUnits = 9.0F;
+    if (LoadSlideGrabRailSettings(
+            76, "colt45_Unbreakable", absentSlide) !=
+            WeaponSettingsStoreResult::NotFound ||
+        !Near(absentSlide.maximumTravelUnits, 9.0F)) {
+        return Fail(
+            "a missing slide rail must not mutate the caller");
+    }
+    SlideGrabRailSettings expectedSlide = ColtSlideGrabSeedSettings();
+    expectedSlide.configured = true;
+    expectedSlide.activationInput = SlideGrabActivationInput::Trigger;
+    expectedSlide.grabVolumeModelLocal.positionUnits = {1.0F, 2.0F, 3.0F};
+    expectedSlide.grabVolumeModelLocal.rotation =
+        PhysicalMeleeLocalRotationFromDegrees({10.0F, 20.0F, 30.0F});
+    expectedSlide.handPoseModelLocal.positionUnits = {4.0F, 5.0F, 6.0F};
+    expectedSlide.handPoseModelLocal.rotation =
+        PhysicalMeleeLocalRotationFromDegrees({-10.0F, -20.0F, -30.0F});
+    if (SaveSlideGrabRailSettings(
+            76, "colt45_Unbreakable", expectedSlide) !=
+            WeaponSettingsStoreResult::Ok) {
+        return Fail("a valid exact-identity slide rail must save");
+    }
+    SlideGrabRailSettings loadedSlide{};
+    if (LoadSlideGrabRailSettings(
+            76, "colt45_Unbreakable", loadedSlide) !=
+            WeaponSettingsStoreResult::Ok ||
+        !loadedSlide.configured ||
+        std::strcmp(loadedSlide.nodeName, "SlideJnt") != 0 ||
+        loadedSlide.activationInput != SlideGrabActivationInput::Trigger ||
+        !Near(loadedSlide.maximumTravelUnits, 3.8651F) ||
+        !Near(loadedSlide.closedPositionUnits.x, 14.1689F) ||
+        !Near(loadedSlide.grabVolumeModelLocal.positionUnits.y, 2.0F) ||
+        !Near(loadedSlide.handPoseModelLocal.positionUnits.z, 6.0F)) {
+        return Fail("slide rail settings must round-trip exactly");
+    }
+    if (LoadSlideGrabRailSettings(
+            76, "revolver_Unbreakable", loadedSlide) !=
+            WeaponSettingsStoreResult::ProfileMismatch) {
+        return Fail(
+            "slide rails must reject a changed catalog identity");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_76", L"slide_grab_rail",
+            L"1,colt45_Unbreakable,1,SlideJnt,"
+            L"1,2,3,0,0,0,1,2,2,3,"
+            L"4,5,6,0,0,0,1,"
+            L"14.1689,2.8062,-8.7261,"
+            L"-0.989379,0.007748,0.145151,3.8651,3.5",
+            path)) {
+        return Fail("legacy slide rail fixture must be writable");
+    }
+    loadedSlide = {};
+    if (LoadSlideGrabRailSettings(
+            76, "colt45_Unbreakable", loadedSlide) !=
+            WeaponSettingsStoreResult::Ok ||
+        loadedSlide.activationInput != SlideGrabActivationInput::Either) {
+        return Fail(
+            "version-one slide rails must migrate with EITHER activation");
+    }
+    if (!WritePrivateProfileStringW(
+            L"weapon_76", L"slide_grab_rail",
+            L"2,colt45_Unbreakable,1,SlideJnt,"
+            L"1,2,3,0,0,0,1,2,2,3,"
+            L"4,5,6,0,0,0,1,"
+            L"14.1689,2.8062,-8.7261,"
+            L"0,0,0,3.8651,3.5,2",
+            path)) {
+        return Fail("invalid slide rail fixture must be writable");
+    }
+    loadedSlide.maximumTravelUnits = 8.0F;
+    if (LoadSlideGrabRailSettings(
+            76, "colt45_Unbreakable", loadedSlide) !=
+            WeaponSettingsStoreResult::ParseFailed ||
+        !Near(loadedSlide.maximumTravelUnits, 8.0F)) {
+        return Fail(
+            "invalid slide axes must fail closed without mutation");
+    }
+
     DeleteFileW(path);
     DeleteFileW(defaultsPath);
     SetEnvironmentVariableW(

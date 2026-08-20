@@ -100,6 +100,14 @@ bool PhysicalMeleeSecondaryGripCapturesInput(
     const FearVrInputState& input,
     bool sampleFresh) noexcept;
 
+// Candidate/attached slide interaction consumes only its configured off-hand
+// activation value. Keyboard/mouse and unrelated controller inputs remain
+// Retail-owned.
+bool SlideGrabCapturesOffHandInput(
+    const FearVrInputState& input,
+    bool sampleFresh,
+    bool gripInput) noexcept;
+
 // Applies the currently attached support constraint in OpenXR tracking space
 // for swing-speed kinematics. This excludes Retail locomotion and turning in
 // the same way as the original one-hand tracking-space path.

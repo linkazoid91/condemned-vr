@@ -88,7 +88,7 @@ inline std::uint32_t ToolMenuRowCount(ToolMenuTab tab) noexcept {
     case ToolMenuTab::Collider:
         return 10U;
     case ToolMenuTab::Author:
-        return 7U;
+        return 8U;
     case ToolMenuTab::PlayerCollider:
         return 3U;
     case ToolMenuTab::TwoHand:

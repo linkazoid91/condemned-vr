@@ -258,6 +258,8 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     }
     const bool armIkRightArm = CommandLineContains(
         L"-condemnedvr-arm-ik-right-arm");
+    const bool slideNodeControlTest = CommandLineContains(
+        L"-condemnedvr-m5-slide-control-test");
     const bool armIkRightHandProof = CommandLineContains(
         L"-condemnedvr-arm-ik-right-hand-proof");
     const bool menuControls = CommandLineContains(
@@ -276,6 +278,11 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     }
     if (CommandLineContains(L"-condemnedvr-arm-ik-discovery")) {
         condemnedvr::InstallArmIkDiscovery(
+            masterDatabase, g_original, AppendLoaderEvent);
+    }
+    if (CommandLineContains(
+            L"-condemnedvr-m5-weapon-model-discovery")) {
+        condemnedvr::InstallWeaponModelDiscovery(
             masterDatabase, g_original, AppendLoaderEvent);
     }
     if (armIkRightArm) {
@@ -297,6 +304,15 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
                 "arm_ik_right_hand_proof_rejected",
                 "reason=retail_game_state_lifecycle_observer_not_armed "
                 "requires=-condemnedvr-m4-menu");
+        }
+    }
+    if (slideNodeControlTest) {
+        if (!armIkRightArm ||
+            !condemnedvr::SetSlideNodeControlTestEnabled(true)) {
+            AppendLoaderEvent(
+                "m5_slide_node_control_rejected",
+                "reason=requires_verified_full_arm_control "
+                "requires=-condemnedvr-arm-ik-right-arm");
         }
     }
     if (CommandLineContains(L"-condemnedvr-m3-pass-through")) {

@@ -189,6 +189,30 @@ volatile LONG g_targetWaitingLogged = 0;
 volatile LONG g_callbackOrderWaitingLogged = 0;
 volatile LONG g_leftCallbackActiveLogged = 0;
 volatile LONG g_leftTargetWaitingLogged = 0;
+
+struct SlideNodeControlRuntime {
+    void* modelObject{nullptr};
+    ModelHandle node{kInvalidModelHandle};
+    SlideGrabRailSettings settings{};
+    fearvr::TrackingVector requestedPositionModelLocal{};
+    std::int32_t weaponIndex{-1};
+    std::uint64_t sourceGeneration{0U};
+    std::uint64_t sampleId{0U};
+    std::uint64_t callbackHeartbeat{0U};
+    ULONGLONG publishedTick{0U};
+    ULONGLONG lastCallbackTick{0U};
+    float projectedTravelUnits{0.0F};
+    float clampedTravelUnits{0.0F};
+    std::uint32_t boundedSamples{0U};
+    bool sourceResolved{false};
+    bool installed{false};
+    bool callbackActive{false};
+    bool retailAnimationIncompatible{false};
+    bool retailOwnershipRestored{true};
+};
+SRWLOCK g_slideControlLock = SRWLOCK_INIT;
+SlideNodeControlRuntime g_slideControl{};
+volatile LONG g_slideControlTestEnabled = 0;
 volatile LONG g_leftCallbackOrderWaitingLogged = 0;
 void* g_failedPlayerBody = nullptr;
 const char* g_installPhase = "idle";
@@ -796,6 +820,150 @@ void __cdecl ArmNodeControl(
                 ? "arm_ik_right_arm_active"
                 : "arm_ik_right_hand_proof_active",
             detail);
+    }
+}
+
+void __cdecl SlideNodeControl(
+    const NodeControlDataAbi& data,
+    void* userData) {
+    if (userData != &g_slideControl || data.model == nullptr ||
+        data.nodeTransform == nullptr) {
+        return;
+    }
+    SlideNodeControlRuntime control{};
+    AcquireSRWLockShared(&g_slideControlLock);
+    control = g_slideControl;
+    ReleaseSRWLockShared(&g_slideControlLock);
+    if (!control.installed || data.model != control.modelObject ||
+        data.node != control.node || control.publishedTick == 0U ||
+        GetTickCount64() - control.publishedTick >
+            kTargetFreshnessMilliseconds ||
+        !fearvr::IsFinite(control.requestedPositionModelLocal)) {
+        return;
+    }
+    const fearvr::TrackingVector before{
+        data.nodeTransform->position[0],
+        data.nodeTransform->position[1],
+        data.nodeTransform->position[2]};
+    if (!fearvr::IsFinite(before)) {
+        return;
+    }
+    const fearvr::TrackingVector retailDelta =
+        PhysicalMeleeSubtract(
+            before, control.settings.closedPositionUnits);
+    const float retailTravel = PhysicalMeleeDot(
+        retailDelta, control.settings.closedToRearAxis);
+    const fearvr::TrackingVector retailRailDelta =
+        PhysicalMeleeScale(
+            control.settings.closedToRearAxis, retailTravel);
+    const float retailOffRail = PhysicalMeleeLength(
+        PhysicalMeleeSubtract(retailDelta, retailRailDelta));
+    constexpr float kRetailAnimationCancellationUnits = 0.15F;
+    const bool incompatible =
+        !std::isfinite(retailTravel) ||
+        !std::isfinite(retailOffRail) ||
+        std::fabs(retailTravel) >
+            kRetailAnimationCancellationUnits ||
+        retailOffRail > kRetailAnimationCancellationUnits;
+    if (incompatible) {
+        bool logCancellation = false;
+        AcquireSRWLockExclusive(&g_slideControlLock);
+        if (g_slideControl.installed &&
+            g_slideControl.modelObject == control.modelObject &&
+            g_slideControl.sourceGeneration ==
+                control.sourceGeneration) {
+            logCancellation =
+                !g_slideControl.retailAnimationIncompatible;
+            g_slideControl.retailAnimationIncompatible = true;
+            g_slideControl.callbackActive = true;
+            g_slideControl.lastCallbackTick = GetTickCount64();
+        }
+        ReleaseSRWLockExclusive(&g_slideControlLock);
+        if (logCancellation && g_log != nullptr) {
+            char detail[640]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "pipeline=ENGINE_HANDOFF->RESULT "
+                "weapon_index=%ld source_generation=%llu "
+                "node_name=%s node_resolution=ok "
+                "retail_before=(%.4f,%.4f,%.4f) "
+                "retail_projected_travel=%.4f "
+                "retail_off_rail=%.4f "
+                "policy=cancel_on_retail_base_motion "
+                "node_write=skipped retail_ownership_restored=1",
+                static_cast<long>(control.weaponIndex),
+                static_cast<unsigned long long>(
+                    control.sourceGeneration),
+                control.settings.nodeName,
+                before.x, before.y, before.z,
+                retailTravel, retailOffRail);
+            g_log(
+                "m5_slide_grab_retail_animation_cancelled",
+                detail);
+        }
+        return;
+    }
+
+    data.nodeTransform->position[0] =
+        control.requestedPositionModelLocal.x;
+    data.nodeTransform->position[1] =
+        control.requestedPositionModelLocal.y;
+    data.nodeTransform->position[2] =
+        control.requestedPositionModelLocal.z;
+    // Rotation is intentionally untouched. Live discovery observed no Colt
+    // SlideJnt rotation across the complete Retail travel.
+    bool logSample = false;
+    std::uint64_t heartbeat = 0U;
+    AcquireSRWLockExclusive(&g_slideControlLock);
+    if (g_slideControl.installed &&
+        g_slideControl.modelObject == control.modelObject &&
+        g_slideControl.sourceGeneration == control.sourceGeneration) {
+        g_slideControl.callbackActive = true;
+        g_slideControl.lastCallbackTick = GetTickCount64();
+        g_slideControl.callbackHeartbeat =
+            g_slideControl.callbackHeartbeat ==
+                std::numeric_limits<std::uint64_t>::max()
+            ? 1U : g_slideControl.callbackHeartbeat + 1U;
+        heartbeat = g_slideControl.callbackHeartbeat;
+        if (g_slideControl.boundedSamples < 4U &&
+            (heartbeat == 1U ||
+             control.clampedTravelUnits >=
+                 control.settings.rearThresholdUnits)) {
+            ++g_slideControl.boundedSamples;
+            logSample = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_slideControlLock);
+    if (logSample && g_log != nullptr) {
+        char detail[896]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "pipeline=ENGINE_HANDOFF->RESULT "
+            "weapon_index=%ld source_generation=%llu "
+            "node_name=%s node_resolution=ok "
+            "sample_id=%llu heartbeat=%llu "
+            "before=(%.4f,%.4f,%.4f) "
+            "requested=(%.4f,%.4f,%.4f) "
+            "after=(%.4f,%.4f,%.4f) "
+            "projected_travel=%.4f clamped_travel=%.4f "
+            "rotation_preserved=1 callback_write=1 "
+            "engine_acceptance=awaiting_live_readback",
+            static_cast<long>(control.weaponIndex),
+            static_cast<unsigned long long>(
+                control.sourceGeneration),
+            control.settings.nodeName,
+            static_cast<unsigned long long>(control.sampleId),
+            static_cast<unsigned long long>(heartbeat),
+            before.x, before.y, before.z,
+            control.requestedPositionModelLocal.x,
+            control.requestedPositionModelLocal.y,
+            control.requestedPositionModelLocal.z,
+            data.nodeTransform->position[0],
+            data.nodeTransform->position[1],
+            data.nodeTransform->position[2],
+            control.projectedTravelUnits,
+            control.clampedTravelUnits);
+        g_log("m5_slide_node_control_sample", detail);
     }
 }
 
@@ -1702,6 +1870,7 @@ void NotifyArmIkRetailGameState(int gameState) noexcept {
 
     InvalidateArmIkTarget(false);
     InvalidateArmIkTarget(true);
+    EndSlideNodeControl("retail_game_state_changed");
     const ArmControlReleaseSummary right =
         ClearArmControl(false, true);
     const ArmControlReleaseSummary left =
@@ -1819,6 +1988,326 @@ bool ArmIkRightArmIsActive() noexcept {
     }
     return ArmControlHasFreshHeartbeat(false, true) &&
         ArmIkLeftHandIsActive();
+}
+
+bool SetSlideNodeControlTestEnabled(bool enabled) noexcept {
+    if (!enabled) {
+        EndSlideNodeControl("test_option_disabled");
+        InterlockedExchange(&g_slideControlTestEnabled, 0);
+        return true;
+    }
+    if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_fullArmMode, 0, 0) == 0 ||
+        g_getNode == nullptr || g_getNodeTransform == nullptr ||
+        g_addNodeControlSpecific == nullptr ||
+        g_removeNodeControlSpecific == nullptr) {
+        if (g_log != nullptr) {
+            g_log(
+                "m5_slide_node_control_rejected",
+                "reason=verified_full_arm_node_control_boundary_unavailable");
+        }
+        return false;
+    }
+    InterlockedExchange(&g_slideControlTestEnabled, 1);
+    if (g_log != nullptr) {
+        g_log(
+            "m5_slide_node_control_armed",
+            "scope=colt_index_76 node_resolve=per_model_lifetime "
+            "control=verified_specific_node_callback "
+            "write=position_only rotation=retail_preserved "
+            "rollback=remove_callback");
+    }
+    return true;
+}
+
+bool EndSlideNodeControl(const char* reason) noexcept {
+    SlideNodeControlRuntime old{};
+    AcquireSRWLockExclusive(&g_slideControlLock);
+    old = g_slideControl;
+    g_slideControl.installed = false;
+    g_slideControl.callbackActive = false;
+    g_slideControl.publishedTick = 0U;
+    g_slideControl.sampleId = 0U;
+    g_slideControl.retailOwnershipRestored = true;
+    ReleaseSRWLockExclusive(&g_slideControlLock);
+    ModelResult removeResult = kModelOk;
+    bool removeAttempted = false;
+    if (old.installed && old.modelObject != nullptr &&
+        old.node != kInvalidModelHandle &&
+        g_removeNodeControlSpecific != nullptr) {
+        removeAttempted = true;
+        removeResult = 0xFFFFFFFFU;
+        __try {
+            removeResult = g_removeNodeControlSpecific(
+                g_model, old.modelObject, old.node,
+                &SlideNodeControl, &g_slideControl);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            removeResult = 0xFFFFFFFFU;
+        }
+    }
+    // Even if Retail reports a remove failure, the static callback state has
+    // already been disabled, so a lingering registration is pass-through and
+    // cannot continue writing.
+    // Resolution alone does not transfer ownership from Retail. Log a detach
+    // only when a callback was actually installed; callers may safely invoke
+    // this idempotently while a source remains resolved.
+    if (old.installed && g_log != nullptr) {
+        char detail[640]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "pipeline=STATE->ENGINE_HANDOFF->RESULT "
+            "weapon_index=%ld source_generation=%llu "
+            "node_name=%s reason=%s installed=%u "
+            "remove_attempted=%u remove_result=%lu "
+            "callback_passthrough=1 retail_ownership_restored=1",
+            static_cast<long>(old.weaponIndex),
+            static_cast<unsigned long long>(
+                old.sourceGeneration),
+            old.settings.nodeName[0] != '\0'
+                ? old.settings.nodeName : "unknown",
+            reason != nullptr ? reason : "unspecified",
+            old.installed ? 1U : 0U,
+            removeAttempted ? 1U : 0U,
+            static_cast<unsigned long>(removeResult));
+        g_log("m5_slide_node_control_detached", detail);
+    }
+    return !removeAttempted || removeResult == kModelOk;
+}
+
+bool PrepareSlideNodeControlSource(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const SlideGrabRailSettings& settings) noexcept {
+    if (InterlockedCompareExchange(
+            &g_slideControlTestEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_modelGlobalValidated, 0, 0) == 0 ||
+        modelObject == nullptr ||
+        weaponIndex != kColtSlideGrabWeaponIndex ||
+        sourceGeneration == 0U ||
+        !settings.configured ||
+        !SlideGrabRailSettingsAreValid(settings) ||
+        std::strcmp(settings.nodeName, kColtSlideNodeName) != 0) {
+        return false;
+    }
+    AcquireSRWLockShared(&g_slideControlLock);
+    const bool sameSource =
+        g_slideControl.sourceResolved &&
+        g_slideControl.modelObject == modelObject &&
+        g_slideControl.weaponIndex == weaponIndex &&
+        g_slideControl.sourceGeneration == sourceGeneration &&
+        std::strcmp(
+            g_slideControl.settings.nodeName,
+            settings.nodeName) == 0;
+    ReleaseSRWLockShared(&g_slideControlLock);
+    if (sameSource) {
+        return true;
+    }
+    EndSlideNodeControl("model_lifetime_or_source_changed");
+    ModelHandle node = kInvalidModelHandle;
+    ModelTransformAbi before{};
+    ModelResult nodeResult = 0xFFFFFFFFU;
+    ModelResult transformResult = 0xFFFFFFFFU;
+    __try {
+        nodeResult = g_getNode(
+            g_model, modelObject, settings.nodeName, node);
+        if (nodeResult == kModelOk &&
+            node != kInvalidModelHandle) {
+            transformResult = g_getNodeTransform(
+                g_model, modelObject, node, before, false);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        nodeResult = transformResult = 0xFFFFFFFFU;
+        node = kInvalidModelHandle;
+    }
+    const fearvr::TrackingVector beforePosition{
+        before.position[0], before.position[1], before.position[2]};
+    const float closedError = fearvr::IsFinite(beforePosition)
+        ? PhysicalMeleeLength(PhysicalMeleeSubtract(
+              beforePosition, settings.closedPositionUnits))
+        : std::numeric_limits<float>::infinity();
+    const bool resolved = nodeResult == kModelOk &&
+        transformResult == kModelOk &&
+        node != kInvalidModelHandle &&
+        std::isfinite(before.scale) &&
+        before.scale >= 0.99F && before.scale <= 1.01F &&
+        std::isfinite(closedError) && closedError <= 0.25F;
+    if (resolved) {
+        AcquireSRWLockExclusive(&g_slideControlLock);
+        g_slideControl = {};
+        g_slideControl.modelObject = modelObject;
+        g_slideControl.node = node;
+        g_slideControl.settings = settings;
+        g_slideControl.weaponIndex = weaponIndex;
+        g_slideControl.sourceGeneration = sourceGeneration;
+        g_slideControl.sourceResolved = true;
+        g_slideControl.retailOwnershipRestored = true;
+        ReleaseSRWLockExclusive(&g_slideControlLock);
+    }
+    if (g_log != nullptr) {
+        char detail[704]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "pipeline=ENGINE_HANDOFF "
+            "weapon_index=%ld source_generation=%llu "
+            "model_object=%p node_name=%s "
+            "resolution_result=%s get_node_result=%lu "
+            "get_transform_result=%lu "
+            "before=(%.4f,%.4f,%.4f) closed_error=%.4f "
+            "handle_scope=model_lifetime_only persisted_handle=0",
+            static_cast<long>(weaponIndex),
+            static_cast<unsigned long long>(sourceGeneration),
+            modelObject, settings.nodeName,
+            resolved ? "ok" : "rejected",
+            static_cast<unsigned long>(nodeResult),
+            static_cast<unsigned long>(transformResult),
+            beforePosition.x, beforePosition.y, beforePosition.z,
+            closedError);
+        g_log(
+            resolved
+                ? "m5_slide_node_resolved"
+                : "m5_slide_node_resolution_failed",
+            detail);
+    }
+    return resolved;
+}
+
+bool BeginSlideNodeControl(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const SlideGrabRailSettings& settings,
+    const fearvr::TrackingVector& requestedPositionModelLocal,
+    std::uint64_t sampleId) noexcept {
+    if (!fearvr::IsFinite(requestedPositionModelLocal) ||
+        sampleId == 0U ||
+        !PrepareSlideNodeControlSource(
+            modelObject, weaponIndex, sourceGeneration, settings)) {
+        return false;
+    }
+    SlideNodeControlRuntime source{};
+    AcquireSRWLockShared(&g_slideControlLock);
+    source = g_slideControl;
+    ReleaseSRWLockShared(&g_slideControlLock);
+    ModelResult addResult = 0xFFFFFFFFU;
+    __try {
+        addResult = g_addNodeControlSpecific(
+            g_model, source.modelObject, source.node,
+            &SlideNodeControl, &g_slideControl);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        addResult = 0xFFFFFFFFU;
+    }
+    if (addResult != kModelOk) {
+        if (g_log != nullptr) {
+            char detail[384]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld source_generation=%llu "
+                "node_name=%s add_result=%lu rollback=no_callback_added",
+                static_cast<long>(weaponIndex),
+                static_cast<unsigned long long>(sourceGeneration),
+                settings.nodeName,
+                static_cast<unsigned long>(addResult));
+            g_log("m5_slide_node_control_attach_failed", detail);
+        }
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_slideControlLock);
+    if (g_slideControl.modelObject == modelObject &&
+        g_slideControl.sourceGeneration == sourceGeneration &&
+        g_slideControl.node == source.node) {
+        g_slideControl.requestedPositionModelLocal =
+            requestedPositionModelLocal;
+        g_slideControl.sampleId = sampleId;
+        g_slideControl.publishedTick = GetTickCount64();
+        g_slideControl.installed = true;
+        g_slideControl.retailAnimationIncompatible = false;
+        g_slideControl.retailOwnershipRestored = false;
+        g_slideControl.callbackHeartbeat = 0U;
+        g_slideControl.boundedSamples = 0U;
+    }
+    const bool installed = g_slideControl.installed;
+    ReleaseSRWLockExclusive(&g_slideControlLock);
+    if (!installed) {
+        __try {
+            g_removeNodeControlSpecific(
+                g_model, source.modelObject, source.node,
+                &SlideNodeControl, &g_slideControl);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        return false;
+    }
+    if (g_log != nullptr) {
+        char detail[512]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "pipeline=STATE->ENGINE_HANDOFF "
+            "weapon_index=%ld source_generation=%llu "
+            "node_name=%s sample_id=%llu add_result=%lu "
+            "requested=(%.4f,%.4f,%.4f) rotation_write=0",
+            static_cast<long>(weaponIndex),
+            static_cast<unsigned long long>(sourceGeneration),
+            settings.nodeName,
+            static_cast<unsigned long long>(sampleId),
+            static_cast<unsigned long>(addResult),
+            requestedPositionModelLocal.x,
+            requestedPositionModelLocal.y,
+            requestedPositionModelLocal.z);
+        g_log("m5_slide_node_control_attached", detail);
+    }
+    return true;
+}
+
+bool UpdateSlideNodeControlTarget(
+    void* modelObject,
+    std::uint64_t sourceGeneration,
+    const fearvr::TrackingVector& requestedPositionModelLocal,
+    float projectedTravelUnits,
+    float clampedTravelUnits,
+    std::uint64_t sampleId) noexcept {
+    if (modelObject == nullptr || sourceGeneration == 0U ||
+        sampleId == 0U ||
+        !fearvr::IsFinite(requestedPositionModelLocal) ||
+        !std::isfinite(projectedTravelUnits) ||
+        !std::isfinite(clampedTravelUnits)) {
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_slideControlLock);
+    const bool matches = g_slideControl.installed &&
+        g_slideControl.modelObject == modelObject &&
+        g_slideControl.sourceGeneration == sourceGeneration &&
+        !g_slideControl.retailAnimationIncompatible;
+    if (matches) {
+        g_slideControl.requestedPositionModelLocal =
+            requestedPositionModelLocal;
+        g_slideControl.projectedTravelUnits =
+            projectedTravelUnits;
+        g_slideControl.clampedTravelUnits =
+            clampedTravelUnits;
+        g_slideControl.sampleId = sampleId;
+        g_slideControl.publishedTick = GetTickCount64();
+    }
+    ReleaseSRWLockExclusive(&g_slideControlLock);
+    return matches;
+}
+
+SlideNodeControlStatus ReadSlideNodeControlStatus() noexcept {
+    SlideNodeControlStatus status{};
+    AcquireSRWLockShared(&g_slideControlLock);
+    status.weaponIndex = g_slideControl.weaponIndex;
+    status.sourceGeneration = g_slideControl.sourceGeneration;
+    status.sourceResolved = g_slideControl.sourceResolved;
+    status.installed = g_slideControl.installed;
+    status.callbackActive = g_slideControl.callbackActive &&
+        g_slideControl.lastCallbackTick != 0U &&
+        GetTickCount64() - g_slideControl.lastCallbackTick <=
+            kCallbackHeartbeatFreshnessMilliseconds;
+    status.retailAnimationIncompatible =
+        g_slideControl.retailAnimationIncompatible;
+    status.retailOwnershipRestored =
+        g_slideControl.retailOwnershipRestored;
+    ReleaseSRWLockShared(&g_slideControlLock);
+    return status;
 }
 
 } // namespace condemnedvr

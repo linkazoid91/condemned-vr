@@ -27,6 +27,21 @@ The original F.E.A.R. VR copyright and permission notice are retained in
 commit IDs. Local dependency checkouts live under ignored `vendor-local/` and
 are never included in a release package.
 
+## Audio assets
+
+The following project-distributed sound effects were supplied through
+Freesound under the CC0 1.0 Universal public-domain dedication. Attribution is
+not required by CC0; the creator and canonical source are recorded here for
+provenance.
+
+| Repository asset | Original sound | Creator and source | License | Repository SHA-256 |
+|---|---|---|---|---|
+| `sounds/colt45_slide_pull.wav` | `Slide pull.wav` | Nanashi, [Freesound sound 104409](https://freesound.org/people/Nanashi/sounds/104409/) | [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/) | `DDC9920E64C99E0F75DAED6B5F3D6B3DDB13933C12A4E0631D77109ECAF1FC42` |
+| `sounds/colt45_slide_return.wav` | `Beretta M9 slide release` | vabadus, [Freesound sound 151067](https://freesound.org/people/vabadus/sounds/151067/) | [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/) | `028A7976EBC5B629F944C2AF3126296E4CDC19512DE9F09829D41209CEF7485E` |
+
+The repository filenames describe their use by Condemned VR; they do not
+claim that the original recordings were made from the in-game Colt model.
+
 ## Reference-only projects
 
 - [EchoPatch](https://github.com/Wemino/EchoPatch), GPL-3.0: its description

@@ -224,6 +224,10 @@ $moduleSources = [ordered]@{
         (Join-Path $InstallDir 'bin\x86\GameClient.dll')
     'condemnedvr-defaults.ini' =
         (Join-Path $InstallDir 'bin\x86\condemnedvr-defaults.ini')
+    'sounds\colt45_slide_pull.wav' =
+        (Join-Path $InstallDir 'bin\x86\sounds\colt45_slide_pull.wav')
+    'sounds\colt45_slide_return.wav' =
+        (Join-Path $InstallDir 'bin\x86\sounds\colt45_slide_return.wav')
     'GameOrig.dll' =
         (Join-Path $retail.RetailRoot 'Game\GameClient.dll')
     'condemnedvr-d3d9.dll' =
@@ -234,7 +238,8 @@ $allowedModuleNames = @(
     'condemnedvr-defaults.ini',
     'GameOrig.dll',
     'condemnedvr-d3d9.dll',
-    'condemnedvr-loader.log')
+    'condemnedvr-loader.log',
+    'sounds')
 foreach ($existing in @(
         Get-ChildItem -LiteralPath $moduleDirectory -Force
     )) {
@@ -250,6 +255,8 @@ foreach ($name in $moduleSources.Keys) {
         throw ('Required install input is missing: {0}' -f $source)
     }
     $destination = Join-Path $moduleDirectory $name
+    New-Item -ItemType Directory -Force -Path (
+        Split-Path -Parent $destination) | Out-Null
     Copy-Item -LiteralPath $source -Destination $destination -Force
     $sourceHash = Get-FileSha256 $source
     $destinationHash = Get-FileSha256 $destination

@@ -24,6 +24,8 @@ constexpr unsigned int kColliderSettingsFormatVersion = 1U;
 constexpr unsigned int kEmptyRightHandAlignmentFormatVersion = 1U;
 constexpr unsigned int kGripSettingsFormatVersion = 1U;
 constexpr unsigned int kMagazineSocketSettingsFormatVersion = 1U;
+constexpr unsigned int kSlideGrabSettingsFormatVersion = 2U;
+constexpr unsigned int kLegacySlideGrabSettingsFormatVersion = 1U;
 constexpr unsigned int kRightHandIkSettingsFormatVersion = 1U;
 constexpr unsigned int kArmIkTuningFormatVersion = 2U;
 constexpr unsigned int kDebugDrawSettingsFormatVersion = 2U;
@@ -1040,6 +1042,223 @@ WeaponSettingsStoreResult SaveMagazineInsertionSocketSettings(
     }
     return WritePrivateProfileStringW(
                section, L"magazine_socket", value, path)
+        ? WeaponSettingsStoreResult::Ok
+        : WeaponSettingsStoreResult::WriteFailed;
+}
+
+WeaponSettingsStoreResult LoadSlideGrabRailSettings(
+    std::int32_t weaponIndex,
+    const char* expectedWeaponName,
+    SlideGrabRailSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !MagazineSocketWeaponNameIsValid(expectedWeaponName)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t section[32]{};
+    if (!FormatWeaponSection(weaponIndex, section)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    wchar_t value[1024]{};
+    const WeaponSettingsStoreResult readResult = ReadSettingsValue(
+        section, L"slide_grab_rail", value, std::size(value));
+    if (readResult != WeaponSettingsStoreResult::Ok) {
+        return readResult;
+    }
+
+    unsigned int version = 0U;
+    unsigned int configured = 0U;
+    unsigned int activation = static_cast<unsigned int>(
+        SlideGrabActivationInput::Either);
+    wchar_t storedWeaponName[kMagazineSocketWeaponNameCapacity]{};
+    wchar_t storedNodeName[kSlideNodeNameCapacity]{};
+    wchar_t trailing[2]{};
+    SlideGrabRailSettings loaded{};
+    const wchar_t* const currentFormat =
+        L"%u,%63[^,],%u,%31[^,],"
+        L"%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,"
+        L"%f,%f,%f,%f,%f,%f,%f,"
+        L"%f,%f,%f,%f,%f,%f,%f,%f,%u %1s";
+    int fields = swscanf_s(
+        value, currentFormat,
+        &version, storedWeaponName,
+        static_cast<unsigned int>(std::size(storedWeaponName)),
+        &configured, storedNodeName,
+        static_cast<unsigned int>(std::size(storedNodeName)),
+        &loaded.grabVolumeModelLocal.positionUnits.x,
+        &loaded.grabVolumeModelLocal.positionUnits.y,
+        &loaded.grabVolumeModelLocal.positionUnits.z,
+        &loaded.grabVolumeModelLocal.rotation.x,
+        &loaded.grabVolumeModelLocal.rotation.y,
+        &loaded.grabVolumeModelLocal.rotation.z,
+        &loaded.grabVolumeModelLocal.rotation.w,
+        &loaded.halfExtentsUnits.x,
+        &loaded.halfExtentsUnits.y,
+        &loaded.halfExtentsUnits.z,
+        &loaded.handPoseModelLocal.positionUnits.x,
+        &loaded.handPoseModelLocal.positionUnits.y,
+        &loaded.handPoseModelLocal.positionUnits.z,
+        &loaded.handPoseModelLocal.rotation.x,
+        &loaded.handPoseModelLocal.rotation.y,
+        &loaded.handPoseModelLocal.rotation.z,
+        &loaded.handPoseModelLocal.rotation.w,
+        &loaded.closedPositionUnits.x,
+        &loaded.closedPositionUnits.y,
+        &loaded.closedPositionUnits.z,
+        &loaded.closedToRearAxis.x,
+        &loaded.closedToRearAxis.y,
+        &loaded.closedToRearAxis.z,
+        &loaded.maximumTravelUnits,
+        &loaded.rearThresholdUnits,
+        &activation, trailing,
+        static_cast<unsigned int>(std::size(trailing)));
+    if (fields != 30 || version != kSlideGrabSettingsFormatVersion) {
+        version = 0U;
+        configured = 0U;
+        activation = static_cast<unsigned int>(
+            SlideGrabActivationInput::Either);
+        storedWeaponName[0] = L'\0';
+        storedNodeName[0] = L'\0';
+        loaded = {};
+        fields = swscanf_s(
+            value,
+            L"%u,%63[^,],%u,%31[^,],"
+            L"%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,"
+            L"%f,%f,%f,%f,%f,%f,%f,"
+            L"%f,%f,%f,%f,%f,%f,%f,%f %1s",
+            &version, storedWeaponName,
+            static_cast<unsigned int>(std::size(storedWeaponName)),
+            &configured, storedNodeName,
+            static_cast<unsigned int>(std::size(storedNodeName)),
+            &loaded.grabVolumeModelLocal.positionUnits.x,
+            &loaded.grabVolumeModelLocal.positionUnits.y,
+            &loaded.grabVolumeModelLocal.positionUnits.z,
+            &loaded.grabVolumeModelLocal.rotation.x,
+            &loaded.grabVolumeModelLocal.rotation.y,
+            &loaded.grabVolumeModelLocal.rotation.z,
+            &loaded.grabVolumeModelLocal.rotation.w,
+            &loaded.halfExtentsUnits.x,
+            &loaded.halfExtentsUnits.y,
+            &loaded.halfExtentsUnits.z,
+            &loaded.handPoseModelLocal.positionUnits.x,
+            &loaded.handPoseModelLocal.positionUnits.y,
+            &loaded.handPoseModelLocal.positionUnits.z,
+            &loaded.handPoseModelLocal.rotation.x,
+            &loaded.handPoseModelLocal.rotation.y,
+            &loaded.handPoseModelLocal.rotation.z,
+            &loaded.handPoseModelLocal.rotation.w,
+            &loaded.closedPositionUnits.x,
+            &loaded.closedPositionUnits.y,
+            &loaded.closedPositionUnits.z,
+            &loaded.closedToRearAxis.x,
+            &loaded.closedToRearAxis.y,
+            &loaded.closedToRearAxis.z,
+            &loaded.maximumTravelUnits,
+            &loaded.rearThresholdUnits,
+            trailing,
+            static_cast<unsigned int>(std::size(trailing)));
+        if (fields != 29 ||
+            version != kLegacySlideGrabSettingsFormatVersion) {
+            return WeaponSettingsStoreResult::ParseFailed;
+        }
+    }
+    if (configured > 1U || activation >
+            static_cast<unsigned int>(SlideGrabActivationInput::Either)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    if (!MagazineSocketWeaponNameMatches(
+            storedWeaponName, expectedWeaponName)) {
+        return WeaponSettingsStoreResult::ProfileMismatch;
+    }
+    std::size_t nodeIndex = 0U;
+    for (; nodeIndex + 1U < std::size(loaded.nodeName) &&
+           storedNodeName[nodeIndex] != L'\0'; ++nodeIndex) {
+        if (storedNodeName[nodeIndex] > 0x7FU) {
+            return WeaponSettingsStoreResult::ParseFailed;
+        }
+        loaded.nodeName[nodeIndex] =
+            static_cast<char>(storedNodeName[nodeIndex]);
+    }
+    loaded.nodeName[nodeIndex] = '\0';
+    loaded.configured = configured != 0U;
+    loaded.activationInput =
+        static_cast<SlideGrabActivationInput>(activation);
+    if (!SlideGrabRailSettingsAreValid(loaded)) {
+        return WeaponSettingsStoreResult::ParseFailed;
+    }
+    settings = loaded;
+    return WeaponSettingsStoreResult::Ok;
+}
+
+WeaponSettingsStoreResult SaveSlideGrabRailSettings(
+    std::int32_t weaponIndex,
+    const char* weaponName,
+    const SlideGrabRailSettings& settings) noexcept {
+    if (weaponIndex < 0 ||
+        !MagazineSocketWeaponNameIsValid(weaponName) ||
+        !SlideGrabRailSettingsAreValid(settings)) {
+        return WeaponSettingsStoreResult::InvalidArgument;
+    }
+    wchar_t path[MAX_PATH]{};
+    wchar_t section[32]{};
+    wchar_t storedWeaponName[kMagazineSocketWeaponNameCapacity]{};
+    wchar_t storedNodeName[kSlideNodeNameCapacity]{};
+    if (!ResolveWeaponSettingsPath(path) ||
+        !FormatWeaponSection(weaponIndex, section) ||
+        !CopyMagazineSocketWeaponNameToWide(
+            weaponName, storedWeaponName)) {
+        return WeaponSettingsStoreResult::PathUnavailable;
+    }
+    std::size_t nodeIndex = 0U;
+    for (; nodeIndex + 1U < std::size(storedNodeName) &&
+           settings.nodeName[nodeIndex] != '\0'; ++nodeIndex) {
+        storedNodeName[nodeIndex] =
+            static_cast<wchar_t>(
+                static_cast<unsigned char>(settings.nodeName[nodeIndex]));
+    }
+    storedNodeName[nodeIndex] = L'\0';
+    wchar_t value[1024]{};
+    const int length = swprintf_s(
+        value,
+        L"%u,%s,%u,%s,"
+        L"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+        L"%.9g,%.9g,%.9g,"
+        L"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+        L"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u",
+        kSlideGrabSettingsFormatVersion,
+        storedWeaponName, settings.configured ? 1U : 0U,
+        storedNodeName,
+        static_cast<double>(settings.grabVolumeModelLocal.positionUnits.x),
+        static_cast<double>(settings.grabVolumeModelLocal.positionUnits.y),
+        static_cast<double>(settings.grabVolumeModelLocal.positionUnits.z),
+        static_cast<double>(settings.grabVolumeModelLocal.rotation.x),
+        static_cast<double>(settings.grabVolumeModelLocal.rotation.y),
+        static_cast<double>(settings.grabVolumeModelLocal.rotation.z),
+        static_cast<double>(settings.grabVolumeModelLocal.rotation.w),
+        static_cast<double>(settings.halfExtentsUnits.x),
+        static_cast<double>(settings.halfExtentsUnits.y),
+        static_cast<double>(settings.halfExtentsUnits.z),
+        static_cast<double>(settings.handPoseModelLocal.positionUnits.x),
+        static_cast<double>(settings.handPoseModelLocal.positionUnits.y),
+        static_cast<double>(settings.handPoseModelLocal.positionUnits.z),
+        static_cast<double>(settings.handPoseModelLocal.rotation.x),
+        static_cast<double>(settings.handPoseModelLocal.rotation.y),
+        static_cast<double>(settings.handPoseModelLocal.rotation.z),
+        static_cast<double>(settings.handPoseModelLocal.rotation.w),
+        static_cast<double>(settings.closedPositionUnits.x),
+        static_cast<double>(settings.closedPositionUnits.y),
+        static_cast<double>(settings.closedPositionUnits.z),
+        static_cast<double>(settings.closedToRearAxis.x),
+        static_cast<double>(settings.closedToRearAxis.y),
+        static_cast<double>(settings.closedToRearAxis.z),
+        static_cast<double>(settings.maximumTravelUnits),
+        static_cast<double>(settings.rearThresholdUnits),
+        static_cast<unsigned int>(settings.activationInput));
+    if (length <= 0 ||
+        static_cast<std::size_t>(length) >= std::size(value)) {
+        return WeaponSettingsStoreResult::WriteFailed;
+    }
+    return WritePrivateProfileStringW(
+               section, L"slide_grab_rail", value, path)
         ? WeaponSettingsStoreResult::Ok
         : WeaponSettingsStoreResult::WriteFailed;
 }

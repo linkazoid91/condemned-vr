@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <mmsystem.h>
 
 #include "renderer_probe.h"
 
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 
 #include <MinHook.h>
 
@@ -25,6 +27,7 @@
 #include "condemned_controller_input.h"
 #include "condemned_physical_melee.h"
 #include "condemned_right_hand_ik.h"
+#include "condemned_slide_grab.h"
 #include "head_tracking_math.h"
 #include "protocol.h"
 #include "stereo_math.h"
@@ -335,6 +338,43 @@ MagazineSocketAuthoringRuntimeState
 std::uint64_t g_liveMagazineSocketCommandLastRevision = 0U;
 volatile LONG g_magazineSocketAuthoringGizmoLogged = 0;
 volatile LONG g_magazineSocketAuthoringGizmoFailureLogged = 0;
+
+InteractionAuthoringPrimitive g_authoringPrimitive =
+    InteractionAuthoringPrimitive::MagazineInsertSocket;
+
+struct SlideGrabAuthoringRuntimeState {
+    SlideGrabEditorState editor{};
+    PhysicalMeleeRigidTransform modelWorld{};
+    PhysicalMeleeRigidTransform cursorModelLocal{};
+    WeaponSettingsStoreResult lastLoadResult{
+        WeaponSettingsStoreResult::NotFound};
+    WeaponSettingsStoreResult lastSaveResult{
+        WeaponSettingsStoreResult::NotFound};
+    std::int32_t weaponIndex{-1};
+    std::uint64_t sourceGeneration{0U};
+    ULONGLONG visualTick{0U};
+    char weaponName[kMagazineSocketWeaponNameCapacity]{};
+    bool identityReady{false};
+    bool visualReady{false};
+    bool invalidRecord{false};
+};
+SRWLOCK g_slideGrabAuthoringLock = SRWLOCK_INIT;
+SlideGrabAuthoringRuntimeState g_slideGrabAuthoringState{};
+volatile LONG g_slideGrabAuthoringGizmoLogged = 0;
+volatile LONG g_slideGrabAuthoringGizmoFailureLogged = 0;
+SRWLOCK g_slideGrabRuntimeLock = SRWLOCK_INIT;
+SlideGrabStateMachine g_slideGrabStateMachine{};
+SlideGrabFrameResult g_slideGrabLastFrame{};
+SlideGrabSoundCueState g_slideGrabSoundCueState{};
+volatile LONG g_slideGrabCaptureGrip = 0;
+volatile LONG g_slideGrabCaptureTrigger = 0;
+
+struct LiveEquippedWeaponVisualSource {
+    std::int32_t weaponIndex{-1};
+    std::uint64_t sourceGeneration{0};
+    void* modelObject{nullptr};
+    bool live{false};
+};
 
 std::size_t g_rightHandIkCalibrationStepIndex = 2U;
 ToolMenuState g_toolMenuState{};
@@ -2294,6 +2334,558 @@ bool ApplyLiveMagazineSocketCommand(
     return true;
 }
 
+void LogSlideGrabAuthoring(
+    const char* event,
+    const char* action,
+    const SlideGrabAuthoringRuntimeState& state) noexcept {
+    if (g_passThroughLog == nullptr) return;
+    const SlideGrabRailSettings& settings = state.editor.current;
+    char detail[1024]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "pipeline=STATE->DECISION "
+        "action=%s weapon_index=%ld weapon_name=%s "
+        "source_generation=%llu node_name=%s "
+        "configured=%u dirty=%u valid=%u "
+        "activation=%s closed=(%.4f,%.4f,%.4f) "
+        "axis=(%.6f,%.6f,%.6f) max_travel=%.4f "
+        "rear_threshold=%.4f "
+        "load=%s save=%s engine_handoff=none "
+        "ammo_mutation=0 weapon_state_mutation=0 "
+        "retail_state_mutation=0 persisted_node_handle=0",
+        action != nullptr ? action : "unknown",
+        static_cast<long>(state.weaponIndex),
+        state.weaponName[0] != '\0' ? state.weaponName : "unknown",
+        static_cast<unsigned long long>(state.sourceGeneration),
+        settings.nodeName[0] != '\0' ? settings.nodeName : "unknown",
+        settings.configured ? 1U : 0U,
+        state.editor.dirty ? 1U : 0U,
+        SlideGrabRailSettingsAreValid(settings) ? 1U : 0U,
+        SlideGrabActivationInputName(settings.activationInput),
+        settings.closedPositionUnits.x,
+        settings.closedPositionUnits.y,
+        settings.closedPositionUnits.z,
+        settings.closedToRearAxis.x,
+        settings.closedToRearAxis.y,
+        settings.closedToRearAxis.z,
+        settings.maximumTravelUnits,
+        settings.rearThresholdUnits,
+        WeaponSettingsStoreResultName(state.lastLoadResult),
+        WeaponSettingsStoreResultName(state.lastSaveResult));
+    g_passThroughLog(event, detail);
+}
+
+bool EnsureSlideGrabAuthoringIdentity() noexcept {
+    ToolMenuMeleeTelemetry telemetry{};
+    std::int32_t weaponIndex = -1;
+    std::uint64_t sourceGeneration = 0U;
+    if (!ResolveMagazineSocketAuthoringIdentity(
+            telemetry, weaponIndex, sourceGeneration)) {
+        AcquireSRWLockExclusive(&g_slideGrabAuthoringLock);
+        g_slideGrabAuthoringState.visualReady = false;
+        ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+        return false;
+    }
+    AcquireSRWLockShared(&g_slideGrabAuthoringLock);
+    const bool alreadyBound =
+        g_slideGrabAuthoringState.weaponIndex == weaponIndex &&
+        g_slideGrabAuthoringState.sourceGeneration == sourceGeneration &&
+        std::strcmp(
+            g_slideGrabAuthoringState.weaponName,
+            telemetry.weaponName) == 0;
+    const bool alreadyReady =
+        g_slideGrabAuthoringState.identityReady;
+    ReleaseSRWLockShared(&g_slideGrabAuthoringLock);
+    if (alreadyBound) return alreadyReady;
+
+    SlideGrabRailSettings loaded{};
+    const WeaponSettingsStoreResult loadResult =
+        LoadSlideGrabRailSettings(
+            weaponIndex, telemetry.weaponName, loaded);
+    const bool coltSeedAvailable =
+        weaponIndex == kColtSlideGrabWeaponIndex &&
+        std::strcmp(
+            telemetry.weaponName,
+            kColtSlideGrabWeaponName) == 0;
+    const bool loadAccepted =
+        loadResult == WeaponSettingsStoreResult::Ok ||
+        (loadResult == WeaponSettingsStoreResult::NotFound &&
+         coltSeedAvailable);
+    if (loadResult == WeaponSettingsStoreResult::NotFound &&
+        coltSeedAvailable) {
+        loaded = ColtSlideGrabSeedSettings();
+    }
+    AcquireSRWLockExclusive(&g_slideGrabAuthoringLock);
+    g_slideGrabAuthoringState = {};
+    g_slideGrabAuthoringState.weaponIndex = weaponIndex;
+    g_slideGrabAuthoringState.sourceGeneration = sourceGeneration;
+    strcpy_s(
+        g_slideGrabAuthoringState.weaponName,
+        telemetry.weaponName);
+    g_slideGrabAuthoringState.lastLoadResult = loadResult;
+    g_slideGrabAuthoringState.identityReady = loadAccepted;
+    g_slideGrabAuthoringState.invalidRecord =
+        loadResult != WeaponSettingsStoreResult::Ok &&
+        loadResult != WeaponSettingsStoreResult::NotFound;
+    SetSlideGrabEditorValue(
+        g_slideGrabAuthoringState.editor, loaded, true);
+    const SlideGrabAuthoringRuntimeState logState =
+        g_slideGrabAuthoringState;
+    ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+    LogSlideGrabAuthoring(
+        loadAccepted
+            ? "m5_slide_grab_settings_loaded"
+            : "m5_slide_grab_settings_unavailable",
+        loadResult == WeaponSettingsStoreResult::Ok
+            ? "weapon_record"
+            : coltSeedAvailable ? "verified_colt_seed"
+                                : "fail_closed",
+        logState);
+    return loadAccepted;
+}
+
+SlideGrabAuthoringRuntimeState
+CopySlideGrabAuthoringState() noexcept {
+    AcquireSRWLockShared(&g_slideGrabAuthoringLock);
+    const SlideGrabAuthoringRuntimeState copy =
+        g_slideGrabAuthoringState;
+    ReleaseSRWLockShared(&g_slideGrabAuthoringLock);
+    return copy;
+}
+
+void UpdateSlideGrabAuthoringVisual(
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const PhysicalMeleeRigidTransform& modelWorld,
+    const PhysicalMeleeRigidTransform& cursorWorld,
+    bool posesFresh) noexcept {
+    if (!EnsureSlideGrabAuthoringIdentity()) return;
+    PhysicalMeleeRigidTransform cursorModelLocal{};
+    const bool visualReady = posesFresh &&
+        ResolveMagazineSocketCursorModelLocal(
+            modelWorld, cursorWorld, cursorModelLocal);
+    AcquireSRWLockExclusive(&g_slideGrabAuthoringLock);
+    if (g_slideGrabAuthoringState.weaponIndex != weaponIndex ||
+        g_slideGrabAuthoringState.sourceGeneration !=
+            sourceGeneration) {
+        g_slideGrabAuthoringState.visualReady = false;
+        ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+        return;
+    }
+    g_slideGrabAuthoringState.visualReady = visualReady;
+    if (visualReady) {
+        g_slideGrabAuthoringState.modelWorld = modelWorld;
+        g_slideGrabAuthoringState.cursorModelLocal =
+            cursorModelLocal;
+        g_slideGrabAuthoringState.visualTick =
+            GetTickCount64();
+    }
+    ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+}
+
+bool ApplyToolMenuSlideGrabAdjustment(
+    std::uint32_t row,
+    int delta,
+    bool activate) noexcept {
+    if (InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        !EnsureSlideGrabAuthoringIdentity()) return false;
+    AcquireSRWLockExclusive(&g_slideGrabAuthoringLock);
+    SlideGrabAuthoringRuntimeState& state =
+        g_slideGrabAuthoringState;
+    if (!state.identityReady) {
+        ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+        return false;
+    }
+    bool changed = false;
+    const char* action = "none";
+    if (row == 1U && (delta != 0 || activate)) {
+        CycleSlideGrabComponent(
+            state.editor, delta != 0 ? delta : 1);
+        changed = true;
+        action = "component_selected";
+    } else if (row == 2U && delta != 0) {
+        changed = AdjustSlideGrabComponent(state.editor, delta);
+        action = "component_adjusted_unsaved";
+    } else if (row == 3U && (delta != 0 || activate)) {
+        state.editor.coarse = !state.editor.coarse;
+        changed = true;
+        action = "movement_step_changed";
+    } else if (row == 4U && activate) {
+        const bool fresh = state.visualReady &&
+            GetTickCount64() - state.visualTick <=
+                kHeadAimFreshnessMilliseconds;
+        if (fresh) {
+            changed = CaptureSlideGrabFromController(
+                state.editor, state.cursorModelLocal);
+            action = "captured_grab_volume_and_hand_pose_unsaved";
+        }
+    } else if (row == 5U && activate) {
+        changed = UndoSlideGrabEdit(state.editor);
+        action = "undo";
+    } else if (row == 6U && activate) {
+        changed = ResetSlideGrabEdit(state.editor);
+        action = "reset_loaded_settings";
+    } else if (row == 7U && activate &&
+               state.editor.dirty &&
+               state.editor.current.configured &&
+               SlideGrabRailSettingsAreValid(
+                   state.editor.current)) {
+        state.lastSaveResult = SaveSlideGrabRailSettings(
+            state.weaponIndex, state.weaponName,
+            state.editor.current);
+        if (state.lastSaveResult ==
+            WeaponSettingsStoreResult::Ok) {
+            state.editor.baseline = state.editor.current;
+            state.editor.baselineAvailable = true;
+            state.editor.dirty = false;
+            state.editor.undoCount = 0U;
+            changed = true;
+            action = "saved_exact_weapon_record";
+        } else {
+            changed = true;
+            action = "save_failed_unsaved_retained";
+        }
+    }
+    const SlideGrabAuthoringRuntimeState logState = state;
+    ReleaseSRWLockExclusive(&g_slideGrabAuthoringLock);
+    if (changed) {
+        LogSlideGrabAuthoring(
+            "m5_slide_grab_authoring_changed",
+            action, logState);
+    }
+    return changed;
+}
+
+struct SlideGrabRuntimeOutput {
+    PhysicalMeleeRigidTransform handTargetWorld{};
+    SlideGrabFrameResult frame{};
+    bool handTargetReady{false};
+};
+
+void LogSlideGrabRuntimeTransition(
+    const SlideGrabAuthoringRuntimeState& authoring,
+    const SlideGrabFrameInput& input,
+    const SlideGrabFrameResult& result,
+    const SlideGrabRuntimeOutput& output,
+    bool nodeControlResult) noexcept {
+    if (g_passThroughLog == nullptr ||
+        (!result.stateChanged &&
+         !result.requestNodeControlAttach &&
+         !result.requestNodeControlDetach)) {
+        return;
+    }
+    char detail[1400]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "pipeline=INPUT->TRANSFORM->STATE->DECISION->ENGINE_HANDOFF->RESULT "
+        "weapon_index=%ld weapon_name=%s source_generation=%llu "
+        "node_name=%s node_resolution=%s controller=off_hand_left "
+        "activation_input=%s grip=%.3f trigger=%.3f "
+        "overlap=%u controller_model_local=(%.4f,%.4f,%.4f) "
+        "state=%u projected_travel=%.4f clamped_travel=%.4f "
+        "hand_target=(%.4f,%.4f,%.4f) "
+        "hand_target_basis=authored_grip_plus_left_ik_calibration "
+        "node_control_request=%s node_control_result=%s "
+        "detach_reason=%s retail_ownership_restored=%u "
+        "retail_attack_suppressed_grip=%u "
+        "retail_attack_suppressed_trigger=%u",
+        static_cast<long>(input.weaponIndex),
+        authoring.weaponName[0] != '\0'
+            ? authoring.weaponName : "unknown",
+        static_cast<unsigned long long>(input.sourceGeneration),
+        input.settings.nodeName,
+        input.nodeResolved ? "ok" : "failed",
+        SlideGrabActivationInputName(
+            input.settings.activationInput),
+        input.gripValue, input.triggerValue,
+        result.overlap ? 1U : 0U,
+        input.controllerModelLocal.x,
+        input.controllerModelLocal.y,
+        input.controllerModelLocal.z,
+        static_cast<unsigned int>(result.state),
+        result.projection.projectedTravelUnits,
+        result.projection.clampedTravelUnits,
+        output.handTargetWorld.positionUnits.x,
+        output.handTargetWorld.positionUnits.y,
+        output.handTargetWorld.positionUnits.z,
+        result.requestNodeControlAttach
+            ? "attach"
+            : result.requestNodeControlDetach
+                ? "detach" : "none",
+        nodeControlResult ? "ok" : "none_or_failed",
+        SlideGrabDetachReasonName(result.reason),
+        result.requestNodeControlDetach ? 1U : 0U,
+        result.captureGrip ? 1U : 0U,
+        result.captureTrigger ? 1U : 0U);
+    g_passThroughLog("m5_slide_grab_transition", detail);
+}
+
+bool ResolveSlideGrabSoundPath(
+    SlideGrabSoundCue cue,
+    wchar_t (&path)[MAX_PATH]) noexcept {
+    const wchar_t* relativePath = nullptr;
+    switch (cue) {
+    case SlideGrabSoundCue::Pull:
+        relativePath =
+            L"sounds\\colt45_slide_pull.wav";
+        break;
+    case SlideGrabSoundCue::Return:
+        relativePath =
+            L"sounds\\colt45_slide_return.wav";
+        break;
+    default:
+        return false;
+    }
+
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(
+                &ResolveSlideGrabSoundPath),
+            &module)) {
+        return false;
+    }
+    const DWORD length = GetModuleFileNameW(
+        module, path, MAX_PATH);
+    if (length == 0U || length >= MAX_PATH) {
+        return false;
+    }
+    wchar_t* const separator = wcsrchr(path, L'\\');
+    if (separator == nullptr) {
+        return false;
+    }
+    *(separator + 1) = L'\0';
+    if (wcscat_s(path, relativePath) != 0) {
+        return false;
+    }
+    const DWORD attributes = GetFileAttributesW(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U;
+}
+
+void ApplySlideGrabSoundCue(
+    const SlideGrabSoundCueResult& sound,
+    const SlideGrabAuthoringRuntimeState& authoring,
+    const SlideGrabFrameInput& input,
+    const SlideGrabFrameResult& frame,
+    bool retailOwnershipRestored) noexcept {
+    if (sound.cue == SlideGrabSoundCue::None &&
+        !sound.stopPlayback) {
+        return;
+    }
+
+    wchar_t path[MAX_PATH]{};
+    bool available = false;
+    BOOL handoffResult = FALSE;
+    const char* asset = "none";
+    if (sound.stopPlayback) {
+        handoffResult = PlaySoundW(nullptr, nullptr, 0U);
+    } else {
+        available = ResolveSlideGrabSoundPath(
+            sound.cue, path);
+        asset = sound.cue == SlideGrabSoundCue::Pull
+            ? "sounds/colt45_slide_pull.wav"
+            : "sounds/colt45_slide_return.wav";
+        if (available) {
+            handoffResult = PlaySoundW(
+                path, nullptr,
+                SND_ASYNC | SND_FILENAME | SND_NODEFAULT);
+        }
+    }
+
+    if (g_passThroughLog != nullptr) {
+        char detail[900]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "pipeline=STATE->DECISION->WINDOWS_AUDIO_HANDOFF->RESULT "
+            "weapon_index=%ld weapon_name=%s source_generation=%llu "
+            "cue=%s action=%s pull_cycle=%u travel=%.4f "
+            "rear_threshold=%.4f asset=%s "
+            "asset_available=%u handoff_request=%u handoff_result=%u "
+            "detach_reason=%s retail_ownership_restored=%u",
+            static_cast<long>(input.weaponIndex),
+            authoring.weaponName[0] != '\0'
+                ? authoring.weaponName : "unknown",
+            static_cast<unsigned long long>(
+                input.sourceGeneration),
+            SlideGrabSoundCueName(sound.cue),
+            sound.stopPlayback ? "stop" : "play_once",
+            static_cast<unsigned int>(sound.pullCycle),
+            sound.travelUnits,
+            input.settings.rearThresholdUnits, asset,
+            available ? 1U : 0U,
+            (!sound.stopPlayback && available) ||
+                    sound.stopPlayback
+                ? 1U : 0U,
+            handoffResult ? 1U : 0U,
+            SlideGrabDetachReasonName(frame.reason),
+            retailOwnershipRestored ? 1U : 0U);
+        g_passThroughLog("m5_slide_grab_sound", detail);
+    }
+}
+
+SlideGrabRuntimeOutput UpdateSlideGrabRuntime(
+    const LiveEquippedWeaponVisualSource& source,
+    const PhysicalMeleeRigidTransform& modelWorld,
+    const PhysicalMeleeRigidTransform& offHandWorld,
+    const FearVrInputState& controllerInput,
+    bool modelWorldReady,
+    bool offHandTrackingFresh) noexcept {
+    SlideGrabRuntimeOutput output{};
+    const bool authoringReady =
+        EnsureSlideGrabAuthoringIdentity();
+    const SlideGrabAuthoringRuntimeState authoring =
+        CopySlideGrabAuthoringState();
+    const SlideGrabRailSettings settings =
+        authoring.editor.dirty &&
+            authoring.editor.baselineAvailable
+        ? authoring.editor.baseline
+        : authoring.editor.current;
+    PhysicalMeleeRigidTransform controllerModelLocal{};
+    const bool transformReady = modelWorldReady &&
+        offHandTrackingFresh &&
+        ResolveMagazineSocketCursorModelLocal(
+            modelWorld, offHandWorld,
+            controllerModelLocal);
+    SlideGrabState priorState = SlideGrabState::Idle;
+    AcquireSRWLockShared(&g_slideGrabRuntimeLock);
+    priorState = g_slideGrabStateMachine.state;
+    ReleaseSRWLockShared(&g_slideGrabRuntimeLock);
+    const bool possibleCandidate =
+        transformReady && settings.configured &&
+        SlideGrabRailSettingsAreValid(settings) &&
+        SlideGrabVolumeContains(
+            settings, controllerModelLocal.positionUnits);
+    const bool sourceMatches =
+        authoringReady && source.live &&
+        authoring.weaponIndex == source.weaponIndex &&
+        authoring.sourceGeneration == source.sourceGeneration &&
+        authoring.weaponIndex == kColtSlideGrabWeaponIndex &&
+        std::strcmp(
+            authoring.weaponName,
+            kColtSlideGrabWeaponName) == 0;
+    bool nodeResolved = false;
+    if (sourceMatches && (possibleCandidate ||
+        priorState == SlideGrabState::Candidate ||
+        priorState == SlideGrabState::Attached)) {
+        nodeResolved = PrepareSlideNodeControlSource(
+            source.modelObject, source.weaponIndex,
+            source.sourceGeneration, settings);
+    }
+    const SlideNodeControlStatus nodeStatus =
+        ReadSlideNodeControlStatus();
+    if (nodeStatus.sourceResolved &&
+        nodeStatus.weaponIndex == source.weaponIndex &&
+        nodeStatus.sourceGeneration == source.sourceGeneration) {
+        nodeResolved = true;
+    }
+    SlideGrabFrameInput input{};
+    input.settings = settings;
+    input.controllerModelLocal =
+        controllerModelLocal.positionUnits;
+    input.weaponIndex = source.weaponIndex;
+    input.sourceGeneration = source.sourceGeneration;
+    input.trackingFresh = offHandTrackingFresh &&
+        fearvr::IsInputStateUsable(controllerInput, true);
+    input.focused = GameOwnsForegroundWindow() &&
+        (controllerInput.flags & FEARVR_IF_FOCUSED) != 0U;
+    input.gamePlaying = BindingInputAllowsSlideGrab();
+    input.exactWeaponIdentity = sourceMatches;
+    input.modelAvailable = source.live &&
+        source.modelObject != nullptr;
+    input.nodeResolved = nodeResolved;
+    input.transformValid = transformReady;
+    input.toolMenuOpen = VrToolMenuIsOpen();
+    input.retailAnimationIncompatible =
+        nodeStatus.retailAnimationIncompatible;
+    input.gripValue = controllerInput.squeeze[
+        FEARVR_HAND_LEFT];
+    input.triggerValue = controllerInput.trigger[
+        FEARVR_HAND_LEFT];
+
+    AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+    output.frame = UpdateSlideGrabStateMachine(
+        g_slideGrabStateMachine, input);
+    ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+    bool nodeControlResult = false;
+    if (output.frame.requestNodeControlAttach &&
+        output.frame.projection.valid) {
+        nodeControlResult = BeginSlideNodeControl(
+            source.modelObject, source.weaponIndex,
+            source.sourceGeneration, settings,
+            output.frame.projection.slidePositionModelLocal,
+            controllerInput.sampleId);
+        if (!nodeControlResult) {
+            AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+            RejectSlideGrabNodeControl(
+                g_slideGrabStateMachine, output.frame);
+            ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+        }
+    }
+    if (output.frame.state == SlideGrabState::Attached &&
+        output.frame.projection.valid) {
+        nodeControlResult = UpdateSlideNodeControlTarget(
+            source.modelObject, source.sourceGeneration,
+            output.frame.projection.slidePositionModelLocal,
+            output.frame.projection.projectedTravelUnits,
+            output.frame.projection.clampedTravelUnits,
+            controllerInput.sampleId);
+        if (!nodeControlResult) {
+            AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+            RejectSlideGrabNodeControl(
+                g_slideGrabStateMachine, output.frame);
+            ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+        } else {
+            PhysicalMeleeRigidTransform authoredGripWorld{};
+            if (ComposePhysicalMeleeRigidTransforms(
+                    modelWorld,
+                    output.frame.projection.handTargetModelLocal,
+                    authoredGripWorld)) {
+                // AUTHOR captures the physical OpenXR left-grip pose. Feed
+                // that pose through the same controller-local wrist
+                // correction as the ordinary off-hand path before publishing
+                // an IK target; bypassing it makes a correctly captured grip
+                // look like an incorrectly rotated/translated hand.
+                output.handTargetWorld =
+                    ResolveToolMenuLeftHandIkTarget(
+                        authoredGripWorld, ReadArmIkTuning());
+                output.handTargetReady =
+                    PhysicalMeleeRigidTransformIsValid(
+                        output.handTargetWorld);
+            }
+        }
+    }
+    if (output.frame.requestNodeControlDetach ||
+        output.frame.state == SlideGrabState::Released) {
+        nodeControlResult = EndSlideNodeControl(
+            SlideGrabDetachReasonName(output.frame.reason));
+        output.handTargetReady = false;
+    }
+    SlideGrabSoundCueResult sound{};
+    AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+    sound = UpdateSlideGrabSoundCueState(
+        g_slideGrabSoundCueState, output.frame,
+        input.settings.rearThresholdUnits,
+        nodeControlResult);
+    ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+    ApplySlideGrabSoundCue(
+        sound, authoring, input, output.frame,
+        output.frame.requestNodeControlDetach &&
+            nodeControlResult);
+    InterlockedExchange(
+        &g_slideGrabCaptureGrip,
+        output.frame.captureGrip ? 1 : 0);
+    InterlockedExchange(
+        &g_slideGrabCaptureTrigger,
+        output.frame.captureTrigger ? 1 : 0);
+    LogSlideGrabRuntimeTransition(
+        authoring, input, output.frame,
+        output, nodeControlResult);
+    return output;
+}
+
 bool SameFileTime(const FILETIME& left, const FILETIME& right) noexcept {
     return left.dwLowDateTime == right.dwLowDateTime &&
         left.dwHighDateTime == right.dwHighDateTime;
@@ -3732,6 +4324,8 @@ void UpdateToolMenuCalibrationVisibility() noexcept {
 }
 
 void SetToolMenuOpen(bool open) noexcept {
+    const bool wasOpen = InterlockedCompareExchange(
+        &g_toolMenuOpen, 0, 0) != 0;
     g_toolMenuState.open = open;
     InterlockedExchange(&g_toolMenuOpen, open ? 1 : 0);
     if (!open) {
@@ -3745,6 +4339,22 @@ void SetToolMenuOpen(bool open) noexcept {
         g_magazineSocketAuthoringState.preview = {};
         ReleaseSRWLockExclusive(
             &g_magazineSocketAuthoringLock);
+        AcquireSRWLockExclusive(
+            &g_slideGrabAuthoringLock);
+        g_slideGrabAuthoringState.visualReady = false;
+        g_slideGrabAuthoringState.visualTick = 0U;
+        ReleaseSRWLockExclusive(
+            &g_slideGrabAuthoringLock);
+    }
+    if (wasOpen != open) {
+        EndSlideNodeControl(
+            open ? "tool_menu_opened" : "tool_menu_closed");
+        AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+        g_slideGrabStateMachine = {};
+        g_slideGrabLastFrame = {};
+        ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+        InterlockedExchange(&g_slideGrabCaptureGrip, 0);
+        InterlockedExchange(&g_slideGrabCaptureTrigger, 0);
     }
     UpdateToolMenuCalibrationVisibility();
 }
@@ -4836,9 +5446,27 @@ void HandleVrToolMenuControls() noexcept {
             transition.activate, telemetry.weaponIndex,
             g_toolMenuState.tab == ToolMenuTab::BlockCollider);
     } else if (g_toolMenuState.tab == ToolMenuTab::Author) {
-        valueChanged = ApplyToolMenuMagazineSocketAdjustment(
-            g_toolMenuState.row, transition.valueDelta,
-            transition.activate);
+        if (g_toolMenuState.row == 0U &&
+            (transition.valueDelta != 0 ||
+             transition.activate)) {
+            CycleInteractionAuthoringPrimitive(
+                g_authoringPrimitive,
+                transition.valueDelta != 0
+                    ? transition.valueDelta : 1);
+            valueChanged = true;
+        } else if (g_authoringPrimitive ==
+                   InteractionAuthoringPrimitive::MagazineInsertSocket) {
+            valueChanged =
+                ApplyToolMenuMagazineSocketAdjustment(
+                    g_toolMenuState.row,
+                    transition.valueDelta,
+                    transition.activate);
+        } else {
+            valueChanged = ApplyToolMenuSlideGrabAdjustment(
+                g_toolMenuState.row,
+                transition.valueDelta,
+                transition.activate);
+        }
     } else if (
         g_toolMenuState.tab == ToolMenuTab::PlayerCollider) {
         valueChanged = ApplyToolMenuPlayerColliderAdjustment(
@@ -5415,6 +6043,119 @@ void DrawVrToolMenuOverlay(
         Row(9U, "RESET COLLIDER DEFAULTS");
         break;
     case ToolMenuTab::Author: {
+        if (g_authoringPrimitive ==
+            InteractionAuthoringPrimitive::SlideGrabRail) {
+            const bool identityReady =
+                EnsureSlideGrabAuthoringIdentity();
+            const SlideGrabAuthoringRuntimeState authoring =
+                CopySlideGrabAuthoringState();
+            Row(0U, "PRIMITIVE                     SLIDE GRAB RAIL");
+            if (!identityReady) {
+                AddToolMenuRow(
+                    overlay, 1U,
+                    authoring.invalidRecord
+                        ? "INVALID SAVED SLIDE RECORD - FAIL CLOSED"
+                        : "SLIDE RAIL UNAVAILABLE FOR THIS EXACT WEAPON",
+                    false, 0xFFFF6060U);
+                AddToolMenuRow(
+                    overlay, 2U,
+                    "COLT INDEX 76 HAS A VERIFIED UNSAVED RAIL SEED",
+                    false, 0xFF95A5B2U);
+                AddToolMenuRow(
+                    overlay, 3U,
+                    "NO NODE HANDLE, MODEL POINTER OR PIVOT CONTACT IS INFERRED",
+                    false, 0xFF76DBF4U);
+                break;
+            }
+            const SlideGrabRailSettings& slide =
+                authoring.editor.current;
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "COMPONENT                     %s",
+                SlideGrabComponentName(
+                    authoring.editor.component));
+            Row(1U, rowText);
+            if (authoring.editor.component ==
+                SlideGrabComponent::Activation) {
+                std::snprintf(
+                    rowText, sizeof(rowText),
+                    "VALUE                         %s",
+                    SlideGrabActivationInputName(
+                        slide.activationInput));
+            } else {
+                std::snprintf(
+                    rowText, sizeof(rowText),
+                    "VALUE                         %.4F %s",
+                    SlideGrabComponentValue(
+                        slide, authoring.editor.component),
+                    SlideGrabComponentUsesDegrees(
+                        authoring.editor.component)
+                        ? "DEG" : "CM");
+            }
+            Row(2U, rowText);
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "MOVEMENT                      %s  %.2F CM / %.2F DEG",
+                authoring.editor.coarse ? "COARSE" : "FINE",
+                authoring.editor.coarse ? 1.0F : 0.1F,
+                authoring.editor.coarse ? 5.0F : 0.25F);
+            Row(3U, rowText);
+            Row(4U, "CAPTURE GRAB BOX + HAND POSE FROM LEFT GRIP");
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "UNDO                          %s  (%zu)",
+                authoring.editor.undoCount != 0U
+                    ? "AVAILABLE" : "EMPTY",
+                authoring.editor.undoCount);
+            Row(5U, rowText);
+            Row(6U, "RESET TO LOADED SLIDE SETTINGS");
+            const char* const slideStatus =
+                !SlideGrabRailSettingsAreValid(slide)
+                    ? "INVALID - SAVE DISABLED"
+                    : !slide.configured
+                        ? "NOT CONFIGURED - CAPTURE FIRST"
+                        : authoring.editor.dirty
+                            ? "UNSAVED - ACTIVATE TO SAVE"
+                            : "CONFIGURED / SAVED";
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "SAVE EXACT WEAPON RECORD       %s",
+                slideStatus);
+            Row(7U, rowText);
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "NODE %s  INPUT %s  LOAD %s  SAVE %s",
+                slide.nodeName,
+                SlideGrabActivationInputName(
+                    slide.activationInput),
+                WeaponSettingsStoreResultName(
+                    authoring.lastLoadResult),
+                WeaponSettingsStoreResultName(
+                    authoring.lastSaveResult));
+            AddToolMenuRow(
+                overlay, 8U, rowText, false,
+                !SlideGrabRailSettingsAreValid(slide)
+                    ? 0xFFFF6060U
+                    : slide.configured ? 0xFF50FF80U
+                                       : 0xFFFFB060U);
+            std::snprintf(
+                rowText, sizeof(rowText),
+                "RAIL %.4F CM  REAR %.3F  GRAB %s  CONTROL %s",
+                slide.maximumTravelUnits,
+                slide.rearThresholdUnits,
+                authoring.visualReady
+                    ? (SlideGrabVolumeContains(
+                           slide,
+                           authoring.cursorModelLocal.positionUnits)
+                           ? "OVERLAP" : "OUTSIDE")
+                    : "TRACKING WAIT",
+                slide.configured
+                    ? "GUARDED"
+                    : "DISABLED");
+            AddToolMenuRow(
+                overlay, 9U, rowText, false, 0xFF76DBF4U);
+            break;
+        }
         const bool identityReady =
             EnsureMagazineSocketAuthoringIdentity();
         const MagazineSocketAuthoringRuntimeState authoring =
@@ -5476,56 +6217,15 @@ void DrawVrToolMenuOverlay(
         Row(6U, "RESET TO LAST LOADED RECORD");
         std::snprintf(
             rowText, sizeof(rowText),
-            "PERSIST LOAD %s  SAVE %s  REV %llu  %s",
+            "MAG %s  AUTO-SAVE  LOAD %s  SAVE %s",
+            socket.configured ? "CONFIGURED" : "NOT CONFIGURED",
             WeaponSettingsStoreResultName(
                 authoring.lastLoadResult),
             WeaponSettingsStoreResultName(
-                authoring.lastSaveResult),
-            static_cast<unsigned long long>(
-                authoring.revision),
-            socket.configured ? "CONFIGURED" : "NOT CONFIGURED");
+                authoring.lastSaveResult));
         AddToolMenuRow(
             overlay, 7U, rowText, false,
             socket.configured ? 0xFF50FF80U : 0xFFFFB060U);
-        std::snprintf(
-            rowText, sizeof(rowText),
-            "POSE CM %.2F %.2F %.2F   DEG %.1F %.1F %.1F",
-            socket.positionUnits.x,
-            socket.positionUnits.y,
-            socket.positionUnits.z,
-            socket.rotationDegrees.x,
-            socket.rotationDegrees.y,
-            socket.rotationDegrees.z);
-        AddToolMenuRow(overlay, 8U, rowText, false);
-        std::snprintf(
-            rowText, sizeof(rowText),
-            "BOX HALF CM %.2F %.2F %.2F   RAIL %.2F CM",
-            socket.halfExtentsUnits.x,
-            socket.halfExtentsUnits.y,
-            socket.halfExtentsUnits.z,
-            socket.approachLengthUnits);
-        AddToolMenuRow(overlay, 9U, rowText, false);
-        std::snprintf(
-            rowText, sizeof(rowText),
-            "GHOST %s  RAIL %.2F/%.2F CM  ERR %.2F CM %.1F DEG",
-            !authoring.visualReady ? "TRACKING WAIT"
-                : authoring.preview.seated ? "SEATED"
-                : authoring.preview.snapped ? "RAIL SNAP"
-                : "FREE",
-            authoring.preview.railProgress *
-                socket.approachLengthUnits,
-            socket.approachLengthUnits,
-            authoring.preview.lateralErrorUnits,
-            authoring.preview.angleErrorDegrees);
-        AddToolMenuRow(
-            overlay, 10U, rowText, false,
-            authoring.preview.seated ? 0xFF50FF80U
-                : authoring.preview.snapped ? 0xFF70E8FFU
-                                            : 0xFF95A5B2U);
-        AddToolMenuRow(
-            overlay, 11U,
-            "PHASE 1: VISUAL + MOD SETTINGS ONLY; RETAIL STATE READ-ONLY",
-            false, 0xFF76DBF4U);
         break;
     }
     case ToolMenuTab::PlayerCollider: {
@@ -6170,7 +6870,9 @@ bool DrawMagazineSocketAuthoringGizmo(
         InterlockedCompareExchange(
             &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
         InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) == 0 ||
-        g_toolMenuState.tab != ToolMenuTab::Author) {
+        g_toolMenuState.tab != ToolMenuTab::Author ||
+        g_authoringPrimitive !=
+            InteractionAuthoringPrimitive::MagazineInsertSocket) {
         return false;
     }
     const MagazineSocketAuthoringRuntimeState state =
@@ -6216,6 +6918,66 @@ bool DrawMagazineSocketAuthoringGizmo(
         LogMagazineSocketAuthoring(
             "m5_magazine_socket_authoring_gizmo_failed",
             "projection_or_bridge_draw_rejected", state);
+    }
+    return drawn;
+}
+
+bool DrawSlideGrabAuthoringGizmo(
+    const RigidTransformAbi& eyeCamera,
+    float horizontalFovRadians,
+    float verticalFovRadians) noexcept {
+    if (g_drawOverlayLines == nullptr ||
+        InterlockedCompareExchange(
+            &g_weaponGripCalibrationEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_toolMenuOpen, 0, 0) == 0 ||
+        g_toolMenuState.tab != ToolMenuTab::Author ||
+        g_authoringPrimitive !=
+            InteractionAuthoringPrimitive::SlideGrabRail) {
+        return false;
+    }
+    const SlideGrabAuthoringRuntimeState state =
+        CopySlideGrabAuthoringState();
+    if (!state.identityReady || !state.visualReady ||
+        GetTickCount64() - state.visualTick >
+            kHeadAimFreshnessMilliseconds) {
+        return false;
+    }
+    const WeaponGripCalibrationGizmo gizmo =
+        BuildSlideGrabAuthoringGizmo(
+            state.editor.current, state.modelWorld,
+            &state.cursorModelLocal);
+    const WeaponGripCalibrationGizmoCamera camera{
+        {eyeCamera.position[0], eyeCamera.position[1],
+         eyeCamera.position[2]},
+        {eyeCamera.rotation[0], eyeCamera.rotation[1],
+         eyeCamera.rotation[2], eyeCamera.rotation[3]},
+        horizontalFovRadians, verticalFovRadians};
+    FearVrOverlayLineVertex projected[
+        kWeaponGripCalibrationGizmoMaximumLines * 2]{};
+    const std::size_t vertexCount =
+        ProjectWeaponGripCalibrationGizmoToNdc(
+            gizmo, camera, projected,
+            sizeof(projected) / sizeof(projected[0]));
+    const bool drawn = vertexCount != 0U &&
+        g_drawOverlayLines(
+            projected,
+            static_cast<std::uint32_t>(vertexCount)) != FALSE;
+    if (drawn && InterlockedCompareExchange(
+                     &g_slideGrabAuthoringGizmoLogged,
+                     1, 0) == 0 &&
+        g_passThroughLog != nullptr) {
+        LogSlideGrabAuthoring(
+            "m5_slide_grab_authoring_gizmo_active",
+            "grab_box_rail_endpoints_hand_pose",
+            state);
+    } else if (!drawn && InterlockedCompareExchange(
+                            &g_slideGrabAuthoringGizmoFailureLogged,
+                            1, 0) == 0 &&
+               g_passThroughLog != nullptr) {
+        LogSlideGrabAuthoring(
+            "m5_slide_grab_authoring_gizmo_failed",
+            "projection_or_bridge_draw_rejected",
+            state);
     }
     return drawn;
 }
@@ -7042,12 +7804,6 @@ void ClearPhysicalMeleeVisualSource() noexcept {
     ResetPhysicalMeleeSecondaryGrip(true);
 }
 
-struct LiveEquippedWeaponVisualSource {
-    std::int32_t weaponIndex{-1};
-    std::uint64_t sourceGeneration{0};
-    bool live{false};
-};
-
 LiveEquippedWeaponVisualSource
 ReadLiveEquippedWeaponVisualSource() noexcept {
     LiveEquippedWeaponVisualSource source{};
@@ -7061,6 +7817,7 @@ ReadLiveEquippedWeaponVisualSource() noexcept {
     source.weaponIndex = g_physicalMeleeVisualWeaponIndex;
     modelReference = g_physicalMeleeVisualModelReference;
     modelObject = g_physicalMeleeVisualModel;
+    source.modelObject = modelObject;
     source.sourceGeneration =
         g_physicalMeleeVisualSourceGeneration;
     ReleaseSRWLockShared(&g_physicalMeleeVisualLock);
@@ -7071,6 +7828,7 @@ ReadLiveEquippedWeaponVisualSource() noexcept {
     if (!anySource) {
         source.weaponIndex = -1;
         source.sourceGeneration = 0;
+        source.modelObject = nullptr;
         return source;
     }
     if (weaponReference == nullptr || weapon == nullptr ||
@@ -7079,6 +7837,7 @@ ReadLiveEquippedWeaponVisualSource() noexcept {
         ClearPhysicalMeleeVisualSource();
         source.weaponIndex = -1;
         source.sourceGeneration = 0;
+        source.modelObject = nullptr;
         return source;
     }
 
@@ -7101,6 +7860,7 @@ ReadLiveEquippedWeaponVisualSource() noexcept {
         ClearPhysicalMeleeVisualSource();
         source.weaponIndex = -1;
         source.sourceGeneration = 0;
+        source.modelObject = nullptr;
         return source;
     }
     source.live = true;
@@ -8299,14 +9059,51 @@ bool TryDoubleRenderDiagnostic(
         const PhysicalMeleeRigidTransform offHandCursorWorld{
             secondaryGripWorldPosition,
             secondaryGripWorldRotation};
-        UpdateMagazineSocketAuthoringVisual(
-            equippedWeaponSource.weaponIndex,
-            equippedWeaponSource.sourceGeneration,
+        if (g_authoringPrimitive ==
+            InteractionAuthoringPrimitive::MagazineInsertSocket) {
+            UpdateMagazineSocketAuthoringVisual(
+                equippedWeaponSource.weaponIndex,
+                equippedWeaponSource.sourceGeneration,
+                displayedObjectWorld,
+                offHandCursorWorld,
+                displayedObjectReady &&
+                    controllerWeaponReady &&
+                    secondaryGripReady);
+        } else {
+            UpdateSlideGrabAuthoringVisual(
+                equippedWeaponSource.weaponIndex,
+                equippedWeaponSource.sourceGeneration,
+                displayedObjectWorld,
+                offHandCursorWorld,
+                displayedObjectReady &&
+                    controllerWeaponReady &&
+                    secondaryGripReady);
+        }
+    }
+    if (heldWeaponSource &&
+        equippedWeaponSource.weaponIndex ==
+            kColtSlideGrabWeaponIndex &&
+        !displayedObjectReady) {
+        displayedObjectReady =
+            ResolveActiveHeldObjectWorldPose(
+                equippedWeaponSource.weaponIndex,
+                equippedWeaponSource.sourceGeneration,
+                desiredHeldControllerPose,
+                displayedObjectWorld);
+    }
+    const PhysicalMeleeRigidTransform offHandWorld{
+        secondaryGripWorldPosition,
+        secondaryGripWorldRotation};
+    const SlideGrabRuntimeOutput slideGrabRuntime =
+        UpdateSlideGrabRuntime(
+            equippedWeaponSource,
             displayedObjectWorld,
-            offHandCursorWorld,
-            displayedObjectReady &&
-                controllerWeaponReady &&
-                secondaryGripReady);
+            offHandWorld,
+            controllerInput,
+            displayedObjectReady,
+            secondaryGripReady);
+    if (slideGrabRuntime.handTargetReady) {
+        ResetPhysicalMeleeSecondaryGrip(true);
     }
     const bool armIkTargetValid =
         selectedRightHandTarget.valid &&
@@ -8351,7 +9148,23 @@ bool TryDoubleRenderDiagnostic(
         InvalidateArmIkRightHandProofTarget();
     }
 
-    if (secondaryGripReady) {
+    if (slideGrabRuntime.handTargetReady) {
+        const float leftPositionValues[3]{
+            slideGrabRuntime.handTargetWorld.positionUnits.x,
+            slideGrabRuntime.handTargetWorld.positionUnits.y,
+            slideGrabRuntime.handTargetWorld.positionUnits.z};
+        const float leftRotationValues[4]{
+            slideGrabRuntime.handTargetWorld.rotation.x,
+            slideGrabRuntime.handTargetWorld.rotation.y,
+            slideGrabRuntime.handTargetWorld.rotation.z,
+            slideGrabRuntime.handTargetWorld.rotation.w};
+        PublishArmIkLeftHandTarget(
+            leftPositionValues, leftRotationValues,
+            controllerInput.sampleId,
+            controllerInput.predictedDisplayTimeNs != 0U
+                ? controllerInput.predictedDisplayTimeNs
+                : request.predictedDisplayTimeNs);
+    } else if (secondaryGripReady) {
         const bool useSupportAnchor = twoHandPose.attached &&
             secondaryGripDebugReady;
         const fearvr::TrackingVector leftBasePosition =
@@ -8531,6 +9344,9 @@ bool TryDoubleRenderDiagnostic(
                 }
                 if (eyeResult[eye] == 0UL) {
                     DrawMagazineSocketAuthoringGizmo(
+                        renderedEyeTransform,
+                        stereoFovX, stereoFovY);
+                    DrawSlideGrabAuthoringGizmo(
                         renderedEyeTransform,
                         stereoFovX, stereoFovY);
                 }
@@ -8727,6 +9543,12 @@ unsigned long __fastcall HookRenderCamera(
     InvalidateArmIkRightHandProofTarget();
     InvalidateArmIkLeftHandTarget();
     SampleArmIkDiscovery();
+    const LiveEquippedWeaponVisualSource discoverySource =
+        ReadLiveEquippedWeaponVisualSource();
+    SampleWeaponModelDiscovery(
+        discoverySource.live ? discoverySource.modelObject : nullptr,
+        discoverySource.live ? discoverySource.weaponIndex : -1,
+        discoverySource.live ? discoverySource.sourceGeneration : 0U);
     SampleArmIkRightHandProof();
     if (g_cameraReadProbe && (count == 1 || count % 600 == 0)) {
         SampleCameraReadOnly(camera, count);
@@ -10175,7 +10997,34 @@ bool ReadEquippedWeaponVisualSourceForFire(
 }
 
 void InvalidatePhysicalMeleeVisualProxySource() noexcept {
+    EndSlideNodeControl("equipped_model_source_invalidated");
+    AcquireSRWLockExclusive(&g_slideGrabRuntimeLock);
+    g_slideGrabStateMachine = {};
+    g_slideGrabLastFrame = {};
+    ReleaseSRWLockExclusive(&g_slideGrabRuntimeLock);
+    InterlockedExchange(&g_slideGrabCaptureGrip, 0);
+    InterlockedExchange(&g_slideGrabCaptureTrigger, 0);
     ClearPhysicalMeleeVisualSource();
+}
+
+bool SlideGrabCapturesOffHandInput(
+    const FearVrInputState& input,
+    bool sampleFresh,
+    bool gripInput) noexcept {
+    if (!fearvr::IsInputStateUsable(input, sampleFresh) ||
+        (input.activeHands & FEARVR_HAND_MASK_LEFT) == 0U) {
+        return false;
+    }
+    const LONG captured = InterlockedCompareExchange(
+        gripInput
+            ? &g_slideGrabCaptureGrip
+            : &g_slideGrabCaptureTrigger,
+        0, 0);
+    const float value = gripInput
+        ? input.squeeze[FEARVR_HAND_LEFT]
+        : input.trigger[FEARVR_HAND_LEFT];
+    return captured != 0 && std::isfinite(value) &&
+        value > 0.001F;
 }
 
 } // namespace condemnedvr

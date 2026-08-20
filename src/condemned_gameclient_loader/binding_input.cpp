@@ -4740,10 +4740,17 @@ float __fastcall HookGetBindingValue(
         const bool secondaryGripCaptured =
             binding->command == kCondemnedRunCommand &&
             PhysicalMeleeSecondaryGripCapturesInput(input, usable);
+        const bool slideGrabCaptured =
+            (binding->command == kCondemnedRunCommand &&
+             SlideGrabCapturesOffHandInput(
+                 input, usable, true)) ||
+            (binding->command == kCondemnedBlockCommand &&
+             SlideGrabCapturesOffHandInput(
+                 input, usable, false));
         CoreActionValue action = ResolveCoreActionValue(
             input,
             usable && !calibrationCaptured &&
-                !secondaryGripCaptured,
+                !secondaryGripCaptured && !slideGrabCaptured,
             binding->command);
         bool automaticBlockPoseActive = false;
         bool automaticAttackSeedActive = false;
@@ -12303,6 +12310,13 @@ bool ReadPhysicalMeleeBlockColliderDebugSnapshot(
         collisionTick != 0U &&
         now - collisionTick <= kInputFreshnessMilliseconds;
     return true;
+}
+
+bool BindingInputAllowsSlideGrab() noexcept {
+    return g_interfaceManager != nullptr &&
+        ReadRetailGameState(g_interfaceManager) ==
+            kCondemnedGameStatePlaying &&
+        ProcessOwnsForegroundWindow();
 }
 
 } // namespace condemnedvr

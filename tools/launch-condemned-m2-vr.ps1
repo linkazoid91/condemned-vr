@@ -142,6 +142,19 @@
     every player weapon. This is an opt-in developer discovery pass and is
     not used by gameplay frames.
 
+.PARAMETER WeaponModelDiscovery
+    Enumerates the lifetime-validated equipped model's complete node hierarchy
+    and records model-local motion peaks after a two-second idle baseline. Use
+    it to identify a Colt slide/bolt node and its travel axis without assuming
+    a name, object offset, or layout. The diagnostic is read-only. Requires
+    -StereoTuning and -PhysicalMeleeVisualProxy.
+
+.PARAMETER SlideControlTest
+    Arms the explicitly guarded Colt-only SlideJnt callback proof and authored
+    slide-grab runtime. It requires the verified full two-arm node-control
+    boundary, exact held-model identity, weapon authoring, and core-action
+    capture. Omit this switch for immediate rollback.
+
 .PARAMETER ArmIkDiscovery
     Runs the observation-only player-body pass needed before arm IK. It logs
     the live node hierarchy and arm transforms plus known hand sockets. It
@@ -233,6 +246,8 @@ param(
     [switch]$PhysicalMeleeVisualProxy,
     [switch]$WeaponGripCalibration,
     [switch]$WeaponCatalogProbe,
+    [switch]$WeaponModelDiscovery,
+    [switch]$SlideControlTest,
     [switch]$ArmIkDiscovery,
     [switch]$ArmIkRightHandProof,
     [switch]$ArmIkRightArm,
@@ -324,6 +339,19 @@ if ($RecenterProbe -and -not $StereoTuning) {
 }
 if ($ArmIkDiscovery -and -not $StereoTuning) {
     throw '-ArmIkDiscovery requires -StereoTuning.'
+}
+if ($WeaponModelDiscovery -and
+    -not ($StereoTuning -and $PhysicalMeleeVisualProxy)) {
+    throw ('-WeaponModelDiscovery requires -StereoTuning and ' +
+        '-PhysicalMeleeVisualProxy.')
+}
+if ($SlideControlTest -and -not (
+    $StereoTuning -and $PhysicalMeleeVisualProxy -and
+    $WeaponGripCalibration -and $ArmIkRightArm -and
+    $CoreActionsProbe)) {
+    throw ('-SlideControlTest requires -StereoTuning, ' +
+        '-PhysicalMeleeVisualProxy, -WeaponGripCalibration, ' +
+        '-ArmIkRightArm, and -CoreActionsProbe.')
 }
 if ($ArmIkRightHandProof -and
     -not ($StereoTuning -and $HeadAimProbe -and $MenuProbe)) {
@@ -463,6 +491,8 @@ $runLogDirectory = Assert-UnderCondemnedVrProjectRoot (
         'run-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')))
 New-Item -ItemType Directory -Force -Path @(
     $runLogDirectory, $deployment.UserDirectory) | Out-Null
+$sessionLoaderLog = Assert-UnderCondemnedVrProjectRoot (
+    Join-Path $runLogDirectory 'condemnedvr-loader.log')
 $liveColliderCommandPath = $null
 if ($WeaponTest -eq 'Pipe' -or $WeaponGripCalibration) {
     $liveColliderCommandPath = Assert-UnderCondemnedVrProjectRoot (
@@ -642,6 +672,12 @@ if ($WeaponGripCalibration) {
 }
 if ($WeaponCatalogProbe) {
     $gameArguments += '-condemnedvr-m5-weapon-catalog-probe'
+}
+if ($WeaponModelDiscovery) {
+    $gameArguments += '-condemnedvr-m5-weapon-model-discovery'
+}
+if ($SlideControlTest) {
+    $gameArguments += '-condemnedvr-m5-slide-control-test'
 }
 if ($ArmIkDiscovery) {
     $gameArguments += '-condemnedvr-arm-ik-discovery'
@@ -879,6 +915,16 @@ try {
                 '"event":"arm_ik_discovery_rejected"')) {
             throw 'The guarded arm-IK discovery pass was rejected.'
         }
+        if ($WeaponModelDiscovery -and
+            $loaderText.Contains(
+                '"event":"weapon_model_discovery_rejected"')) {
+            throw 'The guarded equipped-weapon model discovery pass was rejected.'
+        }
+        if ($SlideControlTest -and
+            $loaderText.Contains(
+                '"event":"m5_slide_node_control_rejected"')) {
+            throw 'The guarded Colt slide-control proof was rejected.'
+        }
         if ($ArmIkRightHandProof -and
             $loaderText.Contains(
                 '"event":"arm_ik_right_hand_proof_rejected"')) {
@@ -996,6 +1042,12 @@ try {
         $armIkDiscoveryReady = -not $ArmIkDiscovery -or
             $loaderText.Contains(
                 '"event":"arm_ik_discovery_armed"')
+        $weaponModelDiscoveryReady = -not $WeaponModelDiscovery -or
+            $loaderText.Contains(
+                '"event":"weapon_model_discovery_armed"')
+        $slideControlTestReady = -not $SlideControlTest -or
+            $loaderText.Contains(
+                '"event":"m5_slide_node_control_armed"')
         $armIkRightHandProofReady = -not $ArmIkRightHandProof -or
             $loaderText.Contains(
                 '"event":"arm_ik_right_hand_proof_armed"')
@@ -1033,6 +1085,8 @@ try {
             $weaponGripCalibrationReady -and
             $twoHandedMeleeReady -and
             $armIkDiscoveryReady -and
+            $weaponModelDiscoveryReady -and
+            $slideControlTestReady -and
             $armIkRightHandProofReady -and
             $armIkRightArmReady -and
             $recenterReady
@@ -1045,7 +1099,37 @@ try {
         throw 'The mono OpenXR frame path did not become ready within 45 seconds.'
     }
     if (-not $inputHooksReady) {
-        throw 'A requested guarded controller input hook did not arm within 45 seconds.'
+        $missingReadiness = @()
+        if (-not $locomotionReady) { $missingReadiness += 'Locomotion' }
+        if (-not $turningReady) { $missingReadiness += 'Turning' }
+        if (-not $menuReady) { $missingReadiness += 'Menu' }
+        if (-not $menuControlsReady) { $missingReadiness += 'MenuControls' }
+        if (-not $retailVrSettingsReady) { $missingReadiness += 'RetailVrSettings' }
+        if (-not $interactionReady) { $missingReadiness += 'Interaction' }
+        if (-not $coreActionsReady) { $missingReadiness += 'CoreActions' }
+        if (-not $forensicCameraSocketRayReady) { $missingReadiness += 'ForensicCameraSocketRay' }
+        if (-not $forensicMemoryReady) { $missingReadiness += 'ForensicMemory' }
+        if (-not $hapticsReady) { $missingReadiness += 'Haptics' }
+        if (-not $headAimReady) { $missingReadiness += 'HeadAim' }
+        if (-not $handgunMuzzleAimReady) { $missingReadiness += 'HandgunMuzzleAim' }
+        if (-not $aimPathReady) { $missingReadiness += 'AimPath' }
+        if (-not $meleeAimReady) { $missingReadiness += 'MeleeAim' }
+        if (-not $physicalMeleeReady) { $missingReadiness += 'PhysicalMelee' }
+        if (-not $physicalMeleeWallProxyReady) { $missingReadiness += 'PhysicalMeleeWallProxy' }
+        if (-not $physicalMeleeContactDamageReady) { $missingReadiness += 'PhysicalMeleeContactDamage' }
+        if (-not $physicalMeleeColliderDebugReady) { $missingReadiness += 'PhysicalMeleeColliderDebug' }
+        if (-not $physicalMeleeVisualProxyReady) { $missingReadiness += 'PhysicalMeleeVisualProxy' }
+        if (-not $weaponGripCalibrationReady) { $missingReadiness += 'WeaponGripCalibration' }
+        if (-not $twoHandedMeleeReady) { $missingReadiness += 'TwoHandedMelee' }
+        if (-not $armIkDiscoveryReady) { $missingReadiness += 'ArmIkDiscovery' }
+        if (-not $weaponModelDiscoveryReady) { $missingReadiness += 'WeaponModelDiscovery' }
+        if (-not $slideControlTestReady) { $missingReadiness += 'SlideControlTest' }
+        if (-not $armIkRightHandProofReady) { $missingReadiness += 'ArmIkRightHandProof' }
+        if (-not $armIkRightArmReady) { $missingReadiness += 'ArmIkRightArm' }
+        if (-not $recenterReady) { $missingReadiness += 'Recenter' }
+        throw ('Requested guarded readiness did not arm within 45 seconds: ' +
+            ($missingReadiness -join ', ') +
+            '. Verify that the prepared M2 stage contains the current build.')
     }
     $loadedBridge = $modules | Where-Object {
         $_.Name -ieq 'condemnedvr-d3d9.dll'
@@ -1105,6 +1189,8 @@ try {
             PhysicalMeleeColliderDebug = [bool]$PhysicalMeleeColliderDebug
             PhysicalMeleeVisualProxy = [bool]$PhysicalMeleeVisualProxy
             WeaponGripCalibration = [bool]$WeaponGripCalibration
+            WeaponModelDiscovery = [bool]$WeaponModelDiscovery
+            SlideControlTest = [bool]$SlideControlTest
             TwoHandedMelee = [bool]$TwoHandedMelee
             ArmIkDiscovery = [bool]$ArmIkDiscovery
             ArmIkRightHandProof = [bool]$ArmIkRightHandProof
@@ -1234,6 +1320,15 @@ try {
         Write-Host 'Arm-IK discovery is read-only; enter gameplay once so the player-body geometry can be logged.' `
             -ForegroundColor Cyan
     }
+    if ($WeaponModelDiscovery) {
+        Write-Host 'Weapon-model discovery is read-only: equip the Colt and hold it still until weapon_model_discovery_baseline_ready is logged.' `
+            -ForegroundColor Cyan
+        Write-Host '  Then fire once and reload once. Motion records report the node name, closed/current model-local positions, peak travel, and candidate axis.'
+    }
+    if ($SlideControlTest) {
+        Write-Host 'Colt slide control is armed: author and SAVE SLIDE GRAB RAIL, close VR Tools, enter the box with the left hand, then press the configured Grip/Trigger.' -ForegroundColor Cyan
+        Write-Host '  Release, focus loss, weapon/model generation change, or Retail slide animation removes the callback and restores Retail ownership.'
+    }
     if ($ArmIkRightHandProof) {
         Write-Host 'Right-hand IK proof is active: RightHand follows the weighted VR weapon pose; arm and forearm remain Retail.' `
             -ForegroundColor Cyan
@@ -1283,6 +1378,11 @@ try {
             ('handoff ({0}).' -f $finalGameFocus.Detail))
     }
 } catch {
+    if (Test-Path -LiteralPath $deployment.LoaderLog -PathType Leaf) {
+        Copy-Item -LiteralPath $deployment.LoaderLog `
+            -Destination $sessionLoaderLog -Force `
+            -ErrorAction SilentlyContinue
+    }
     if ($null -ne $game) {
         $game.Refresh()
         if (-not $game.HasExited) { Stop-Process -Id $game.Id -Force }
@@ -1300,6 +1400,10 @@ if ($Wait) {
     $hostProcess.Refresh()
     if (-not $hostProcess.HasExited) {
         Stop-Process -Id $hostProcess.Id -Force
+    }
+    if (Test-Path -LiteralPath $deployment.LoaderLog -PathType Leaf) {
+        Copy-Item -LiteralPath $deployment.LoaderLog `
+            -Destination $sessionLoaderLog -Force
     }
     Write-Host 'Condemned and its M2 host exited.'
 }

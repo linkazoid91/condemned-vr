@@ -1753,6 +1753,189 @@ persisted socket, or convincing ghost proves a Retail magazine interaction.
    before/after player INI, expected observation, actual observation, and
    rollback.
 
+## Colt equipped-model slide discovery live gate
+
+Evidence status: **implemented and automated-tested, awaiting live
+validation**. This
+is an observation-only model-node diagnostic. It neither proves that the slide
+is a node nor authorizes a node control or weapon-state handoff.
+
+1. Build and stage the exact source state. Launch the smallest canonical
+   index-76 firearm configuration with `-StereoTuning`,
+   `-PhysicalMeleeVisualProxy`, and `-WeaponModelDiscovery`. Preserve the
+   launch report and all ordinary logs.
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\launch-condemned-m2-vr.ps1 `
+       -StereoTuning -TurningProbe -CoreActionsProbe -HeadAimProbe `
+       -AimPathProbe -PhysicalMeleeProbe -PhysicalMeleeWallProxy `
+       -PhysicalMeleeVisualProxy -WeaponModelDiscovery -DesktopWindow -Wait
+   ```
+2. Equip positively identified `colt45_Unbreakable` index 76, finish the equip
+   animation, and hold the weapon/controller still. Require one
+   `weapon_model_discovery_model`, a complete node list, and
+   `weapon_model_discovery_baseline_ready` for the same nonzero model pointer
+   and source generation. Do not fire before the baseline-ready event.
+3. Fire exactly once, pause, then perform one ordinary Retail reload. Preserve
+   every `weapon_model_discovery_motion` record. Each must state model-local
+   basis, read-only operation, no node controls, and no engine writes.
+4. Identify candidates by repeatable translation peaks, not by a presumed
+   `Slide`, `Breach`, or `Bolt` name. Compare node parentage so a moving child
+   subtree is not mistaken for several independent objects. Require finite
+   closed/current positions, displacement, normalized candidate axis, travel,
+   and rotation.
+5. Repeat one fire/reload cycle after drop/reacquire. A candidate is useful
+   only when its semantic node/name or hierarchy role and motion axis/travel
+   repeat for the new lifetime-valid model generation. Pointer or raw handle
+   values are process-local evidence and must never be persisted.
+6. Reject the node hypothesis if no stable model-local candidate moves, motion
+   is only whole-animation recoil, the baseline was captured during an equip
+   transition, reads fault, the source identity changes mid-sample, or frame
+   timing materially regresses. The next diagnostic is bounded
+   attachment/model-piece discovery; do not infer an object offset.
+7. Roll back by omitting `-WeaponModelDiscovery`. Verify ordinary Colt aim,
+   fire, reload, visible-model restoration, hand IK, controller input,
+   keyboard/mouse, host-absent fallback, and frame pacing remain unchanged.
+
+The first model lifetime in
+`stage\condemned-m2-mono\logs\run-20260820-082601\condemnedvr-loader.log`
+has now satisfied the discovery portion for index 76: `SlideJnt`, parent
+`anim_cult45`, translated from `(14.1689, 2.8062, -8.7261)` to
+`(10.3449, 2.8362, -8.1651)` along
+`(-0.989379, 0.007748, 0.145151)` for 3.8651 units with unchanged rotation.
+A new model lifetime must still repeat name resolution; handle 3 and the
+observed model pointer are not reusable evidence.
+
+## Authored Colt slide-grab and node-control live gate
+
+Evidence status: **core interaction live accepted; remaining safety/regression
+observations open**. Run `run-20260820-092549` proved exact Colt capture/save,
+per-generation `SlideJnt` name resolution, inside-volume Candidate/Attached,
+position-only rail control, the 3.8651-unit clamp, callback removal, and Retail-
+ownership restoration. The user confirmed attachment and slide motion but
+rejected the attached hand pose. Corrected run `run-20260820-124747` then
+produced 16 successful attachments and exactly 16 installed-callback detaches,
+no AUTHOR overlay failure or source-only detach spam, repeated 3.8651-unit
+clamps, and fresh `SlideJnt` resolution for source generations 1 and 5. The
+user accepted the saved pose and slide interaction as correct. Absence of an
+unintended Retail action, explicit focus-loss cancellation, and ordinary post-
+release fire/reload animation remain open because they were not explicitly
+observed. The later project-owned pull/return sound adapter is automated-only
+and was not present in that run. Sound run `run-20260820-133700` proved asset
+availability, Windows handoff, one-shot counts, already-closed suppression,
+and callback restoration, but the user rejected its pull timing: requests
+occurred at 0.1009-0.4762 units rather than near the rear endpoint. The
+corrected build uses the authored 3.50-unit rear threshold. Corrected run
+`run-20260820-134612` then produced
+12/12 pull handoffs between 3.5050 and 3.8651 units with none below threshold,
+11 displaced-release return handoffs, and one already-closed stop/no-return;
+all 24 Windows handoffs and all 12 callback removals succeeded. The user
+explicitly accepted that pull/return timing and content. The subsequent repeat-
+pull extension, which rearms after forward motion while grip remains held, is
+automated-tested and staged. Repeat-cycle run `run-20260820-135900` completed
+the process-side live gate: 11 attachments produced 24 pull handoffs, including
+two uninterrupted `pull_cycle=1..6` sequences; every cue occurred at
+3.5123-3.8651 units against the 3.5000 threshold. Nine displaced releases
+returned after ownership restoration, two closed releases produced stop/no-
+return, and all 11 callbacks restored Retail ownership with no failed handoff.
+The user explicitly judged the repeated audibility, timing, and absence of
+unwanted duplicates perfect. This completes the repeat-cycle live gate for the
+tested Colt path.
+
+Live `run-20260820-091557` reached AUTHOR but the panel failed closed at
+32,766/32,768 triangle vertices before slide capture. The compacted AUTHOR rows
+have both worst-case automated coverage and a successful live visual recheck
+in `run-20260820-092549`. Corrected run `run-20260820-124747` retained the
+visible panel, accepted attached hand pose, and bounded detach records one-for-
+one with installed callbacks. Continue with the still-open safety observations
+in steps 4, 6, 7, and 8 rather than repeating the accepted presentation gate.
+
+1. Build and stage the exact source state. Author and explicitly save a finite
+   index-76 `SLIDE GRAB RAIL` volume and hand pose in VR Tools. Preserve the
+   player settings file, exact staged binary hashes, and the complete authoring
+   log. Then run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\launch-condemned-m2-vr.ps1 `
+       -StereoTuning -TurningProbe -MenuProbe -CoreActionsProbe -HeadAimProbe `
+       -AimPathProbe -PhysicalMeleeProbe -PhysicalMeleeWallProxy `
+       -PhysicalMeleeVisualProxy -WeaponGripCalibration -ArmIkRightArm `
+       -SlideControlTest -DesktopWindow -Wait
+   ```
+2. Equip exact index 76 / `colt45_Unbreakable`. Require
+   `m5_slide_node_control_armed`, then one successful
+   `m5_slide_node_resolved` for `SlideJnt` and the current nonzero source
+   generation. Confirm the authoring display shows CONFIGURED, the oriented
+   box is on the physical slide contact region rather than merely at the node
+   pivot, and the closed/rear rail gizmo matches the weapon.
+3. Move the fresh tracked left controller outside and through every side of
+   the authored box. Outside activation must not attach. Entry must produce
+   Candidate only for an inside oriented-box result and log controller
+   model-local position, exact identity/generation, controller selection,
+   configured input, and overlap result.
+4. From inside, press each non-configured input and require no attachment;
+   press the configured GRIP, TRIGGER, or either input edge and require one
+   Attached transition. The left hand must snap to the authored pose while the
+   dominant weapon hand remains unchanged. Confirm that this edge produces no
+   Retail gunshot, attack, block, reload, activate, or delayed action.
+5. Pull forward, rearward, sideways, and beyond both endpoints. Require bounded
+   before/requested/after node evidence: only the projection along
+   `(-0.989379, 0.007748, 0.145151)` changes, rotation remains Retail-owned,
+   sideways motion contributes no travel, and requested/clamped travel remains
+   in `[0, 3.8651]` units. The authored hand target must translate with the
+   same clamped slide displacement. For the sound-enabled build, attachment at
+   zero and partial travel must be silent. Crossing the authored rear threshold
+   (3.50 units for the Colt seed, near its 3.8651-unit maximum) must emit
+   exactly one audible pull cue and one `m5_slide_grab_sound cue=pull
+   pull_cycle=1` record. Holding or jittering within 0.25 units forward of the
+   rear threshold must not retrigger it. Without releasing the configured
+   input, move the slide farther forward than that hysteresis band and pull it
+   back across the threshold; require exactly one second audible pull cue and
+   `pull_cycle=2`. Repeat once more to prove each complete forward/rear cycle
+   cues once while attachment persists. Require every pull record to have
+   `travel >= rear_threshold`, with no cue during forward rearming motion.
+6. Release the configured input at closed, middle, and rear positions. Require
+   immediate Released/Idle transition, node-control removal, and
+   `retail_ownership_restored=1`. After each release, ordinary Retail fire
+   and reload must animate the slide normally and produce exactly the expected
+   Retail action. A release while still displaced must emit exactly one audible
+   return cue only after successful Retail-ownership restoration. A release at
+   closed must emit no return cue. Require the relative asset, availability,
+   handoff request/result, travel, and detach reason in
+   `m5_slide_grab_sound`.
+7. While attached, separately cause foreground focus loss, stale controller
+   tracking/input, VR Tools opening, weapon drop, and weapon identity change.
+   Each must detach immediately, neutralize the captured VR off-hand command,
+   remove or disable the node override, and name the exact cancellation reason.
+   Reacquire the Colt and require a new source generation and fresh
+   `SlideJnt` name-resolution event rather than reuse of a handle. These safety
+   cancellations must not emit a return cue; if a pull cue was active, require
+   an `action=stop` sound event.
+8. Attempt an ordinary Retail fire/reload animation while attached only if it
+   can be done safely without defeating input isolation. If incoming Retail
+   node position deviates from the closed rail tolerance, require
+   `RetailAnimationStarted`, no callback write for that sample, immediate
+   detach/removal, and normal completion of the Retail animation. No ammo,
+   chamber, reload, firing, durability, or weapon-state behavior may be
+   synthesized by the mod.
+9. Reject on a node-resolution/control failure, non-finite transform, incorrect
+   identity/generation, write outside the rail, rotation change, unintended
+   Retail action, missing detach, stale-handle reuse, failure to restore Retail
+   animation, material performance regression, or misleading per-frame log
+   volume. Preserve launch report, host/bridge/loader logs, source state,
+   settings, weapon/model generation, expected/actual observation, and
+   rollback.
+   Also reject the sound slice on missing/inaudible audio, duplicate cues,
+   pull sound before meaningful motion, return sound at closed, return sound on
+   a safety cancellation, incorrect output device, or a cue that masks or
+   delays Retail weapon audio.
+10. Roll back by omitting `-SlideControlTest`. The authoring record may remain
+    saved, but no Colt node control, off-hand Retail-input suppression, or
+    slide-hand override may arm. Regress magazine authoring, Grip, 2-Hand,
+    Collider, Hand IK, firearm aim/fire/reload, tool-menu input,
+    keyboard/mouse, host-absent fallback, model restoration, both-eye overlay,
+    and frame timing.
+
 ## Evidence collection
 
 Each launch creates a session-specific log directory. Preserve, at minimum:

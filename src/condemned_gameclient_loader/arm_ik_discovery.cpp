@@ -8,6 +8,7 @@
 
 #include "arm_ik_discovery.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -110,6 +111,34 @@ volatile LONG g_modelGlobalValidated = 0;
 volatile LONG g_modelGlobalWaitingLogged = 0;
 void* g_loggedPlayerBody = nullptr;
 void* g_failedPlayerBody = nullptr;
+
+constexpr std::size_t kWeaponNodeCapacity = 256U;
+constexpr ULONGLONG kWeaponBaselineSettleMilliseconds = 2000U;
+constexpr float kWeaponTranslationPeakStepUnits = 0.05F;
+constexpr float kWeaponRotationPeakStepDegrees = 0.25F;
+constexpr std::uint32_t kWeaponMotionLogCapacity = 1024U;
+
+struct WeaponNodeObservation {
+    ModelHandle handle{kInvalidModelHandle};
+    ModelHandle parent{kInvalidModelHandle};
+    char name[128]{};
+    ModelTransformAbi baselineLocal{};
+    float peakTranslationUnits{0.0F};
+    float peakRotationDegrees{0.0F};
+    bool baselineValid{false};
+};
+
+volatile LONG g_weaponDiscoveryEnabled = 0;
+void* g_weaponModelObject = nullptr;
+std::int32_t g_weaponIndex = -1;
+std::uint64_t g_weaponSourceGeneration = 0U;
+WeaponNodeObservation g_weaponNodes[kWeaponNodeCapacity]{};
+std::size_t g_weaponNodeCount = 0U;
+ULONGLONG g_weaponBaselineStartTick = 0U;
+ULONGLONG g_weaponLastSampleTick = 0U;
+std::uint64_t g_weaponSampleSequence = 0U;
+std::uint32_t g_weaponMotionLogCount = 0U;
+bool g_weaponBaselineReady = false;
 
 bool IsExecutableAddress(const void* address) noexcept {
     if (address == nullptr) {
@@ -293,6 +322,352 @@ void LogTransform(
         transform.rotation[1], transform.rotation[2],
         transform.rotation[3], transform.scale);
     g_log(event, detail);
+}
+
+void ResetWeaponModelObservation() noexcept {
+    g_weaponModelObject = nullptr;
+    g_weaponIndex = -1;
+    g_weaponSourceGeneration = 0U;
+    g_weaponNodeCount = 0U;
+    g_weaponBaselineStartTick = 0U;
+    g_weaponLastSampleTick = 0U;
+    g_weaponSampleSequence = 0U;
+    g_weaponMotionLogCount = 0U;
+    g_weaponBaselineReady = false;
+    for (WeaponNodeObservation& node : g_weaponNodes) {
+        node = {};
+    }
+}
+
+float QuaternionAngularDifferenceDegrees(
+    const float (&left)[4],
+    const float (&right)[4]) noexcept {
+    float leftLengthSquared = 0.0F;
+    float rightLengthSquared = 0.0F;
+    float dot = 0.0F;
+    for (std::size_t component = 0U; component < 4U; ++component) {
+        if (!std::isfinite(left[component]) ||
+            !std::isfinite(right[component])) {
+            return -1.0F;
+        }
+        leftLengthSquared += left[component] * left[component];
+        rightLengthSquared += right[component] * right[component];
+        dot += left[component] * right[component];
+    }
+    if (leftLengthSquared < 0.25F || rightLengthSquared < 0.25F) {
+        return -1.0F;
+    }
+    dot = std::clamp(
+        std::fabs(dot) /
+            std::sqrt(leftLengthSquared * rightLengthSquared),
+        0.0F, 1.0F);
+    constexpr float kRadiansToDegrees = 57.29577951308232F;
+    return 2.0F * std::acos(dot) * kRadiansToDegrees;
+}
+
+bool ReadWeaponNodeLocalTransform(
+    void* modelObject,
+    ModelHandle node,
+    ModelTransformAbi& transform) noexcept {
+    transform = {};
+    g_readPhase = "weapon_get_node_transform_local";
+    const ModelResult result = g_getNodeTransform(
+        g_model, modelObject, node, transform, false);
+    return result == kModelOk && ModelTransformIsFinite(transform);
+}
+
+bool EnumerateWeaponModelUnchecked(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration) noexcept {
+    std::uint32_t nodeCount = 0U;
+    g_readPhase = "weapon_get_num_nodes";
+    const ModelResult nodeCountResult =
+        g_getNumNodes(g_model, modelObject, nodeCount);
+    if (nodeCountResult != kModelOk || nodeCount == 0U ||
+        nodeCount > kWeaponNodeCapacity) {
+        char detail[320]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld model_object=%p source_generation=%llu "
+            "get_num_nodes_result=%lu node_count=%lu read_only=1",
+            static_cast<long>(weaponIndex), modelObject,
+            static_cast<unsigned long long>(sourceGeneration),
+            static_cast<unsigned long>(nodeCountResult),
+            static_cast<unsigned long>(nodeCount));
+        g_log("weapon_model_discovery_not_ready", detail);
+        return false;
+    }
+
+    ResetWeaponModelObservation();
+    g_weaponModelObject = modelObject;
+    g_weaponIndex = weaponIndex;
+    g_weaponSourceGeneration = sourceGeneration;
+    g_weaponBaselineStartTick = GetTickCount64();
+
+    char summary[384]{};
+    std::snprintf(
+        summary, sizeof(summary),
+        "weapon_index=%ld model_object=%p source_generation=%llu "
+        "nodes=%lu transform_basis=model_local settle_ms=%llu "
+        "read_only=1 node_controls_added=0 engine_writes=0",
+        static_cast<long>(weaponIndex), modelObject,
+        static_cast<unsigned long long>(sourceGeneration),
+        static_cast<unsigned long>(nodeCount),
+        static_cast<unsigned long long>(
+            kWeaponBaselineSettleMilliseconds));
+    g_log("weapon_model_discovery_model", summary);
+
+    ModelHandle currentNode = kInvalidModelHandle;
+    for (std::uint32_t index = 0U; index < nodeCount; ++index) {
+        ModelHandle nextNode = kInvalidModelHandle;
+        g_readPhase = "weapon_get_next_node";
+        const ModelResult nextResult = g_getNextNode(
+            g_model, modelObject, currentNode, nextNode);
+        if (nextResult != kModelOk ||
+            nextNode == kInvalidModelHandle || nextNode == currentNode) {
+            break;
+        }
+        WeaponNodeObservation& observation =
+            g_weaponNodes[g_weaponNodeCount];
+        observation.handle = nextNode;
+        g_readPhase = "weapon_get_node_name";
+        const ModelResult nameResult = g_getNodeName(
+            g_model, modelObject, nextNode, observation.name,
+            static_cast<std::uint32_t>(sizeof(observation.name)));
+        if (nameResult != kModelOk || observation.name[0] == '\0') {
+            std::snprintf(
+                observation.name, sizeof(observation.name),
+                "<unavailable:%lu>",
+                static_cast<unsigned long>(nameResult));
+        }
+        g_readPhase = "weapon_get_parent";
+        const ModelResult parentResult = g_getParent(
+            g_model, modelObject, nextNode, observation.parent);
+        if (parentResult != kModelOk) {
+            observation.parent = kInvalidModelHandle;
+        }
+        observation.baselineValid = ReadWeaponNodeLocalTransform(
+            modelObject, nextNode, observation.baselineLocal);
+
+        char detail[768]{};
+        if (observation.baselineValid) {
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld model_object=%p source_generation=%llu "
+                "index=%lu handle=%lu parent=%lu name=%s "
+                "model_local_position=(%.4f,%.4f,%.4f) "
+                "model_local_rotation=(%.6f,%.6f,%.6f,%.6f) "
+                "scale=%.4f baseline_state=settling read_only=1",
+                static_cast<long>(weaponIndex), modelObject,
+                static_cast<unsigned long long>(sourceGeneration),
+                static_cast<unsigned long>(g_weaponNodeCount),
+                static_cast<unsigned long>(nextNode),
+                static_cast<unsigned long>(observation.parent),
+                observation.name,
+                observation.baselineLocal.position[0],
+                observation.baselineLocal.position[1],
+                observation.baselineLocal.position[2],
+                observation.baselineLocal.rotation[0],
+                observation.baselineLocal.rotation[1],
+                observation.baselineLocal.rotation[2],
+                observation.baselineLocal.rotation[3],
+                observation.baselineLocal.scale);
+        } else {
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld model_object=%p source_generation=%llu "
+                "index=%lu handle=%lu parent=%lu name=%s "
+                "model_local_transform=unavailable "
+                "baseline_state=settling read_only=1",
+                static_cast<long>(weaponIndex), modelObject,
+                static_cast<unsigned long long>(sourceGeneration),
+                static_cast<unsigned long>(g_weaponNodeCount),
+                static_cast<unsigned long>(nextNode),
+                static_cast<unsigned long>(observation.parent),
+                observation.name);
+        }
+        g_log("weapon_model_discovery_node", detail);
+        ++g_weaponNodeCount;
+        currentNode = nextNode;
+    }
+
+    char complete[384]{};
+    std::snprintf(
+        complete, sizeof(complete),
+        "weapon_index=%ld model_object=%p source_generation=%llu "
+        "nodes_reported=%lu expected_nodes=%lu baseline_state=settling "
+        "read_only=1 engine_writes=0",
+        static_cast<long>(weaponIndex), modelObject,
+        static_cast<unsigned long long>(sourceGeneration),
+        static_cast<unsigned long>(g_weaponNodeCount),
+        static_cast<unsigned long>(nodeCount));
+    g_readPhase = "weapon_enumeration_complete";
+    g_log("weapon_model_discovery_complete", complete);
+    const bool enumerationComplete = g_weaponNodeCount == nodeCount;
+    if (!enumerationComplete) {
+        ResetWeaponModelObservation();
+    }
+    return enumerationComplete;
+}
+
+bool EnumerateWeaponModel(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration) noexcept {
+    __try {
+        return EnumerateWeaponModelUnchecked(
+            modelObject, weaponIndex, sourceGeneration);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (g_log != nullptr) {
+            char detail[320]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld model_object=%p source_generation=%llu "
+                "phase=%s exception=0x%08lX read_only=1",
+                static_cast<long>(weaponIndex), modelObject,
+                static_cast<unsigned long long>(sourceGeneration),
+                g_readPhase,
+                static_cast<unsigned long>(GetExceptionCode()));
+            g_log("weapon_model_discovery_read_failed", detail);
+        }
+        ResetWeaponModelObservation();
+        return false;
+    }
+}
+
+void SampleWeaponModelMotionUnchecked() noexcept {
+    const ULONGLONG now = GetTickCount64();
+    // HookRenderCamera may be reached more than once in one presented frame.
+    // One sample per millisecond prevents duplicate per-eye/model queries while
+    // retaining enough temporal resolution for a fast firearm cycle.
+    if (now == g_weaponLastSampleTick) {
+        return;
+    }
+    g_weaponLastSampleTick = now;
+    ++g_weaponSampleSequence;
+    const bool settling = now - g_weaponBaselineStartTick <
+        kWeaponBaselineSettleMilliseconds;
+
+    for (std::size_t index = 0U; index < g_weaponNodeCount; ++index) {
+        WeaponNodeObservation& observation = g_weaponNodes[index];
+        ModelTransformAbi current{};
+        if (!ReadWeaponNodeLocalTransform(
+                g_weaponModelObject, observation.handle, current)) {
+            continue;
+        }
+        if (settling || !observation.baselineValid) {
+            observation.baselineLocal = current;
+            observation.baselineValid = true;
+            observation.peakTranslationUnits = 0.0F;
+            observation.peakRotationDegrees = 0.0F;
+            continue;
+        }
+
+        const float delta[3]{
+            current.position[0] - observation.baselineLocal.position[0],
+            current.position[1] - observation.baselineLocal.position[1],
+            current.position[2] - observation.baselineLocal.position[2]};
+        const float translation = std::sqrt(
+            delta[0] * delta[0] + delta[1] * delta[1] +
+            delta[2] * delta[2]);
+        const float rotation = QuaternionAngularDifferenceDegrees(
+            current.rotation, observation.baselineLocal.rotation);
+        if (!std::isfinite(translation) || rotation < 0.0F) {
+            continue;
+        }
+        const bool translationPeak =
+            translation >= kWeaponTranslationPeakStepUnits &&
+            translation >= observation.peakTranslationUnits +
+                kWeaponTranslationPeakStepUnits;
+        const bool rotationPeak =
+            rotation >= kWeaponRotationPeakStepDegrees &&
+            rotation >= observation.peakRotationDegrees +
+                kWeaponRotationPeakStepDegrees;
+        if (!translationPeak && !rotationPeak) {
+            continue;
+        }
+        observation.peakTranslationUnits = std::max(
+            observation.peakTranslationUnits, translation);
+        observation.peakRotationDegrees = std::max(
+            observation.peakRotationDegrees, rotation);
+        if (g_weaponMotionLogCount >= kWeaponMotionLogCapacity) {
+            continue;
+        }
+        ++g_weaponMotionLogCount;
+        const float inverseTranslation = translation > 0.00001F
+            ? 1.0F / translation : 0.0F;
+        char detail[1152]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld model_object=%p source_generation=%llu "
+            "sample=%llu index=%lu handle=%lu parent=%lu name=%s "
+            "baseline_model_local_position=(%.4f,%.4f,%.4f) "
+            "current_model_local_position=(%.4f,%.4f,%.4f) "
+            "translation_delta=(%.4f,%.4f,%.4f) "
+            "candidate_axis=(%.6f,%.6f,%.6f) "
+            "translation_peak_units=%.4f rotation_peak_degrees=%.4f "
+            "current_model_local_rotation=(%.6f,%.6f,%.6f,%.6f) "
+            "transform_basis=model_local observation=new_peak "
+            "read_only=1 node_controls_added=0 engine_writes=0",
+            static_cast<long>(g_weaponIndex), g_weaponModelObject,
+            static_cast<unsigned long long>(g_weaponSourceGeneration),
+            static_cast<unsigned long long>(g_weaponSampleSequence),
+            static_cast<unsigned long>(index),
+            static_cast<unsigned long>(observation.handle),
+            static_cast<unsigned long>(observation.parent),
+            observation.name,
+            observation.baselineLocal.position[0],
+            observation.baselineLocal.position[1],
+            observation.baselineLocal.position[2],
+            current.position[0], current.position[1], current.position[2],
+            delta[0], delta[1], delta[2],
+            delta[0] * inverseTranslation,
+            delta[1] * inverseTranslation,
+            delta[2] * inverseTranslation,
+            observation.peakTranslationUnits,
+            observation.peakRotationDegrees,
+            current.rotation[0], current.rotation[1],
+            current.rotation[2], current.rotation[3]);
+        g_log("weapon_model_discovery_motion", detail);
+    }
+
+    if (!settling && !g_weaponBaselineReady) {
+        g_weaponBaselineReady = true;
+        char detail[448]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "weapon_index=%ld model_object=%p source_generation=%llu "
+            "nodes=%lu settle_ms=%llu transform_basis=model_local "
+            "instruction=fire_once_then_reload_once read_only=1 "
+            "engine_writes=0",
+            static_cast<long>(g_weaponIndex), g_weaponModelObject,
+            static_cast<unsigned long long>(g_weaponSourceGeneration),
+            static_cast<unsigned long>(g_weaponNodeCount),
+            static_cast<unsigned long long>(
+                kWeaponBaselineSettleMilliseconds));
+        g_log("weapon_model_discovery_baseline_ready", detail);
+    }
+}
+
+void SampleWeaponModelMotion() noexcept {
+    __try {
+        SampleWeaponModelMotionUnchecked();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (g_log != nullptr) {
+            char detail[320]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "weapon_index=%ld model_object=%p source_generation=%llu "
+                "phase=%s exception=0x%08lX read_only=1",
+                static_cast<long>(g_weaponIndex), g_weaponModelObject,
+                static_cast<unsigned long long>(g_weaponSourceGeneration),
+                g_readPhase,
+                static_cast<unsigned long>(GetExceptionCode()));
+            g_log("weapon_model_discovery_read_failed", detail);
+        }
+        ResetWeaponModelObservation();
+    }
 }
 
 bool DumpPlayerBodyUnchecked(void* playerBody) noexcept {
@@ -588,6 +963,31 @@ bool InstallArmIkDiscovery(
     return true;
 }
 
+bool InstallWeaponModelDiscovery(
+    void* masterDatabase,
+    void* gameClientModule,
+    ArmIkDiscoveryLogFunction log) noexcept {
+    if (!InstallArmIkDiscovery(
+            masterDatabase, gameClientModule, log)) {
+        if (log != nullptr) {
+            log(
+                "weapon_model_discovery_rejected",
+                "reason=verified_model_interface_install_failed");
+        }
+        return false;
+    }
+    ResetWeaponModelObservation();
+    InterlockedExchange(&g_weaponDiscoveryEnabled, 1);
+    if (log != nullptr) {
+        log(
+            "weapon_model_discovery_armed",
+            "mode=read_only source=lifetime_validated_equipped_model "
+            "transform_basis=model_local node_names_assumed=0 "
+            "object_offsets_assumed=0 node_controls_added=0 engine_writes=0");
+    }
+    return true;
+}
+
 void SampleArmIkDiscovery() noexcept {
     if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
         return;
@@ -690,6 +1090,51 @@ void SampleArmIkDiscovery() noexcept {
         g_failedPlayerBody = nullptr;
     } else {
         g_failedPlayerBody = playerBody;
+    }
+}
+
+void SampleWeaponModelDiscovery(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration) noexcept {
+    if (InterlockedCompareExchange(
+            &g_weaponDiscoveryEnabled, 0, 0) == 0) {
+        return;
+    }
+    if (modelObject == nullptr || weaponIndex < 0 ||
+        sourceGeneration == 0U ||
+        InterlockedCompareExchange(
+            &g_modelGlobalValidated, 0, 0) == 0) {
+        if (g_weaponModelObject != nullptr) {
+            if (g_log != nullptr) {
+                char detail[320]{};
+                std::snprintf(
+                    detail, sizeof(detail),
+                    "weapon_index=%ld model_object=%p source_generation=%llu "
+                    "reason=equipped_model_unavailable_or_changed "
+                    "read_only=1 engine_writes=0",
+                    static_cast<long>(g_weaponIndex), g_weaponModelObject,
+                    static_cast<unsigned long long>(
+                        g_weaponSourceGeneration));
+                g_log("weapon_model_discovery_lifecycle_reset", detail);
+            }
+            ResetWeaponModelObservation();
+        }
+        return;
+    }
+    const bool sourceChanged =
+        modelObject != g_weaponModelObject ||
+        weaponIndex != g_weaponIndex ||
+        sourceGeneration != g_weaponSourceGeneration;
+    if (sourceChanged &&
+        !EnumerateWeaponModel(
+            modelObject, weaponIndex, sourceGeneration)) {
+        return;
+    }
+    if (modelObject == g_weaponModelObject &&
+        weaponIndex == g_weaponIndex &&
+        sourceGeneration == g_weaponSourceGeneration) {
+        SampleWeaponModelMotion();
     }
 }
 

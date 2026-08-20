@@ -109,7 +109,7 @@ int main() {
             "COLLIDER") != 0) {
         return Fail("collider setup must have a dedicated bounded menu tab");
     }
-    if (ToolMenuRowCount(ToolMenuTab::Author) != 7U ||
+    if (ToolMenuRowCount(ToolMenuTab::Author) != 8U ||
         std::strcmp(
             ToolMenuTabName(ToolMenuTab::Author),
             "AUTHOR") != 0) {
@@ -800,6 +800,46 @@ int main() {
         return 1;
     }
     const std::size_t debugVertexCount = completeVertexCount;
+    const char* magazineAuthorRows[] = {
+        "PRIMITIVE                     MAG INSERT SOCKET",
+        "COMPONENT                     SNAP ANGLE TOLERANCE",
+        "VALUE                         -180.000 DEG",
+        "MOVEMENT                      COARSE  1.00 CM / 5.00 DEG",
+        "CAPTURE SOCKET FROM LEFT GRIP",
+        "UNDO                          AVAILABLE  (32)",
+        "RESET TO LAST LOADED RECORD",
+        "MAG CONFIGURED  AUTO-SAVE  LOAD PATH_UNAVAILABLE  SAVE WRITE_FAILED"};
+    if (!FitsCompleteMenuOverlay(
+            magazineAuthorRows,
+            sizeof(magazineAuthorRows) / sizeof(magazineAuthorRows[0]),
+            completeVertexCount)) {
+        std::fprintf(
+            stderr,
+            "complete magazine AUTHOR menu exceeded the bridge cap at %zu vertices\n",
+            completeVertexCount);
+        return 1;
+    }
+    const char* slideAuthorRows[] = {
+        "PRIMITIVE                     SLIDE GRAB RAIL",
+        "COMPONENT                     GRAB ROTATION X",
+        "VALUE                         -180.0000 DEG",
+        "MOVEMENT                      COARSE  1.00 CM / 5.00 DEG",
+        "CAPTURE GRAB BOX + HAND POSE FROM LEFT GRIP",
+        "UNDO                          AVAILABLE  (32)",
+        "RESET TO LOADED SLIDE SETTINGS",
+        "SAVE EXACT WEAPON RECORD       NOT CONFIGURED - CAPTURE FIRST",
+        "NODE SLIDEJNT  INPUT EITHER  LOAD PATH_UNAVAILABLE  SAVE WRITE_FAILED",
+        "RAIL 25.0000 CM  REAR 25.000  GRAB TRACKING WAIT  CONTROL DISABLED"};
+    if (!FitsCompleteMenuOverlay(
+            slideAuthorRows,
+            sizeof(slideAuthorRows) / sizeof(slideAuthorRows[0]),
+            completeVertexCount)) {
+        std::fprintf(
+            stderr,
+            "complete slide AUTHOR menu exceeded the bridge cap at %zu vertices\n",
+            completeVertexCount);
+        return 1;
+    }
     constexpr std::size_t kRejectedLegacyBridgeCap = 24576U;
     if (blockVertexCount <= kRejectedLegacyBridgeCap ||
         debugVertexCount <= kRejectedLegacyBridgeCap ||

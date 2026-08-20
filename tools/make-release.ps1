@@ -72,6 +72,10 @@ $files = [ordered]@{
             $Configuration)
     'bin\x86\condemnedvr-defaults.ini' =
         'config\condemnedvr-defaults.ini'
+    'bin\x86\sounds\colt45_slide_pull.wav' =
+        'sounds\colt45_slide_pull.wav'
+    'bin\x86\sounds\colt45_slide_return.wav' =
+        'sounds\colt45_slide_return.wav'
     'bin\x64\condemnedvr-host.exe' =
         ('build\condemned-x64-vs\src\condemned_host64\{0}\condemnedvr-host.exe' -f
             $Configuration)

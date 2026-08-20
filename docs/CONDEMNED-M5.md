@@ -2487,3 +2487,393 @@ isolation, persistence across a fresh live process, acknowledged external
 edits, performance, or absence of a perceived gameplay regression. Phase 2
 gesture logging remains unimplemented. Phase 3 remains blocked until a
 separately verified Retail reload/action handoff exists.
+
+## Colt equipped-model slide discovery (20 August 2026)
+
+The working tree now includes a separate observation-only diagnostic for the
+next firearm-interaction uncertainty. `-WeaponModelDiscovery` requires the
+established stereo render path and lifetime-validated equipped-model source.
+It reuses the already verified `ILTModelClient.Default` node count, traversal,
+name, parent, and transform slots; it does not add a new offset, RVA, vtable
+slot, model write, or node control.
+
+For every equipped source generation the pass enumerates at most 256 nodes and
+logs each name, handle, parent, and model-local transform. It continually
+refreshes the baseline during a two-second settle window so the normal weapon
+equip transition is less likely to become the closed reference pose. After
+`weapon_model_discovery_baseline_ready`, each node is sampled in model-local
+space and only increasing motion peaks are logged. A motion record includes
+the baseline and current positions, displacement, normalized candidate axis,
+peak travel in engine units, peak rotation, exact weapon index/model/generation,
+and the node hierarchy identifiers. The log is bounded to 1024 motion records
+per source generation.
+
+This is **implemented and automated-tested, awaiting live validation**. It
+supplies a way to distinguish a translating Colt slide/bolt node from whole-weapon
+controller motion without assuming that the missing optional `Breach` socket
+is the slide. A canonical index-76 run must wait for the baseline, fire once,
+and reload once. A credible candidate should show repeatable model-local
+translation on a stable node/subtree with a consistent axis and travel. If no
+suitable node moves, the result does not authorize an invented node: a
+separate attachment/model-piece discovery task is required.
+
+The diagnostic does not implement the requested grab, hand lock, constrained
+pull, endpoint, release, slide return, chamber, or ammo behaviour. Those
+remain gated in order: live-identify the moving owner and closed/rear endpoint
+first; author a `weapon_action_rail`; observe the controller gesture without
+Retail mutation; then prove a narrow model-node control and native weapon
+action handoff independently before connecting the gesture.
+
+The normal 20 August RelWithDebInfo gate passed 25/25 x86 and 21/21 x64
+CTest cases plus the launch-profile, focus-handoff, screenshot-helper,
+weapon-diagnostics, and release-tool PowerShell suites. The built dirty-tree
+x86 loader SHA-256 is
+`EF161A5A124A7021969E82E7CD4E3395B210FF5A0D57D47185D11DA2085E888B`.
+Those results prove compilation and guarded integration only; no portable test
+can identify the live Colt hierarchy or animation.
+
+The first requested live attempt, `run-20260820-081943`, stopped at launcher
+readiness. Its loader log proves the game reached active index 76 and captured
+Colt model object `38FBF090`, but the game had loaded the older staged x86
+loader SHA-256
+`74B2169CA45D0A8FA013AAA1ACA857473F04009FCF18FCD5F31981B63CF6AAF6`.
+That binary predates `weapon_model_discovery_armed`, so the missing event was a
+stale-stage failure rather than a rejected model query and the run supplies no
+slide/node evidence. The M2 mono stage was refreshed at
+2026-08-20T08:21:45Z and its `GameClient.dll` now matches the built diagnostic
+at SHA-256
+`EF161A5A124A7021969E82E7CD4E3395B210FF5A0D57D47185D11DA2085E888B`.
+The launcher timeout now names every missing readiness capability and suggests
+checking the prepared stage instead of reporting only a generic controller-
+hook failure.
+
+Because the launcher failed before its normal evidence-copy completion, the
+loader log remained only in `game-override` and was replaced when the stage was
+refreshed. The run directory retains its bridge and host logs, but not the full
+loader log or a loader-log hash. The old staged binary hash and quoted readiness,
+index, model, and source fields above were inspected before refresh; treat this
+as an incomplete failed-launch record, not canonical runtime evidence.
+The launcher now copies the module-local loader log into the session directory
+on any caught failure and after a `-Wait` run exits, so a later stage refresh
+does not repeat this evidence loss.
+
+## Authored Colt slide-grab rail (20 August 2026)
+
+The subsequent canonical discovery run,
+`stage\condemned-m2-mono\logs\run-20260820-082601\condemnedvr-loader.log`,
+provides **live-verified observation evidence for one Colt model lifetime**.
+Exact Retail weapon index 76 exposed node `SlideJnt`, parent
+`anim_cult45`. Its model-local closed position was
+`(14.1689, 2.8062, -8.7261)`, rear position was
+`(10.3449, 2.8362, -8.1651)`, normalized closed-to-rear axis was
+`(-0.989379, 0.007748, 0.145151)`, and maximum translation was 3.8651
+engine units. The node rotation did not change during the observed Retail
+animation. The observed node handle 3 and model pointer `0x38C50930` are
+lifetime-local evidence only. The implementation resolves `SlideJnt` by name
+again for every validated source generation and never stores either value.
+
+The AUTHOR tool menu now selects between the retained `MAG INSERT SOCKET`
+primitive and a new `SLIDE GRAB RAIL` primitive. An exact index-76 Colt record
+may seed the observed node name, closed point, normalized rail axis, maximum
+travel, and a rear threshold. It deliberately remains unconfigured until an
+author captures or adjusts the off-hand model-local grab-box pose and authored
+hand pose; the animation pivot is not treated as a contact point. The editor
+provides oriented-box position/rotation/half-extents, hand position/rotation,
+closed position, axis, travel, threshold, and GRIP/TRIGGER/EITHER activation
+components, fine/coarse adjustment, capture, undo, reset-to-loaded, explicit
+save, and box/rail/endpoints/hand-pose gizmos. Status distinguishes configured,
+not configured, invalid, unavailable, and unsaved. Magazine authoring retains
+its previous automatic persistence behavior.
+
+Slide records are stored independently as `slide_grab_rail` in the existing
+exact index plus case-sensitive catalog-name store. Version 2 persists every
+field. Version-1 records migrate with activation `EITHER`; malformed,
+non-finite, non-normalized, out-of-range, wrong-name, or incomplete records
+fail closed without replacing the caller's current settings.
+
+The runtime path is an explicit Idle/Candidate/Attached/Released machine.
+Candidate and attachment require Playing state, foreground focus, fresh
+off-hand tracking and input, exact index/name identity, the same lifetime-valid
+model and source generation, finite transforms/settings, oriented-box overlap,
+per-lifetime name resolution, and the configured activation edge. The attached
+controller displacement is transformed into held-model local space, projected
+onto the observed axis, and clamped to `[0, maximumTravel]`. The registered
+node control changes only position along that rail, leaves the incoming Retail
+rotation intact, and moves the authored left-hand IK target by the same
+translation. The dominant weapon-hand path is unchanged. Only the matching VR
+off-hand Run/Block source is consumed while candidate/attached, preventing the
+grab edge from becoming a Retail command while preserving keyboard, mouse,
+other controller, non-VR, and host-absent behavior.
+
+The engine-write boundary adds no RVA, object offset, signature, vtable slot,
+or node API. The Colt-only `-SlideControlTest` path reuses the already
+identity-validated `ILTModelClient.Default` GetNode/GetNodeTransform and
+specific AddNodeControl/RemoveNodeControl mechanism established by the arm-IK
+work. It prepares against the current exact model/generation, resolves by name,
+records the before transform, registers one pass-through-by-default callback,
+and removes it on every detach. If the incoming Retail position differs from
+the closed rail by more than 0.15 units along or off the rail, the callback
+classifies an incompatible Retail fire/reload animation, performs no write,
+and requests deterministic immediate detach/removal. Release, focus loss,
+stale tracking/input, game-state change, identity/model/generation change,
+invalid transform, menu opening, resolution/control failure, and incompatible
+Retail animation use the same rollback path. Even a callback-removal failure
+first disables its write, so Retail transforms pass through.
+
+Bounded `m5_slide_grab_transition`, `m5_slide_node_resolved`,
+`m5_slide_node_control_sample`, and detach/removal events expose
+`INPUT -> TRANSFORM -> STATE -> DECISION -> ENGINE HANDOFF -> RESULT` fields:
+weapon identity, generation, node resolution, controller/input, overlap,
+controller model-local position, projected/clamped travel, hand target,
+before/requested/after transform, node-control result, detach reason, and
+Retail-ownership restoration. Samples are restricted to transition/endpoint
+evidence rather than emitted every frame.
+
+This slice is **implemented and automated-tested, awaiting live validation**.
+Portable tests prove the math, validation, persistence/migration, editor
+semantics, activation choices, and fail-closed state transitions. They do not
+prove that the live Colt accepts the callback write, the authored hand aligns
+perceptually, the Retail command is isolated, or callback removal restores
+normal firing/reload animation. The exact live gate is in
+`docs/TESTING.md`; do not promote this feature to live verified before that
+evidence is captured.
+
+### First authored-interaction live attempt
+
+Live run `run-20260820-091557` used the guarded slide-control command and
+current exact Colt identity. It armed the verified node-control boundary,
+loaded the index-76 `SlideJnt` seed for source generation 1, and correctly
+reported `configured=0`, `load=not_found`, and no engine handoff. Both arm
+callbacks installed and became active. The user then opened VR Tools and
+navigated to AUTHOR, but the tool panel disappeared. The preserved loader log
+identifies the cause:
+`m5_vr_tool_menu_overlay_failed triangle_buffer_overflow=1
+vertices=32766 limit=32768`. No slide capture, save, node resolution,
+attachment, or node-control write occurred, so this run supplies no slide
+interaction acceptance.
+
+The smallest correction removes redundant non-interactive magazine diagnostics
+and compacts slide rail/status text. All eight AUTHOR controls remain, magazine
+auto-save is unchanged, and slide configured/invalid/unavailable/unsaved,
+load/save, node, input, rail, overlap, and guarded-control states remain
+visible. New complete-menu fixtures render worst-case magazine and slide
+AUTHOR strings through the same glyph, panel-transform, and 32,768-vertex
+boundary. The full gate passes 26/26 x86 and 22/22 x64 CTest cases plus the
+normal PowerShell suites. The corrected x86 loader SHA-256 is
+`708EBD9DDFE21A3E1BDA7AEBAB8393C0977C44DA5B8F977A2389770C1B1343F1`.
+
+Two immediate correction rechecks, `run-20260820-092112` and
+`run-20260820-092228`, did not enter Playing state. Their host and bridge
+connected and exchanged frames, while the loader remained in
+`splash -> demo -> screen`; the guarded launcher rolled each session back at
+its 45-second gameplay-camera readiness timeout. They neither reproduce nor
+clear the AUTHOR failure. The compacted AUTHOR panel and all later slide gates
+remain **implemented and automated-tested, awaiting live validation**.
+
+### First live attachment and rejected hand-pose presentation
+
+Live run `run-20260820-092549` cleared the AUTHOR overlay failure. The panel
+remained visible through navigation and editing, emitted no
+`m5_vr_tool_menu_overlay_failed`, captured a physical off-hand grab/hand pose,
+and saved the exact index-76 / case-sensitive `colt45_Unbreakable` record.
+`SlideJnt` was resolved by name for source generation 1 and again for source
+generation 2 after the equipped-model lifetime changed; no persisted handle or
+pointer was reused.
+
+For generation 2, the controller produced inside-volume Candidate transitions
+and several activation-edge Attachments. The guarded callback reported
+position-only writes with unchanged Retail rotation. Bounded samples reached
+the verified rear endpoint `(10.3449, 2.8361, -8.1651)`: projected values above
+the endpoint were clamped to exactly 3.8651 units. Release removed the specific
+callback and reported `retail_ownership_restored=1`. The user explicitly
+confirmed that attachment and slide motion worked. This is live evidence for
+the Colt node-control rail, per-lifetime name resolution, clamp, and release
+path, but not blanket feature acceptance.
+
+The attached hand presentation failed the live gate: the user reported that
+the hand pose was incorrect. The runtime had composed the authored model-local
+pose into world space and published it directly, while the normal free/support
+left-hand path applies `ResolveToolMenuLeftHandIkTarget`. AUTHOR captures the
+raw physical OpenXR grip pose, so bypassing the established controller-local
+wrist translation/rotation was a pose-convention error. The corrected path now
+applies the same LEFT IK calibration after model-to-world composition and logs
+the final calibrated target basis. The run also exposed repeated source-only
+`m5_slide_node_control_detached` records while the menu was open. Menu teardown
+is now executed only on open/close transitions, and `EndSlideNodeControl` logs
+a detach only when a callback was actually installed.
+
+The post-correction full gate passes 26/26 x86 and 22/22 x64 CTest cases plus
+the launch-profile, focus-handoff, screenshot-helper, schema-v4 diagnostics,
+and release-tool PowerShell suites. The corrected x86 loader SHA-256 is
+`C75C8C570D313A982D27753BD1F3045A6DC65DBF9684E933228E6FA838B2C4E0`.
+These two corrections are automated-only until a fresh staged run confirms the
+authored hand visually and the absence of per-frame detach records. The run did
+not explicitly accept absence of unintended Retail action, focus-loss reason,
+or normal post-release firing/reload, so those gates remain open.
+
+The first corrected staging attempt, `run-20260820-094432`, loaded the exact
+corrected hash and armed slide control, but remained in
+`splash -> demo -> screen` until the 45-second gameplay readiness timeout. It
+contains no Colt source, AUTHOR, attachment, or corrected-hand evidence and is
+classified only as a guarded readiness failure.
+
+### Corrected authored-hand live acceptance
+
+Corrected run `run-20260820-124747` loaded staged x86 loader SHA-256
+`C75C8C570D313A982D27753BD1F3045A6DC65DBF9684E933228E6FA838B2C4E0`.
+The exact saved Colt record entered Candidate only on authored-volume overlap
+and published attached hand targets with
+`hand_target_basis=authored_grip_plus_left_ik_calibration`. Across the run,
+16 callback installations have exactly 16 corresponding installed-callback
+detachments; there is no `m5_vr_tool_menu_overlay_failed` event and no source-
+only per-frame detach volume. Endpoint samples repeatedly clamp projected
+travel to 3.8651 units with unchanged rotation and matching requested/after
+positions, while every release reports successful callback removal and
+`retail_ownership_restored=1`.
+
+The source lifetime advanced from generation 1 to generation 5. `SlideJnt`
+was resolved by name again for generation 5 before attachment even though the
+allocator reused the same numeric model address; the runtime did not reuse a
+persisted node handle. The user accepted the result explicitly: the slide
+worked, the pose was saved, and the interaction was visually accepted as
+correct. This promotes the authored pose, hand attachment, rail motion, rear
+clamp, release restoration, transition-only logging, and per-generation name-
+resolution portions to **live verified** for the Colt configuration exercised
+in this run.
+
+The response did not explicitly state whether an attachment produced a
+gunshot/other Retail action, whether normal fire/reload animation resumed after
+release, or whether focus loss detached with its dedicated reason. Those gates
+remain open and are not inferred from the positive presentation judgment.
+
+### User-supplied slide pull and return sounds
+
+Static inspection of the verified Retail archive first established that the
+Colt equip rack uses the database alias `colt45_select`, mapped to
+`global\weapons\colt45\snd\colt45_select.wav`. That 44.1-kHz, 16-bit mono
+355-ms file contains two strong mechanical regions separated by a low-energy
+boundary near 156 ms, so Retail bakes pullback and spring return into one
+compound recording. `colt45_deselect.wav` exists in the archive but has no
+corresponding Colt deselect alias in `database\Dark.Gamdb00p`; it is not
+evidence for a standalone return sound. The Retail extraction remained under
+the ignored local analysis stage and is not a redistributable input.
+
+The user subsequently supplied two Creative Commons Zero assets:
+
+- `sounds\colt45_slide_pull.wav`: 44.1-kHz 16-bit stereo PCM, 415 ms,
+  SHA-256
+  `DDC9920E64C99E0F75DAED6B5F3D6B3DDB13933C12A4E0631D77109ECAF1FC42`;
+- `sounds\colt45_slide_return.wav`: 44.1-kHz 16-bit mono PCM, 257 ms,
+  SHA-256
+  `028A7976EBC5B629F944C2AF3126296E4CDC19512DE9F09829D41209CEF7485E`.
+
+The pull recording is Nanashi's `Slide pull.wav`, Freesound sound 104409. The
+return recording is vabadus's `Beretta M9 slide release`, Freesound sound
+151067. Both source pages identify the files as CC0; their canonical URLs,
+creators, CC0 1.0 terms, and repository hashes are recorded in
+`THIRD_PARTY_NOTICES.md`. Attribution is not required, but provenance is
+retained. The files are eligible for source and release packaging.
+
+The implementation uses the documented Windows `PlaySoundW` filename API and
+links `winmm`; it does not call a guessed Retail sound-manager RVA or ABI. The
+loader resolves only module-relative `sounds\colt45_slide_pull.wav` and
+`sounds\colt45_slide_return.wav`. The pull cue fires after attached travel
+reaches the authored `rearThresholdUnits`; the Colt seed uses 3.50 of the
+verified 3.8651-unit maximum. While attachment is retained, moving forward to
+at least 0.25 units below the rear threshold rearms the cue, and the next rear
+threshold crossing fires another numbered pull cycle. This hysteresis prevents
+endpoint jitter from causing duplicates. The return cue is one-shot only when the
+configured input is normally released while the most recent travel remains at
+least 0.10 units and `EndSlideNodeControl` reports that Retail ownership was
+restored. Returning the slide to closed while still attached,
+node-control failure, focus/tracking/game-state loss, menu opening, identity or
+generation change, model loss, and incompatible Retail animation produce no
+false return cue and stop pending project playback after a pull.
+
+`m5_slide_grab_sound` records
+`STATE -> DECISION -> WINDOWS_AUDIO_HANDOFF -> RESULT`, exact weapon identity,
+source generation, cue/action, numbered pull cycle, travel, rear threshold,
+relative asset, availability, handoff
+request/result, detach reason, and Retail-ownership restoration. CMake copies
+the assets beside the built x86 loader and both M2 preparation scripts stage
+and hash them under `game-override\sounds` without changing Retail files.
+
+The full automated gate passes 26/26 x86 and 22/22 x64 CTest cases plus all
+five PowerShell suites. Focused tests cover pull only on the authored rear
+threshold, no duplicate within the endpoint hysteresis band, forward-motion
+rearm and a second pull without input release, one-shot input-release return,
+cancellation without return, already-closed release, and rejected node-control
+attachment. The staged x86
+loader is
+`A5B79C8741CAA3E4F09833B17B7D9D218F434F0B794E19536D9FA77E78E16036`.
+This sound slice is **implemented and automated-tested, awaiting live auditory
+validation**; neither compilation nor `PlaySoundW` initiation proves that the
+headset receives the cue at the intended timing and level.
+
+### First slide-sound live timing result
+
+Run `run-20260820-133700` loaded the initial sound-enabled loader
+`C9146F6685689C73B5F75F819F2299EC51DAF753F3A8E3CAE4EA87FE4F11B5D1`.
+It recorded 44 installed attachments and 44 installed-callback detachments
+across source generations 1, 3, and 5. Exactly 44 pull handoffs occurred, 35
+displaced input releases produced return handoffs after
+`retail_ownership_restored=1`, and nine releases after the slide had returned
+to zero produced stop/no-return. Every requested asset was available and all
+88 Windows handoffs returned success. There was no AUTHOR overlay failure.
+
+The user supplied the decisive perceptual correction: pullback audio should
+trigger at maximum pull length or close to it. The initial build triggered on
+the first frame at or above 0.10 units; observed pull request travel ranged
+from 0.1009 to 0.4762 units, so the timing was correctly rejected. Current
+source replaces that early threshold with the already-authored
+`projection.rearReached` result, 3.50 units for the saved Colt seed, and adds
+`rear_threshold` to sound telemetry. Return-on-release policy is unchanged.
+The corrected hash above is staged and awaits a live recheck; do not treat the
+first run as acceptance of corrected pull timing or of the return sound.
+
+Corrected run `run-20260820-134612` loaded
+`F4648986D7EECC31FD013603AAA75DD095DEB3D7FC38CA9FA524CCB0948C91B4`.
+Across 12 installed attachments, pull cues occurred at travel values from
+3.5050 through 3.8651 units; none occurred below the logged 3.5000-unit rear
+threshold. Eleven input releases while displaced produced return cues after
+`retail_ownership_restored=1`. One attachment was pulled beyond the rear
+threshold, then returned to closed while still held; its release correctly
+produced `action=stop travel=0.0000` and no return cue. All 24 requested
+Windows handoffs returned success, all required assets were available, and
+all 12 installed callbacks detached. Fresh name-resolution evidence spans
+source generations 1, 3, and 5, with no AUTHOR overlay failure.
+
+This accepts the corrected **live cue-policy and handoff timing evidence**.
+The user subsequently judged the pull/return timing and content perfection,
+so the tested single-pull audio behavior is live accepted. The later repeat-
+pull rearm extension was not present in this run and remains implemented and
+automated-tested, awaiting live validation.
+
+### Attached repeat-pull extension live handoff result
+
+The current staged loader
+`A5B79C8741CAA3E4F09833B17B7D9D218F434F0B794E19536D9FA77E78E16036`
+allows another pull cue during the same attachment after the slide first
+crosses the rear threshold, moves forward beyond a 0.25-unit hysteresis band,
+and crosses the rear threshold again. Telemetry adds `pull_cycle`; automated
+coverage requires cycles 1 and 2, and proves that jitter only 0.10 units below
+the threshold does not rearm. This is not live evidence that repeated cues are
+audible or perceptually correct.
+
+Repeat-cycle run `run-20260820-135900` loaded that exact staged hash. Eleven
+successful attachments produced 24 pull handoffs. Two continuous attachments
+each advanced monotonically from `pull_cycle=1` through `pull_cycle=6` before
+input release, directly proving that forward motion rearmed the cue while the
+attachment remained active. All pull requests occurred from 3.5123 through
+3.8651 units and therefore met the logged 3.5000-unit rear threshold. Nine
+displaced input releases emitted return cues only after
+`retail_ownership_restored=1`; two releases at closed emitted stop/no-return.
+All 11 installed callbacks detached with Retail ownership restored, all audio
+handoffs succeeded, and no sound/control failure or AUTHOR overlay failure was
+recorded. Node `SlideJnt` was freshly resolved by name for source generation 3.
+
+This accepts the **live repeat-cycle state, decision, engine-handoff, and
+result evidence**. The user then explicitly judged the repeated behavior
+perfect, accepting audibility, timing, and absence of unwanted duplicates for
+the tested Colt path. The attached repeat-pull audio extension is live
+accepted.

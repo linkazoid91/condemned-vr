@@ -126,6 +126,28 @@ try {
             Join-Path $PSScriptRoot ('release\' + $wrapper)) -PathType Leaf) (
             'Release wrapper is missing: {0}' -f $wrapper)
     }
+
+    foreach ($expectation in @(
+            @{
+                Path = 'make-release.ps1'
+                Text = @(
+                    'bin\x86\sounds\colt45_slide_pull.wav',
+                    'bin\x86\sounds\colt45_slide_return.wav')
+            },
+            @{
+                Path = 'release\install.ps1'
+                Text = @(
+                    'sounds\colt45_slide_pull.wav',
+                    'sounds\colt45_slide_return.wav')
+            })) {
+        $scriptText = Get-Content -Raw -LiteralPath (
+            Join-Path $PSScriptRoot $expectation.Path)
+        foreach ($requiredText in $expectation.Text) {
+            Assert-True $scriptText.Contains($requiredText) (
+                '{0} is missing licensed slide-audio payload: {1}' -f
+                $expectation.Path, $requiredText)
+        }
+    }
 } finally {
     $validatedRoot = Assert-UnderCondemnedVrProjectRoot $testRoot
     if (Test-Path -LiteralPath $validatedRoot -PathType Container) {

@@ -160,6 +160,10 @@ bool InstallMenuToggleHook(
 void ReadPhysicalMeleeToolTelemetry(
     ToolMenuMeleeTelemetry& telemetry) noexcept;
 
+// Renderer-side slide interaction uses the same verified game-state and
+// foreground gates as controller command injection.
+bool BindingInputAllowsSlideGrab() noexcept;
+
 
 // Coherent renderer-facing view of the configured swept weapon volume and
 // the exact proxy origin currently supplied to Retail's collision transform.

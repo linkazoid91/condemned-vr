@@ -70,6 +70,7 @@ target_link_libraries(condemnedvr-gameclient-loader PRIVATE
   fearvr-common
   fearvr-warnings
   minhook
+  winmm
 )
 set_target_properties(condemnedvr-gameclient-loader PROPERTIES
   OUTPUT_NAME "GameClient"
@@ -89,8 +90,36 @@ add_custom_command(TARGET condemnedvr-gameclient-loader POST_BUILD
     "$<TARGET_FILE_DIR:condemnedvr-gameclient-loader>/condemnedvr-defaults.ini"
   VERBATIM
 )
+
+set(CONDEMNEDVR_SLIDE_SOUND_DIRECTORY
+  "${CMAKE_SOURCE_DIR}/sounds"
+)
+set(CONDEMNEDVR_SLIDE_SOUND_FILES
+  "colt45_slide_pull.wav"
+  "colt45_slide_return.wav"
+)
+foreach(sound_file IN LISTS CONDEMNEDVR_SLIDE_SOUND_FILES)
+  if(NOT EXISTS "${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/${sound_file}")
+    message(FATAL_ERROR
+      "Slide sound missing: ${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/${sound_file}")
+  endif()
+endforeach()
+add_custom_command(TARGET condemnedvr-gameclient-loader POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+    "$<TARGET_FILE_DIR:condemnedvr-gameclient-loader>/sounds"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/colt45_slide_pull.wav"
+    "$<TARGET_FILE_DIR:condemnedvr-gameclient-loader>/sounds/colt45_slide_pull.wav"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/colt45_slide_return.wav"
+    "$<TARGET_FILE_DIR:condemnedvr-gameclient-loader>/sounds/colt45_slide_return.wav"
+  VERBATIM
+)
 set_property(TARGET condemnedvr-gameclient-loader APPEND PROPERTY
-  LINK_DEPENDS "${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}"
+  LINK_DEPENDS
+    "${CONDEMNEDVR_DEFAULT_SETTINGS_FILE}"
+    "${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/colt45_slide_pull.wav"
+    "${CONDEMNEDVR_SLIDE_SOUND_DIRECTORY}/colt45_slide_return.wav"
 )
 
 add_executable(verify-condemned-gameclient

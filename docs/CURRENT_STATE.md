@@ -26,19 +26,122 @@ persistence and a longer release soak remain unresolved.
 Detailed active evidence: [`CONDEMNED-M4.md`](CONDEMNED-M4.md) for forensic
 controls and [`CONDEMNED-M5.md`](CONDEMNED-M5.md) for the melee checkpoint.
 
-A parallel Phase-1 interaction-authoring scaffold is **implemented and
-automated-tested, awaiting live validation**. The existing
-`-WeaponGripCalibration` / VR Tools path now authors only one exact
-index-and-catalog-name magazine insertion socket. It captures a fresh off-hand
-grip into the validated held-model local frame, draws a box/axes/rail and
-raw/snapped ghost, exposes centimetre/degree fine/coarse edits plus undo/reset,
-persists an independent `magazine_socket` record, and accepts a revisioned
-PID/index/name/base-revision command only after successful settings
-persistence. Every event declares no engine handoff, ammo mutation, weapon
-state mutation, or Retail state mutation. The full gate passes 25/25 x86 and
-21/21 x64 CTest cases plus the three normal PowerShell validation suites.
-No headset/game evidence exists. Phase 2 gesture logging is unimplemented;
-Phase 3 is blocked on a separately verified Retail reload/action handoff.
+A parallel interaction-authoring platform is **implemented and
+automated-tested, awaiting live validation**. The `-WeaponGripCalibration` /
+VR Tools `AUTHOR` tab retains the exact-identity `MAG INSERT SOCKET` editor and
+adds a primitive selector for `SLIDE GRAB RAIL`. The slide editor seeds only
+the live-observed Colt node/rail facts, while requiring the author to capture
+or adjust the physical grab volume and hand pose. Both primitives use
+model-local capture, fine/coarse component edits, undo/reset, visible gizmos,
+and the exact index-and-case-sensitive-catalog-name settings store. The slide
+record has explicit save/unsaved state and backward-compatible schema loading;
+the existing magazine auto-save behavior is unchanged.
+
+Live run `run-20260820-091557` exposed and bounded an AUTHOR overlay triangle-
+budget regression at 32,766/32,768 vertices. The compacted AUTHOR panel then
+passed its live visual recheck in `run-20260820-092549`: the menu remained
+visible while navigating and editing the slide primitive, no overlay-failure
+event occurred, and an exact Colt slide record was captured and saved. The
+worst-case complete-overlay tests retain both magazine and slide coverage.
+Intervening runs `run-20260820-092112` and `run-20260820-092228` never reached
+Playing state and remain readiness failures rather than interaction evidence.
+
+The index-76 model discovery and name-resolution policy are now **live verified
+across multiple model-source lifetimes**:
+`SlideJnt`, parent `anim_cult45`, translated from
+`(14.1689, 2.8062, -8.7261)` along
+`(-0.989379, 0.007748, 0.145151)` for 3.8651 engine units with unchanged
+rotation in `run-20260820-082601`. Run `run-20260820-092549` subsequently
+resolved `SlideJnt` by name for source generations 1 and 2 after a model
+lifetime change. Corrected run `run-20260820-124747` repeated resolution for
+source generations 1 and 5 before attachment. Its observed handles and model
+pointers remain lifetime-local evidence and are never persisted.
+
+The authored Colt slide-grab/runtime path has a **live-accepted core
+interaction with remaining safety/regression gates**. It is a fail-closed
+Idle/Candidate/Attached/Released state machine gated by fresh tracking/input,
+focus, Playing state, exact weapon identity, source generation, finite
+authoring data, volume overlap, activation edge, and per-lifetime `SlideJnt`
+name resolution. It projects off-hand displacement onto the observed rail,
+clamps it to 3.8651 units, moves the authored hand target with the slide, and
+suppresses only the matching VR off-hand Retail command while captured. The
+Colt-only opt-in reuses the existing identity-validated `ILTModelClient` node-
+control registration/removal boundary. In `run-20260820-092549`, Candidate and
+Attached transitions, callback writes/readback, the 3.8651-unit rear clamp,
+input-release removal, Retail-ownership restoration, and fresh generation-2
+name resolution all occurred; the user confirmed that attachment and slide
+motion worked. The same user rejected the attached hand pose. Inspection
+showed the slide path bypassed the established LEFT IK wrist calibration even
+though AUTHOR captured the raw OpenXR grip pose. Current source applies that
+same controller-local correction before publishing the attached hand target
+and makes menu teardown telemetry transition-only. Corrected run
+`run-20260820-124747` produced 16 attachments and exactly 16 installed-callback
+detachments, no overlay failure or source-only detach spam, 3.8651-unit clamps,
+and fresh resolution on source generations 1 and 5. The user accepted the
+saved pose and slide interaction as correct. No claim is yet made for absence
+of unintended Retail action, explicit focus-loss cancellation, or normal post-
+release fire/reload animation because those observations were not stated.
+
+Two user-supplied CC0 WAVs are now wired into the
+slide interaction. A project-owned Windows `PlaySoundW` adapter avoids any
+unverified Retail sound-manager call. It emits the pull cue after rearward
+travel reaches the authored rear threshold (3.50 of the Colt's 3.8651 units),
+then rearms after the attached slide moves at least 0.25 units forward of that
+threshold so another complete pull can cue without releasing grip. Endpoint
+jitter inside that hysteresis band remains silent. The return cue is emitted
+only for an ordinary input release while the slide remains displaced and
+node-control removal succeeds; safety cancellation stops pending playback.
+Structured
+`m5_slide_grab_sound` evidence separates state, decision, Windows audio
+handoff, and result. The local M2 stages copy and hash the WAVs under the
+loader's `sounds` directory. Their Freesound source URLs, creators, CC0 1.0
+terms, and repository hashes are recorded in `THIRD_PARTY_NOTICES.md`, so the
+audio assets are eligible for source and release packaging. Automated tests
+and a successful `PlaySoundW` return value are not live auditory proof.
+
+Live run `run-20260820-133700` exercised the first sound build. Forty-four
+attachments produced 44 pull handoffs, 35 displaced releases produced 35
+return handoffs, and nine already-closed releases produced stop/no-return;
+all assets were available, all Windows handoffs reported success, and all 44
+callbacks detached with Retail ownership restored. The user rejected the pull
+cue timing because that build fired at the initial 0.10-unit movement
+threshold. Current source instead fires on `projection.rearReached` and is
+implemented/automated-tested/staged, awaiting a corrected live timing check.
+
+Corrected run `run-20260820-134612` supplies the process-side timing recheck:
+all 12 pull cues occurred between 3.5050 and 3.8651 units, with none below the
+authored 3.50-unit rear threshold. Eleven displaced releases produced return
+cues and one already-closed release produced stop/no-return. All 24 Windows
+handoffs succeeded with required assets available, and all 12 installed
+callbacks detached with Retail ownership restored. The user explicitly
+accepted the perceived pull/return timing and content as correct. This accepts
+the single-pull live audio slice; the later repeat-pull rearm extension remains
+implemented and automated-tested with the process-side live gate now complete.
+
+Repeat-cycle run `run-20260820-135900` loaded staged x86 loader SHA-256
+`A5B79C8741CAA3E4F09833B17B7D9D218F434F0B794E19536D9FA77E78E16036`.
+Eleven successful attachments produced 24 pull cues, including two continuous
+attachments that each advanced monotonically through `pull_cycle=1..6`
+without an input release. Every pull handoff occurred at 3.5123-3.8651 units,
+at or beyond the 3.5000-unit rear threshold. Nine displaced releases emitted
+return cues after ownership restoration, two closed releases emitted stop/no-
+return, all 11 installed callbacks detached with Retail ownership restored,
+and no failed sound/control handoff or AUTHOR overlay failure was recorded.
+This is live process-side evidence for rearming and bounded cue dispatch; the
+user explicitly confirmed that repeated audibility and feel were perfect.
+The repeat-pull audio extension is therefore **live accepted** for the tested
+Colt path.
+
+The current 20 August RelWithDebInfo gate passed 26/26 x86 and 22/22 x64
+CTest cases plus all normal PowerShell validation suites. The dirty-tree x86
+loader SHA-256 is
+`A5B79C8741CAA3E4F09833B17B7D9D218F434F0B794E19536D9FA77E78E16036`;
+this proves compilation, wiring, hand-target calibration math, slide-sound cue
+policy including repeat rearming/hysteresis, and headset-free regressions. Run
+`run-20260820-124747` separately
+supplies the live acceptance for the corrected hand pose and transition-only
+telemetry described above; it predates the sound adapter and supplies no audio
+acceptance.
 
 The current source state is also the **consolidated M5 developer feature
 platform**. The normal build compiles the established loader, D3D9/OpenXR,
@@ -47,13 +150,13 @@ diagnostic paths together with the newer player-collision and Phase-1
 authoring slices. The required x86 game side and x64 host remain separate
 artifacts in one coordinated build; unsafe diagnostics remain opt-in and the
 headset-rejected automatic swing attack remains OFF. The 20 August
-RelWithDebInfo gate passed 25/25 x86 and 21/21 x64 CTest cases plus the
+RelWithDebInfo gate passed 26/26 x86 and 22/22 x64 CTest cases plus the
 launch-profile, foreground-handoff, screenshot-helper, schema-v4 weapon
 watcher, and new release-tool PowerShell regressions.
 The x86 loader SHA-256 is
-`F8F4E5F11DCD981830479DEF6ED9A5619682BCA5BEF859EE4000154C2D089CC9`.
+`708EBD9DDFE21A3E1BDA7AEBAB8393C0977C44DA5B8F977A2389770C1B1343F1`.
 The manifest correctly records base commit
-`da0e429aa18ef8a8fe189ef26b64119974a477ec` plus a dirty working tree, so this
+`503fe3150012762403ce157d136ef047a0e687f8` plus a dirty working tree, so this
 is an **automated-only local platform build**, identified by artifact hashes
 rather than by the commit alone.
 

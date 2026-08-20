@@ -5,6 +5,7 @@
 #include "arm_ik.h"
 #include "condemned_interaction_authoring.h"
 #include "condemned_tool_menu.h"
+#include "condemned_slide_grab.h"
 #include "condemned_right_hand_ik.h"
 
 namespace condemnedvr {
@@ -160,6 +161,16 @@ WeaponSettingsStoreResult SaveMagazineInsertionSocketSettings(
     std::int32_t weaponIndex,
     const char* weaponName,
     const MagazineInsertionSocketSettings& settings) noexcept;
+
+WeaponSettingsStoreResult LoadSlideGrabRailSettings(
+    std::int32_t weaponIndex,
+    const char* expectedWeaponName,
+    SlideGrabRailSettings& settings) noexcept;
+
+WeaponSettingsStoreResult SaveSlideGrabRailSettings(
+    std::int32_t weaponIndex,
+    const char* weaponName,
+    const SlideGrabRailSettings& settings) noexcept;
 
 // Stored independently from the Melee/Weapon record so existing user tuning
 // remains backward-compatible while hand alignment can evolve on its own.

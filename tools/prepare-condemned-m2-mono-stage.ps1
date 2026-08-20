@@ -33,6 +33,10 @@ $loaderSource = Join-Path $x86Root (
     'condemned_gameclient_loader\RelWithDebInfo\GameClient.dll')
 $defaultsSource = Join-Path $x86Root (
     'condemned_gameclient_loader\RelWithDebInfo\condemnedvr-defaults.ini')
+$pullSoundSource = Join-Path $x86Root (
+    'condemned_gameclient_loader\RelWithDebInfo\sounds\colt45_slide_pull.wav')
+$returnSoundSource = Join-Path $x86Root (
+    'condemned_gameclient_loader\RelWithDebInfo\sounds\colt45_slide_return.wav')
 $bridgeSource = Join-Path $x86Root (
     'condemned_proxy32\RelWithDebInfo\condemnedvr-d3d9.dll')
 $clientVerifier = Join-Path $x86Root (
@@ -46,7 +50,8 @@ $hostSource = Assert-UnderCondemnedVrProjectRoot (
 $originalSource = Join-Path $retailRoot 'Game\GameClient.dll'
 $retailExe = Join-Path $retailRoot 'Condemned.exe'
 foreach ($required in @(
-        $loaderSource, $defaultsSource, $bridgeSource, $clientVerifier, $exeVerifier,
+        $loaderSource, $defaultsSource, $pullSoundSource, $returnSoundSource,
+        $bridgeSource, $clientVerifier, $exeVerifier,
         $hostSource, $originalSource, $retailExe)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required M2 mono input is missing: $required"
@@ -74,7 +79,7 @@ New-Item -ItemType Directory -Force -Path @(
     $stageRoot, $moduleDirectory, $userDirectory, $logDirectory) | Out-Null
 $allowedNames = @(
     'GameClient.dll', 'GameOrig.dll', 'condemnedvr-defaults.ini', 'condemnedvr-d3d9.dll',
-    'condemnedvr-loader.log')
+    'condemnedvr-loader.log', 'sounds')
 $existing = @(Get-ChildItem -LiteralPath $moduleDirectory -Force)
 $unexpected = @($existing | Where-Object {
     $allowedNames -inotcontains $_.Name
@@ -89,12 +94,16 @@ if ($existing.Count -gt 0 -and -not $Refresh) {
 $stagedFiles = [ordered]@{
     'GameClient.dll' = $loaderSource
     'condemnedvr-defaults.ini' = $defaultsSource
+    'sounds\colt45_slide_pull.wav' = $pullSoundSource
+    'sounds\colt45_slide_return.wav' = $returnSoundSource
     'GameOrig.dll' = $originalSource
     'condemnedvr-d3d9.dll' = $bridgeSource
 }
 $records = New-Object Collections.Generic.List[object]
 foreach ($name in $stagedFiles.Keys) {
     $destination = Join-Path $moduleDirectory $name
+    New-Item -ItemType Directory -Force -Path (
+        Split-Path -Parent $destination) | Out-Null
     [IO.File]::Copy($stagedFiles[$name], $destination, [bool]$Refresh)
     $sourceHash = Get-FileSha256 $stagedFiles[$name]
     $destinationHash = Get-FileSha256 $destination

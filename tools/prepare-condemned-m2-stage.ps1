@@ -36,6 +36,10 @@ $loaderSource = Join-Path $buildRoot (
     'condemned_gameclient_loader\RelWithDebInfo\GameClient.dll')
 $defaultsSource = Join-Path $buildRoot (
     'condemned_gameclient_loader\RelWithDebInfo\condemnedvr-defaults.ini')
+$pullSoundSource = Join-Path $buildRoot (
+    'condemned_gameclient_loader\RelWithDebInfo\sounds\colt45_slide_pull.wav')
+$returnSoundSource = Join-Path $buildRoot (
+    'condemned_gameclient_loader\RelWithDebInfo\sounds\colt45_slide_return.wav')
 $bridgeSource = Join-Path $buildRoot (
     'condemned_proxy32\RelWithDebInfo\condemnedvr-d3d9-diagnostic.dll')
 $gameClientVerifier = Join-Path $buildRoot (
@@ -49,6 +53,8 @@ $retailExecutable = Join-Path $retailRoot 'Condemned.exe'
 foreach ($required in @(
         $loaderSource,
         $defaultsSource,
+        $pullSoundSource,
+        $returnSoundSource,
         $bridgeSource,
         $gameClientVerifier,
         $executableVerifier,
@@ -91,7 +97,8 @@ if (Test-Path -LiteralPath $moduleDirectory) {
             'GameOrig.dll',
             'condemnedvr-d3d9.dll',
             'condemnedvr-loader.log',
-            'condemnedvr-d3d9.log'
+            'condemnedvr-d3d9.log',
+            'sounds'
         )
         $unexpected = @($existing |
             Where-Object { $allowedNames -inotcontains $_.Name })
@@ -108,6 +115,8 @@ New-Item -ItemType Directory -Path $userDirectory -Force | Out-Null
 $stagedFiles = [ordered]@{
     'GameClient.dll' = $loaderSource
     'condemnedvr-defaults.ini' = $defaultsSource
+    'sounds\colt45_slide_pull.wav' = $pullSoundSource
+    'sounds\colt45_slide_return.wav' = $returnSoundSource
     'GameOrig.dll' = $originalSource
     'condemnedvr-d3d9.dll' = $bridgeSource
 }
@@ -115,6 +124,8 @@ $records = New-Object Collections.Generic.List[object]
 foreach ($name in $stagedFiles.Keys) {
     $source = $stagedFiles[$name]
     $destination = Join-Path $moduleDirectory $name
+    New-Item -ItemType Directory -Force -Path (
+        Split-Path -Parent $destination) | Out-Null
     [IO.File]::Copy($source, $destination, [bool]$Refresh)
     $sourceHash = Get-FileSha256 $source
     $destinationHash = Get-FileSha256 $destination

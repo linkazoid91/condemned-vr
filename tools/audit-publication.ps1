@@ -81,6 +81,22 @@ if (Test-Path -LiteralPath $attributionPath -PathType Leaf) {
     }
 }
 
+$thirdPartyNoticesPath = Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'
+if (Test-Path -LiteralPath $thirdPartyNoticesPath -PathType Leaf) {
+    $thirdPartyNotices = [IO.File]::ReadAllText($thirdPartyNoticesPath)
+    foreach ($requiredText in @(
+            'https://freesound.org/people/Nanashi/sounds/104409/',
+            'https://freesound.org/people/vabadus/sounds/151067/',
+            'https://creativecommons.org/publicdomain/zero/1.0/',
+            'DDC9920E64C99E0F75DAED6B5F3D6B3DDB13933C12A4E0631D77109ECAF1FC42',
+            '028A7976EBC5B629F944C2AF3126296E4CDC19512DE9F09829D41209CEF7485E')) {
+        if (-not $thirdPartyNotices.Contains($requiredText)) {
+            $failures.Add((
+                'THIRD_PARTY_NOTICES.md is missing: {0}' -f $requiredText))
+        }
+    }
+}
+
 $trackedPaths = @(Invoke-GitLines -Arguments @('ls-files'))
 foreach ($path in $trackedPaths) {
     Test-ForbiddenPath -Path $path -Scope 'Current index'

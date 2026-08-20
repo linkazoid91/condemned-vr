@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "arm_ik.h"
+#include "condemned_slide_grab.h"
 
 namespace condemnedvr {
 
@@ -68,5 +69,43 @@ fearvr::ArmIkTuning ReadArmIkTuning() noexcept;
 bool ApplyArmIkTuning(const fearvr::ArmIkTuning& tuning) noexcept;
 void ResetArmIkBendMemory() noexcept;
 bool ArmIkRightArmIsActive() noexcept;
+
+// Reuses the already identity-validated ILTModelClient node lookup and exact
+// Add/RemoveNodeControl callback mechanism. The renderer supplies only a
+// lifetime-validated equipped model; the node name is resolved again for each
+// model/source generation and the process-local handle never leaves this
+// control lifetime.
+bool SetSlideNodeControlTestEnabled(bool enabled) noexcept;
+bool PrepareSlideNodeControlSource(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const SlideGrabRailSettings& settings) noexcept;
+bool BeginSlideNodeControl(
+    void* modelObject,
+    std::int32_t weaponIndex,
+    std::uint64_t sourceGeneration,
+    const SlideGrabRailSettings& settings,
+    const fearvr::TrackingVector& requestedPositionModelLocal,
+    std::uint64_t sampleId) noexcept;
+bool UpdateSlideNodeControlTarget(
+    void* modelObject,
+    std::uint64_t sourceGeneration,
+    const fearvr::TrackingVector& requestedPositionModelLocal,
+    float projectedTravelUnits,
+    float clampedTravelUnits,
+    std::uint64_t sampleId) noexcept;
+bool EndSlideNodeControl(const char* reason) noexcept;
+
+struct SlideNodeControlStatus {
+    std::int32_t weaponIndex{-1};
+    std::uint64_t sourceGeneration{0U};
+    bool sourceResolved{false};
+    bool installed{false};
+    bool callbackActive{false};
+    bool retailAnimationIncompatible{false};
+    bool retailOwnershipRestored{true};
+};
+SlideNodeControlStatus ReadSlideNodeControlStatus() noexcept;
 
 } // namespace condemnedvr
