@@ -264,13 +264,33 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
         L"-condemnedvr-arm-ik-right-hand-proof");
     const bool menuControls = CommandLineContains(
         L"-condemnedvr-m6-menu-controls");
+    const bool headBobDiagnostic = CommandLineContains(
+        L"-condemnedvr-m5-headbob-diagnostic");
+    const bool postProfileHeadBobZero = CommandLineContains(
+        L"-condemnedvr-m5-retail-headbob-post-profile-zero");
+    const bool postProfileHeadBobOne = CommandLineContains(
+        L"-condemnedvr-m5-retail-headbob-post-profile-one");
+    const bool postProfileHeadBobConflict =
+        postProfileHeadBobZero && postProfileHeadBobOne;
+    const bool postProfileHeadBob =
+        (postProfileHeadBobZero || postProfileHeadBobOne) &&
+        !postProfileHeadBobConflict;
+    const int postProfileHeadBobCommandValue =
+        postProfileHeadBobOne ? 1 : 0;
     bool armIkLifecycleObserverReady = false;
+    if (postProfileHeadBobConflict) {
+        AppendLoaderEvent(
+            "m5_retail_headbob_post_profile_rejected",
+            "reason=conflicting_post_profile_flags");
+    }
     if (CommandLineContains(L"-condemnedvr-m4-menu") ||
-        menuControls) {
+        menuControls || headBobDiagnostic || postProfileHeadBob) {
         armIkLifecycleObserverReady =
             condemnedvr::InstallMenuToggleHook(
                 masterDatabase, g_original, g_bridge,
-                AppendLoaderEvent, menuControls);
+                AppendLoaderEvent, menuControls,
+                headBobDiagnostic, postProfileHeadBob,
+                postProfileHeadBobCommandValue);
     }
     if (CommandLineContains(L"-condemnedvr-m3-probe")) {
         condemnedvr::ProbeRendererInterfaces(

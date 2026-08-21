@@ -152,7 +152,10 @@ bool InstallMenuToggleHook(
     HMODULE gameClientModule,
     HMODULE bridgeModule,
     RendererProbeLogFunction log,
-    bool menuControls = false) noexcept;
+    bool menuControls = false,
+    bool headBobDiagnostic = false,
+    bool postProfileHeadBob = false,
+    int postProfileHeadBobCommandValue = 0) noexcept;
 
 // Snapshot consumed by the in-headset Debug and Melee tabs. Values are
 // copied under the physical-melee lock; the renderer never reads hook-owned

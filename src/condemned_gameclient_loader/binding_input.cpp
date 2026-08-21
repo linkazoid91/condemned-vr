@@ -122,6 +122,10 @@ using SetObjectDimensionsFunction =
 using SetVelocityFunction =
     std::uint32_t(__thiscall*)(void*, void*, const VectorAbi*);
 using ClientShellUpdateFunction = void(__thiscall*)(void*);
+using ConsoleFloatGetterFunction =
+    float(__cdecl*)(const char*, float);
+using ConsoleFloatSetterFunction =
+    void(__cdecl*)(const char*, float);
 using ClientShellKeyUpFunction = void(__thiscall*)(void*, int);
 using ClientShellKeyDownFunction =
     void(__thiscall*)(void*, int, int);
@@ -345,6 +349,14 @@ constexpr std::uintptr_t kForensicIntersectFirstReturnRva =
 constexpr std::uintptr_t kForensicIntersectSecondReturnRva =
     0x000E9BEEU;
 constexpr std::uintptr_t kEngineClientGlobalRva = 0x00169EB8U;
+constexpr std::uintptr_t kConsoleFloatGetterRva = 0x00023CA0U;
+constexpr std::uintptr_t kConsoleFloatSetterRva = 0x00023D50U;
+constexpr std::uintptr_t kHeadBobUpdateRva = 0x000567D0U;
+constexpr std::uintptr_t kUserProfileApplyGameOptionsRva =
+    0x000AED80U;
+constexpr std::uintptr_t kHeadBobNameRva = 0x0013F950U;
+constexpr std::uintptr_t kIdleBreathingNameRva = 0x0013F958U;
+constexpr std::uintptr_t kHeadBobProfileScaleRva = 0x0013AFC4U;
 constexpr std::size_t kEngineIntersectSegmentVtableSlot = 0x7CU / 4U;
 constexpr std::uintptr_t kRetailIntersectSegmentThunkRva =
     0x000095C0U;
@@ -571,6 +583,22 @@ constexpr unsigned char kClientShellUpdateBody[] = {
 constexpr unsigned char kClientShellBindingUpdateSequence[] = {
     0xE8, 0x42, 0x98, 0xFB, 0xFF, 0x8B, 0xC8, 0xE8,
     0xBB, 0x99, 0xFB, 0xFF};
+constexpr unsigned char kConsoleFloatGetterBetweenGlobals[] = {
+    0x85, 0xC9, 0x74, 0x21, 0x8B, 0x54, 0x24, 0x04,
+    0x8B, 0x01, 0x52, 0xFF, 0x90, 0xF8, 0x00, 0x00,
+    0x00, 0x85, 0xC0, 0x74, 0x10, 0x8B, 0x0D};
+constexpr unsigned char kConsoleFloatGetterTail[] = {
+    0x8B, 0x11, 0x50, 0xFF, 0x92, 0x00, 0x01, 0x00,
+    0x00, 0xC3, 0xD9, 0x44, 0x24, 0x08, 0xC3};
+constexpr unsigned char kConsoleFloatSetterBody[] = {
+    0x85, 0xC9, 0x74, 0x12, 0x8B, 0x54, 0x24, 0x08,
+    0x8B, 0x01, 0x52, 0x8B, 0x54, 0x24, 0x08, 0x52,
+    0xFF, 0x90, 0x04, 0x01, 0x00, 0x00, 0xC3};
+constexpr unsigned char kHeadBobUpdatePrefix[] = {
+    0x83, 0xEC, 0x18, 0x56, 0x8B, 0xF1, 0x8B, 0x06,
+    0x57, 0x33, 0xFF, 0x3B, 0xC7};
+constexpr unsigned char kHeadBobOutputScale[] = {
+    0xD8, 0x4C, 0x24, 0x24, 0xD9, 0x5D, 0x00};
 constexpr unsigned char kClientShellGetInterfaceManagerBody[] = {
     0x8D, 0x41, 0x08, 0xC3};
 constexpr unsigned char kClientShellKeyUpStateReadTail[] = {
@@ -698,7 +726,14 @@ GetInputStateFunction g_getInputState = nullptr;
 SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 SetMenuActiveFunction g_setMenuActive = nullptr;
 ClientShellUpdateFunction g_originalClientShellUpdate = nullptr;
+ConsoleFloatSetterFunction g_retailConsoleFloatSetter = nullptr;
+ConsoleFloatGetterFunction g_retailConsoleFloatGetter = nullptr;
 ClientShellKeyUpFunction g_clientShellKeyUp = nullptr;
+volatile LONG g_retailHeadBobPostProfileEnabled = 0;
+volatile LONG g_retailHeadBobPostProfileCommandValue = 0;
+volatile LONG g_retailHeadBobPostProfileReads = 0;
+volatile LONG g_retailHeadBobPostProfileWrites = 0;
+volatile LONG g_retailHeadBobPostProfileFailures = 0;
 ClientShellKeyDownFunction g_clientShellKeyDown = nullptr;
 ClientShellCommandFunction g_originalForensicCommandOn = nullptr;
 ClientShellCommandFunction g_originalForensicCommandOff = nullptr;
@@ -738,6 +773,10 @@ void* g_forensicClientWeaponFireHookTarget = nullptr;
 void* g_clientShell = nullptr;
 void* g_interfaceManager = nullptr;
 volatile LONG g_menuUpdateObserved = 0;
+volatile LONG g_retailHeadBobDiagnosticEnabled = 0;
+volatile LONG g_retailHeadBobDiagnosticSamples = 0;
+volatile LONG g_retailHeadBobDiagnosticFailures = 0;
+volatile LONG g_retailHeadBobDiagnosticReadCount = 0;
 void* g_forensicCollectionActionHookTarget = nullptr;
 void* g_forensicIntersectSegmentHookTarget = nullptr;
 volatile LONG g_lastPublishedRetailGameState =
@@ -8374,6 +8413,155 @@ void PollMenuNavigation(
         detail);
 }
 
+void SampleRetailHeadBobDiagnostic() noexcept {
+    if (InterlockedCompareExchange(
+            &g_retailHeadBobDiagnosticEnabled, 0, 0) == 0) {
+        return;
+    }
+    const LONG readCount = InterlockedIncrement(
+        &g_retailHeadBobDiagnosticReadCount);
+    if (readCount != 1 && readCount % 120 != 0) {
+        return;
+    }
+
+    float headBob = 0.0F;
+    float idleBreathing = 0.0F;
+    bool exceptionOccurred = false;
+    __try {
+        headBob = g_retailConsoleFloatGetter(
+            reinterpret_cast<const char*>(
+                g_gameClientBase + kHeadBobNameRva),
+            -1.0F);
+        idleBreathing = g_retailConsoleFloatGetter(
+            reinterpret_cast<const char*>(
+                g_gameClientBase + kIdleBreathingNameRva),
+            -1.0F);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionOccurred = true;
+    }
+
+    if (exceptionOccurred || !std::isfinite(headBob) ||
+        !std::isfinite(idleBreathing)) {
+        if (InterlockedIncrement(
+                &g_retailHeadBobDiagnosticFailures) == 1 &&
+            g_log != nullptr) {
+            char detail[192]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "exception=%u headbob_finite=%u "
+                "idle_breathing_finite=%u engine_writes=0",
+                exceptionOccurred ? 1U : 0U,
+                std::isfinite(headBob) ? 1U : 0U,
+                std::isfinite(idleBreathing) ? 1U : 0U);
+            g_log(
+                "m5_retail_headbob_effective_sample_failed",
+                detail);
+        }
+        return;
+    }
+
+    const LONG sample = InterlockedIncrement(
+        &g_retailHeadBobDiagnosticSamples);
+    if (g_log == nullptr) {
+        return;
+    }
+    char detail[512]{};
+    std::snprintf(
+        detail, sizeof(detail),
+        "sample=%ld update_read=%ld effective_headbob=%.6f "
+        "effective_idle_breathing=%.6f "
+        "source=GameOrig.GetConsoleFloat "
+        "profile_apply_writer=GameOrig+0x000AED80 "
+        "profile_headbob_field=+0x9C profile_scale=0.1 "
+        "headbob_update=GameOrig+0x000567D0 "
+        "headbob_output_scale_verified=1 engine_writes=0",
+        static_cast<long>(sample),
+        static_cast<long>(readCount),
+        headBob, idleBreathing);
+    g_log("m5_retail_headbob_effective_sample", detail);
+}
+
+void EnforceRetailHeadBobPostProfileSuppression() noexcept {
+    if (InterlockedCompareExchange(&g_retailHeadBobPostProfileEnabled, 0, 0) ==
+        0) {
+        return;
+    }
+    const LONG reads = InterlockedIncrement(
+        &g_retailHeadBobPostProfileReads);
+    if (reads != 1 && reads % 4 != 0) {
+        return;
+    }
+    if (g_retailConsoleFloatSetter == nullptr ||
+        g_retailConsoleFloatGetter == nullptr ||
+        g_gameClientBase == nullptr) {
+        if (InterlockedIncrement(
+                &g_retailHeadBobPostProfileFailures) == 1 &&
+            g_log != nullptr) {
+            g_log(
+                "m5_retail_headbob_post_profile_rejected",
+                "reason=missing_setter_or_getter_or_module");
+        }
+        return;
+    }
+
+    const float desired = static_cast<float>(
+        InterlockedCompareExchange(
+            &g_retailHeadBobPostProfileCommandValue, 0, 0));
+    float current = 0.0F;
+    bool exceptionOccurred = false;
+    __try {
+        current = g_retailConsoleFloatGetter(
+            reinterpret_cast<const char*>(
+                g_gameClientBase + kHeadBobNameRva),
+            -1.0F);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionOccurred = true;
+    }
+
+    if (exceptionOccurred || !std::isfinite(current)) {
+        if (InterlockedIncrement(
+                &g_retailHeadBobPostProfileFailures) == 1 &&
+            g_log != nullptr) {
+            g_log(
+                "m5_retail_headbob_post_profile_rejected",
+                "reason=exception_or_nonfinite");
+        }
+        return;
+    }
+
+    if (std::fabs(current - desired) > 0.0005F) {
+        bool setExceptionOccurred = false;
+        __try {
+            g_retailConsoleFloatSetter(
+                reinterpret_cast<const char*>(
+                    g_gameClientBase + kHeadBobNameRva),
+                desired);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            setExceptionOccurred = true;
+        }
+        if (setExceptionOccurred) {
+            if (InterlockedIncrement(
+                    &g_retailHeadBobPostProfileFailures) == 1 &&
+                g_log != nullptr) {
+                g_log(
+                    "m5_retail_headbob_post_profile_rejected",
+                    "reason=setter_exception");
+            }
+            return;
+        }
+        const LONG writes = InterlockedIncrement(
+            &g_retailHeadBobPostProfileWrites);
+        if (writes <= 8 && g_log != nullptr) {
+            char detail[256]{};
+            std::snprintf(
+                detail, sizeof(detail),
+                "reads=%ld writes=%ld desired=%.6f observed=%.6f ",
+                static_cast<long>(reads),
+                static_cast<long>(writes), desired, current);
+            g_log("m5_retail_headbob_post_profile_set", detail);
+        }
+    }
+}
 void __fastcall HookClientShellUpdate(
     void* clientShell,
     void* ignoredEdx) {
@@ -8404,6 +8592,8 @@ void __fastcall HookClientShellUpdate(
     }
     g_originalClientShellUpdate(clientShell);
     if (clientShell == g_clientShell) {
+        EnforceRetailHeadBobPostProfileSuppression();
+        SampleRetailHeadBobDiagnostic();
         ObservePlayerColliderDimensionTransition("post_retail_update", false);
         ObservePlayerCollisionXrayUpdate(false);
         ProcessPhysicalMeleeBlockNativeRelease();
@@ -10188,6 +10378,137 @@ bool InstallForensicObservers(
             kDigitalCameraDisplayStateOffset));
     log("m5_forensic_observers_armed", detail);
     return true;
+}
+
+bool RetailHeadBobDiagnosticTargetsMatch(
+    HMODULE gameClientModule) noexcept {
+    if (gameClientModule == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(
+        gameClientModule);
+    auto* const getter = base + kConsoleFloatGetterRva;
+    auto* const setter = base + kConsoleFloatSetterRva;
+    auto* const update = base + kHeadBobUpdateRva;
+    auto* const profileApply =
+        base + kUserProfileApplyGameOptionsRva;
+    const auto Address = [](const unsigned char* value) noexcept {
+        return static_cast<std::uint32_t>(
+            reinterpret_cast<std::uintptr_t>(value));
+    };
+
+    __try {
+        std::uint32_t getterFirstGlobal = 0U;
+        std::uint32_t getterSecondGlobal = 0U;
+        std::uint32_t setterGlobal = 0U;
+        std::uint32_t idleName = 0U;
+        std::uint32_t headBobName = 0U;
+        std::int32_t getterCallDisplacement = 0;
+        std::uint32_t profileScale = 0U;
+        std::uint32_t profileName = 0U;
+        std::int32_t setterCallDisplacement = 0;
+        std::uint32_t profileScaleBits = 0U;
+        std::memcpy(
+            &getterFirstGlobal, getter + 2U,
+            sizeof(getterFirstGlobal));
+        std::memcpy(
+            &getterSecondGlobal, getter + 29U,
+            sizeof(getterSecondGlobal));
+        std::memcpy(
+            &setterGlobal, setter + 2U,
+            sizeof(setterGlobal));
+        std::memcpy(
+            &idleName, update + 0x2ABU,
+            sizeof(idleName));
+        std::memcpy(
+            &headBobName, update + 0x2B2U,
+            sizeof(headBobName));
+        std::memcpy(
+            &getterCallDisplacement, update + 0x2B9U,
+            sizeof(getterCallDisplacement));
+        std::memcpy(
+            &profileScale, profileApply + 0xC2U,
+            sizeof(profileScale));
+        std::memcpy(
+            &profileName, profileApply + 0xCAU,
+            sizeof(profileName));
+        std::memcpy(
+            &setterCallDisplacement, profileApply + 0xCFU,
+            sizeof(setterCallDisplacement));
+        std::memcpy(
+            &profileScaleBits,
+            base + kHeadBobProfileScaleRva,
+            sizeof(profileScaleBits));
+        const auto getterCallTarget =
+            reinterpret_cast<std::uintptr_t>(
+                update + 0x2BDU) +
+            static_cast<std::intptr_t>(
+                getterCallDisplacement);
+        const auto setterCallTarget =
+            reinterpret_cast<std::uintptr_t>(
+                profileApply + 0xD3U) +
+            static_cast<std::intptr_t>(
+                setterCallDisplacement);
+        const std::uint32_t expectedEngineGlobal =
+            Address(base + kEngineClientGlobalRva);
+        return getter[0] == 0x8B && getter[1] == 0x0D &&
+            getterFirstGlobal == expectedEngineGlobal &&
+            std::memcmp(
+                getter + 6U,
+                kConsoleFloatGetterBetweenGlobals,
+                sizeof(kConsoleFloatGetterBetweenGlobals)) == 0 &&
+            getterSecondGlobal == expectedEngineGlobal &&
+            std::memcmp(
+                getter + 33U, kConsoleFloatGetterTail,
+                sizeof(kConsoleFloatGetterTail)) == 0 &&
+            setter[0] == 0x8B && setter[1] == 0x0D &&
+            setterGlobal == expectedEngineGlobal &&
+            std::memcmp(
+                setter + 6U, kConsoleFloatSetterBody,
+                sizeof(kConsoleFloatSetterBody)) == 0 &&
+            std::memcmp(
+                update, kHeadBobUpdatePrefix,
+                sizeof(kHeadBobUpdatePrefix)) == 0 &&
+            update[0x2AAU] == 0xB8 &&
+            idleName == Address(base + kIdleBreathingNameRva) &&
+            update[0x2AFU] == 0x74 &&
+            update[0x2B0U] == 0x05 &&
+            update[0x2B1U] == 0xB8 &&
+            headBobName == Address(base + kHeadBobNameRva) &&
+            update[0x2B6U] == 0x55 &&
+            update[0x2B7U] == 0x50 &&
+            update[0x2B8U] == 0xE8 &&
+            getterCallTarget ==
+                reinterpret_cast<std::uintptr_t>(getter) &&
+            std::memcmp(
+                update + 0x42FU, kHeadBobOutputScale,
+                sizeof(kHeadBobOutputScale)) == 0 &&
+            std::memcmp(
+                profileApply + 0xB9U,
+                "\xDB\x86\x9C\x00\x00\x00",
+                6U) == 0 &&
+            profileApply[0xBFU] == 0x51 &&
+            profileApply[0xC0U] == 0xD8 &&
+            profileApply[0xC1U] == 0x0D &&
+            profileScale ==
+                Address(base + kHeadBobProfileScaleRva) &&
+            profileApply[0xC6U] == 0xD9 &&
+            profileApply[0xC7U] == 0x1C &&
+            profileApply[0xC8U] == 0x24 &&
+            profileApply[0xC9U] == 0x68 &&
+            profileName == Address(base + kHeadBobNameRva) &&
+            profileApply[0xCEU] == 0xE8 &&
+            setterCallTarget ==
+                reinterpret_cast<std::uintptr_t>(setter) &&
+            profileScaleBits == 0x3DCCCCCDU &&
+            std::memcmp(
+                base + kHeadBobNameRva, "HeadBob", 8U) == 0 &&
+            std::memcmp(
+                base + kIdleBreathingNameRva,
+                "IdleBreathing", 14U) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool MenuTargetsMatch(
@@ -11979,12 +12300,42 @@ bool InstallMenuToggleHook(
     HMODULE gameClientModule,
     HMODULE bridgeModule,
     RendererProbeLogFunction log,
-    bool menuControls) noexcept {
+    bool menuControls,
+    bool headBobDiagnostic,
+    bool postProfileHeadBob,
+    int postProfileHeadBobCommandValue) noexcept {
     AcquireSRWLockExclusive(&g_bindingLock);
     if (g_menuHookTarget != nullptr) {
         InterlockedExchange(
             &g_menuControlsEnabled, menuControls ? 1 : 0);
+        InterlockedExchange(
+            &g_retailHeadBobDiagnosticEnabled,
+            headBobDiagnostic ? 1 : 0);
+        InterlockedExchange(
+            &g_retailHeadBobPostProfileEnabled,
+            postProfileHeadBob ? 1 : 0);
+        InterlockedExchange(
+            &g_retailHeadBobPostProfileCommandValue,
+            postProfileHeadBob ? postProfileHeadBobCommandValue : 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileReads, 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileWrites, 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileFailures, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticSamples, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticFailures, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticReadCount, 0);
+        g_retailConsoleFloatSetter = postProfileHeadBob
+            ? reinterpret_cast<ConsoleFloatSetterFunction>(
+                (reinterpret_cast<unsigned char*>(gameClientModule) +
+                    kConsoleFloatSetterRva))
+            : nullptr;
+        g_retailConsoleFloatGetter = (headBobDiagnostic ||
+                                    postProfileHeadBob)
+            ? reinterpret_cast<ConsoleFloatGetterFunction>(
+                (reinterpret_cast<unsigned char*>(gameClientModule) +
+                    kConsoleFloatGetterRva))
+            : nullptr;
         RequireMenuNavigationRelease(g_menuNavigationState);
+        PublishMenuRenderState();
         ReleaseSRWLockExclusive(&g_bindingLock);
         return true;
     }
@@ -12012,6 +12363,20 @@ bool InstallMenuToggleHook(
             ? "IClientShell_Default_v4_missing"
             : "IClientShell_Default_v4_target_mismatch";
         log("m4_menu_toggle_rejected", reason);
+        return false;
+    }
+    if ((headBobDiagnostic || postProfileHeadBob) &&
+        !RetailHeadBobDiagnosticTargetsMatch(gameClientModule)) {
+        if (headBobDiagnostic) {
+            log(
+                "m5_retail_headbob_diagnostic_rejected",
+                "reason=verified_getter_profile_writer_or_update_mismatch");
+        }
+        if (postProfileHeadBob) {
+            log(
+                "m5_retail_headbob_post_profile_rejected",
+                "reason=verified_getter_profile_writer_or_update_mismatch");
+        }
         return false;
     }
     void* const interfaceManager = ResolveVerifiedInterfaceManager(
@@ -12050,6 +12415,31 @@ bool InstallMenuToggleHook(
     g_interfaceManager = interfaceManager;
     g_clientShellKeyUp = keyUp;
     g_clientShellKeyDown = keyDown;
+    g_gameClientBase = base;
+    g_retailConsoleFloatSetter = postProfileHeadBob
+        ? reinterpret_cast<ConsoleFloatSetterFunction>(
+            base + kConsoleFloatSetterRva)
+        : nullptr;
+    g_retailConsoleFloatGetter = (headBobDiagnostic ||
+                                postProfileHeadBob)
+        ? reinterpret_cast<ConsoleFloatGetterFunction>(
+            base + kConsoleFloatGetterRva)
+        : nullptr;
+    InterlockedExchange(
+        &g_retailHeadBobDiagnosticEnabled,
+        headBobDiagnostic ? 1 : 0);
+    InterlockedExchange(
+        &g_retailHeadBobPostProfileEnabled,
+        postProfileHeadBob ? 1 : 0);
+    InterlockedExchange(
+        &g_retailHeadBobPostProfileCommandValue,
+        postProfileHeadBob ? postProfileHeadBobCommandValue : 0);
+    InterlockedExchange(&g_retailHeadBobPostProfileReads, 0);
+    InterlockedExchange(&g_retailHeadBobPostProfileWrites, 0);
+    InterlockedExchange(&g_retailHeadBobPostProfileFailures, 0);
+    InterlockedExchange(&g_retailHeadBobDiagnosticSamples, 0);
+    InterlockedExchange(&g_retailHeadBobDiagnosticFailures, 0);
+    InterlockedExchange(&g_retailHeadBobDiagnosticReadCount, 0);
     g_menuToggleLatch = {};
     g_menuNavigationState = {};
     InterlockedExchange(
@@ -12074,6 +12464,20 @@ bool InstallMenuToggleHook(
         g_setMenuActive = nullptr;
         g_interfaceManager = nullptr;
         g_clientShell = nullptr;
+        g_retailConsoleFloatSetter = nullptr;
+        g_retailConsoleFloatGetter = nullptr;
+        InterlockedExchange(
+            &g_retailHeadBobDiagnosticEnabled, 0);
+        InterlockedExchange(
+            &g_retailHeadBobPostProfileEnabled, 0);
+        InterlockedExchange(
+            &g_retailHeadBobPostProfileCommandValue, 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileReads, 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileWrites, 0);
+        InterlockedExchange(&g_retailHeadBobPostProfileFailures, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticSamples, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticFailures, 0);
+        InterlockedExchange(&g_retailHeadBobDiagnosticReadCount, 0);
         InterlockedExchange(&g_menuControlsEnabled, 0);
         return false;
     }
@@ -12089,6 +12493,28 @@ bool InstallMenuToggleHook(
         "state_source=CInterfaceMgr+0x08 flat_panel_nonplaying=1 "
         "escape_states=playing,menu "
         "direct_command_writes=0 system_input=0");
+    if (headBobDiagnostic) {
+        log(
+            "m5_retail_headbob_diagnostic_armed",
+            "getter=GameOrig+0x00023CA0 "
+            "profile_apply_writer=GameOrig+0x000AED80 "
+            "profile_headbob_field=+0x9C profile_scale=0.1 "
+            "headbob_update=GameOrig+0x000567D0 "
+            "effective_values=HeadBob,IdleBreathing "
+            "sample_phase=post_retail_client_update "
+            "camera_sample=m3_camera_read_sample "
+            "engine_writes=0");
+    }
+    if (postProfileHeadBob) {
+        char detail[192]{};
+        std::snprintf(
+            detail, sizeof(detail),
+            "command=%d console_setter=GameOrig+0x00023D50 "
+            "console_getter=GameOrig+0x00023CA0 "
+            "post_profile_phase=post_retail_client_update",
+            static_cast<int>(postProfileHeadBobCommandValue));
+        g_log("m5_retail_headbob_post_profile_armed", detail);
+    }
     if (menuControls) {
         log(
             "m6_menu_controls_armed",

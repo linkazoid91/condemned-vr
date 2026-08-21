@@ -1,6 +1,6 @@
 # Current state
 
-Snapshot basis: repository working tree and checked-in evidence reviewed on 20
+Snapshot basis: repository working tree and checked-in evidence reviewed on 21
 August 2026. Detailed proof, run IDs, addresses, and historical failures stay in
 the linked milestone documents; re-check against newer evidence before use.
 
@@ -25,6 +25,40 @@ persistence and a longer release soak remain unresolved.
 
 Detailed active evidence: [`CONDEMNED-M4.md`](CONDEMNED-M4.md) for forensic
 controls and [`CONDEMNED-M5.md`](CONDEMNED-M5.md) for the melee checkpoint.
+
+Guarded Retail HeadBob suppression has a **live-verified core A/B**, while its
+full gameplay regression remains incomplete. Retail profile application was
+proven to overwrite the requested `+HeadBob 0` with 1.0, so non-Minimal
+launches now retain that supported command-line request and, after verifying
+the exact Retail getter/setter/profile/update chain, restore the console value
+to 0 after each Retail client update only when it differs. Plain `-Minimal`
+still sends no override. `-RetailHeadBob` requests 1 without profile
+reselection and does not arm the post-profile enforcement.
+
+Suppression run `run-20260821-032521` performed one guarded setter call from
+1.0 to 0.0, then recorded 83 effective-zero samples. The user reported that
+the locomotion bob was heavily reduced, with no residual in other directions
+and only a small amount of hand movement during forward locomotion. Rollback
+run `run-20260821-032811` retained Current, recorded 30 samples at effective
+1.0, and the user reported that the large head bob returned. This proves the
+main locomotion motion was Retail HeadBob rather than character animation.
+The forward-only hand residual is separate. The run used Colt index 76 with
+the existing `weapon_weighted_aim` bounded spring, making intentional filtered
+weapon inertia the leading hypothesis, but no simultaneous raw-versus-weighted
+delta was captured. No IK, grip, weapon-weight, controller, model-node, or
+stereo-camera compensation was added.
+
+No HeadBob-calculation hook, object/profile offset write, dormant-menu
+activation, `IdleBreathing` override, or Retail-file write exists. The full
+gate passes 26/26 x86, 22/22 x64, and all five PowerShell suites. Before and
+after both live runs, the staged 889-byte `autoexec.cfg` remained exact at
+SHA-256
+`3FC7560991888E866FAE3BA42291826BAC43D523C29E602EE31C57DFFC2C49C8`
+with `"HeadBob" "1.000000"`.
+
+One firearm, one mapped melee weapon, and the complete
+landing/damage/scripted-camera/fallback regression still require explicit live
+confirmation before the whole feature is called live accepted.
 
 A parallel interaction-authoring platform is **implemented and
 automated-tested, awaiting live validation**. The `-WeaponGripCalibration` /
@@ -1532,7 +1566,9 @@ Headset-free:
 - `tools\test-condemned-launch-profile.ps1` proves no-argument/Wait-only
   `Current`, explicit Pipe/custom, `-Minimal`, rollback-only, and invalid mixed
   profile resolution using both hashtables and PowerShell's real bound-parameter
-  dictionary.
+  dictionary. It also proves `+HeadBob 0` for every non-Minimal default/custom
+  path, no HeadBob argument for plain `-Minimal`, and deterministic
+  `+HeadBob 1` rollback without profile reselection.
 - `tools\test-condemned-m0-tools.ps1` tests the M0 PowerShell parsers.
 - `tools\verify-condemned-m0.ps1` and compiled module verifiers need a legal
   game install but no headset; they do not prove hooks in a running process.

@@ -24,6 +24,18 @@
     Disables the implicit Current feature profile and launches only the bare
     transport. It cannot be combined with a feature-selection parameter.
 
+.PARAMETER RetailHeadBob
+    Diagnostic A/B rollback that explicitly requests Retail's default
+    `+HeadBob 1`. Every non-Minimal launch otherwise requests `+HeadBob 0`;
+    Minimal without this switch leaves Retail's HeadBob value untouched.
+
+.PARAMETER HeadBobDiagnostic
+    Enables a guarded read-only sample of Retail's effective HeadBob and
+    IdleBreathing console values plus the existing Retail camera transform
+    sample. The switch itself does not select another gameplay profile or
+    write either console variable; normal non-Minimal suppression can still
+    restore HeadBob through the separately guarded Retail console setter.
+
 .PARAMETER DesktopWindow
     Runs Condemned in a smaller desktop window so other applications remain
     visible. The default window render size is 1920x1080. A verified Retail
@@ -218,6 +230,8 @@ param(
     [string]$WeaponTest,
     [switch]$ValidateOnly,
     [switch]$Minimal,
+    [switch]$RetailHeadBob,
+    [switch]$HeadBobDiagnostic,
     [switch]$RendererProbe,
     [switch]$RendererPassThrough,
     [switch]$StereoDiagnostic,
@@ -274,6 +288,12 @@ $cfg = Get-CondemnedVrConfig
 . (Join-Path $PSScriptRoot '_condemnedvr-launch-profile.ps1')
 $featurePlatformProfile =
     Resolve-CondemnedVrLaunchProfile $PSBoundParameters
+Assert-CondemnedVrHeadBobDiagnosticProfile `
+    -LaunchProfile $featurePlatformProfile `
+    -HeadBobDiagnostic ([bool]$HeadBobDiagnostic)
+if ($HeadBobDiagnostic) {
+    $CameraReadProbe = $true
+}
 if ($featurePlatformProfile.ApplyPipePreset) {
     $WeaponTest = 'Pipe'
 }
@@ -602,6 +622,9 @@ if ($CameraReadProbe) {
         '-condemnedvr-m3-pass-through',
         '-condemnedvr-m3-camera-read-probe')
 }
+if ($HeadBobDiagnostic) {
+    $gameArguments += '-condemnedvr-m5-headbob-diagnostic'
+}
 if ($EyeOffsetDiagnostic) {
     $gameArguments += @(
         '-condemnedvr-m3-probe',
@@ -725,6 +748,11 @@ if ($DesktopWindow) {
         $DesktopWindowHeight.ToString(
             [Globalization.CultureInfo]::InvariantCulture))
 }
+# Keep Retail console-variable pairs after every project-specific switch.
+$gameArguments = @(
+    Add-CondemnedVrRetailHeadBobArguments `
+        -GameArguments $gameArguments `
+        -LaunchProfile $featurePlatformProfile)
 $game = $null
 $previousLiveColliderCommandPath =
     $env:CONDEMNEDVR_LIVE_COLLIDER_COMMAND_PATH
@@ -829,6 +857,11 @@ try {
             $loaderText.Contains(
                 '"event":"m5_forensic_camera_socket_ray_rejected"')) {
             throw 'The guarded M5 forensic Camera-socket ray hook was rejected.'
+        }
+        if ($HeadBobDiagnostic -and
+            $loaderText.Contains(
+                '"event":"m5_retail_headbob_diagnostic_rejected"')) {
+            throw 'The guarded Retail HeadBob diagnostic was rejected.'
         }
         if ($ForensicMemoryProbe -and
             $loaderText.Contains(
@@ -990,6 +1023,14 @@ try {
         $coreActionsReady = -not $CoreActionsProbe -or
             $loaderText.Contains(
                 '"event":"m4_binding_core_actions_armed"')
+        $headBobDiagnosticReady = -not $HeadBobDiagnostic -or
+            ($loaderText.Contains(
+                 '"event":"m5_retail_headbob_diagnostic_armed"') -and
+             $loaderText.Contains(
+                 '"event":"m5_retail_headbob_effective_sample"'))
+        $headBobPostProfileReady = -not $featurePlatformProfile.RetailHeadBobSuppressed -or
+            $loaderText.Contains(
+                 '"event":"m5_retail_headbob_post_profile_armed"')
         $forensicCameraSocketRayReady = -not $CoreActionsProbe -or
             $loaderText.Contains(
                 '"event":"m5_forensic_camera_socket_ray_armed"')
@@ -1074,6 +1115,8 @@ try {
             $locomotionReady -and $turningReady -and $menuReady -and
             $menuControlsReady -and $retailVrSettingsReady -and
             $interactionReady -and $coreActionsReady -and
+            $headBobDiagnosticReady -and
+            $headBobPostProfileReady -and
             $forensicCameraSocketRayReady -and
             $forensicMemoryReady -and $hapticsReady -and
             $headAimReady -and $handgunMuzzleAimReady -and
@@ -1107,6 +1150,8 @@ try {
         if (-not $retailVrSettingsReady) { $missingReadiness += 'RetailVrSettings' }
         if (-not $interactionReady) { $missingReadiness += 'Interaction' }
         if (-not $coreActionsReady) { $missingReadiness += 'CoreActions' }
+        if (-not $headBobDiagnosticReady) { $missingReadiness += 'HeadBobDiagnostic' }
+        if (-not $headBobPostProfileReady) { $missingReadiness += 'HeadBobPostProfile' }
         if (-not $forensicCameraSocketRayReady) { $missingReadiness += 'ForensicCameraSocketRay' }
         if (-not $forensicMemoryReady) { $missingReadiness += 'ForensicMemory' }
         if (-not $hapticsReady) { $missingReadiness += 'Haptics' }
@@ -1161,6 +1206,11 @@ try {
         Session = $sessionText
         FeaturePreset = $featurePlatformProfile.Name
         WeaponTestPreset = $WeaponTest
+        RetailHeadBobSuppressed =
+            [bool]$featurePlatformProfile.RetailHeadBobSuppressed
+        RetailHeadBobCommandValue =
+            $featurePlatformProfile.RetailHeadBobCommandValue
+        RetailHeadBobDiagnostic = [bool]$HeadBobDiagnostic
         GameProcessId = $game.Id
         HostProcessId = $hostProcess.Id
         Bridge = $loadedBridge

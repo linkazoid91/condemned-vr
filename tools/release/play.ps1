@@ -8,6 +8,9 @@
 .PARAMETER Minimal
     Starts the guarded bare-transport fallback instead of Current.
 
+.PARAMETER RetailHeadBob
+    Diagnostic A/B rollback that restores Retail locomotion bob.
+
 .PARAMETER VerifyOnly
     Verifies the complete installation without starting OpenXR or the game.
 #>
@@ -16,6 +19,7 @@ param(
     [string]$InstallDir,
     [string]$Runtime = 'active',
     [switch]$Minimal,
+    [switch]$RetailHeadBob,
     [switch]$Wait,
     [switch]$VerifyOnly
 )
@@ -62,6 +66,9 @@ if ($runtimeInfo.Override) {
 }
 if ($Minimal) {
     $launchArguments.Minimal = $true
+}
+if ($RetailHeadBob) {
+    $launchArguments.RetailHeadBob = $true
 }
 if ($Wait) {
     $launchArguments.Wait = $true

@@ -64,6 +64,14 @@ The guarded bare-transport fallback remains available:
 Play.cmd -Minimal
 ~~~
 
+Normal and custom VR launches request `+HeadBob 0` and restore value 0 through
+Retail's verified console setter after profile loading. For a diagnostic A/B
+that restores Retail locomotion bob, run:
+
+~~~powershell
+Play.cmd -RetailHeadBob
+~~~
+
 ## Uninstall
 
 Uninstall is a dry run unless Apply is explicitly supplied:

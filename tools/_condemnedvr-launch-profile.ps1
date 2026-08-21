@@ -52,6 +52,8 @@ function Resolve-CondemnedVrLaunchProfile {
         })
     $minimal = $BoundParameters.Keys -contains 'Minimal' -and
         [bool]$BoundParameters['Minimal']
+    $retailHeadBob = $BoundParameters.Keys -contains 'RetailHeadBob' -and
+        [bool]$BoundParameters['RetailHeadBob']
     if ($minimal -and $explicitFeatures.Count -ne 0) {
         throw ('-Minimal cannot be combined with feature-selection ' +
             'parameters: ' + ($explicitFeatures -join ', '))
@@ -62,6 +64,9 @@ function Resolve-CondemnedVrLaunchProfile {
             ApplyPipePreset = $false
             EnableRetailVrSettings = $false
             ExplicitFeatureSelection = $false
+            RetailHeadBobSuppressed = $false
+            RetailHeadBobCommandValue = $(
+                if ($retailHeadBob) { 1 } else { $null })
         }
     }
     if ($explicitFeatures.Count -eq 0) {
@@ -70,6 +75,9 @@ function Resolve-CondemnedVrLaunchProfile {
             ApplyPipePreset = $true
             EnableRetailVrSettings = $true
             ExplicitFeatureSelection = $false
+            RetailHeadBobSuppressed = -not $retailHeadBob
+            RetailHeadBobCommandValue = $(
+                if ($retailHeadBob) { 1 } else { 0 })
         }
     }
     $explicitPipeOnly = $explicitFeatures.Count -eq 1 -and
@@ -80,5 +88,61 @@ function Resolve-CondemnedVrLaunchProfile {
         ApplyPipePreset = $false
         EnableRetailVrSettings = $false
         ExplicitFeatureSelection = $true
+        RetailHeadBobSuppressed = -not $retailHeadBob
+        RetailHeadBobCommandValue = $(
+            if ($retailHeadBob) { 1 } else { 0 })
+    }
+}
+
+function Get-CondemnedVrRetailHeadBobArguments {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$LaunchProfile
+    )
+
+    $commandValue = $LaunchProfile.RetailHeadBobCommandValue
+    if ($null -eq $commandValue) {
+        return
+    }
+
+    '+HeadBob'
+    ([int]$commandValue).ToString(
+        [Globalization.CultureInfo]::InvariantCulture)
+    if ($LaunchProfile.RetailHeadBobSuppressed) {
+        if ([int]$commandValue -eq 0) {
+            '-condemnedvr-m5-retail-headbob-post-profile-zero'
+        } else {
+            '-condemnedvr-m5-retail-headbob-post-profile-one'
+        }
+    }
+}
+
+function Add-CondemnedVrRetailHeadBobArguments {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$GameArguments,
+
+        [Parameter(Mandatory = $true)]
+        [psobject]$LaunchProfile
+    )
+
+    $GameArguments
+    Get-CondemnedVrRetailHeadBobArguments $LaunchProfile
+}
+
+function Assert-CondemnedVrHeadBobDiagnosticProfile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$LaunchProfile,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$HeadBobDiagnostic
+    )
+
+    if ($HeadBobDiagnostic -and $LaunchProfile.Name -eq 'Minimal') {
+        throw '-HeadBobDiagnostic cannot be combined with -Minimal.'
     }
 }

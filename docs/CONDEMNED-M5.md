@@ -2942,3 +2942,198 @@ result evidence**. The user then explicitly judged the repeated behavior
 perfect, accepting audibility, timing, and absence of unwanted duplicates for
 the tested Colt path. The attached repeat-pull audio extension is live
 accepted.
+
+## Guarded Retail HeadBob suppression (21 August 2026)
+
+Static evidence from the verified Retail `GameOrig.dll` identifies the
+supported console variable `HeadBob` with default value 1.0.
+`CUserProfile` exposes the dormant Head Bob control as integer 0--10 and
+converts between that control and the console value with a 0.1 scale. The
+Retail subsystem owns distinct `CameraOffset`/`CameraRotation` and
+`WeaponOffset`/`WeaponRotation` channels under the same HeadBob system.
+These findings support one Retail-owned console override; they do not justify
+an IK, grip, weight, controller, model-node, or stereo-camera compensation.
+The rejected dormant `CScreenGame` controls remain disabled.
+
+The launch policy in `tools/_condemnedvr-launch-profile.ps1` now requests
+`+HeadBob 0` for Current, Pipe, and every other non-Minimal custom/diagnostic
+profile. Plain `-Minimal` emits no HeadBob pair and remains the bare
+Retail-behaviour baseline. The rollback-only `-RetailHeadBob` switch does not
+select a different feature profile and explicitly requests `+HeadBob 1`;
+the installed `Play.cmd` path forwards the same switch. The launch report
+adds `RetailHeadBobSuppressed` and `RetailHeadBobCommandValue`. Those fields
+prove only the requested launch arguments, not that Retail consumed them or
+that live visual behavior passed.
+
+The pure launch-profile regression covers default Current, explicit Pipe,
+custom diagnostics, plain Minimal, rollback-only Current, custom plus rollback,
+Minimal plus explicit rollback, real bound-parameter dictionaries, and the
+existing Minimal/feature conflict. The 21 August full RelWithDebInfo gate
+passed 26/26 x86 and 22/22 x64 CTest cases plus launch-profile,
+foreground-handoff, screenshot-helper, schema-v4 weapon-diagnostics, and
+release-tool PowerShell suites.
+
+Before and after that headset-free gate, the project-local staged
+`autoexec.cfg` was exactly 889 bytes with SHA-256
+`3FC7560991888E866FAE3BA42291826BAC43D523C29E602EE31C57DFFC2C49C8`
+and retained the exact CRLF line `"HeadBob" "1.000000"`. The automated
+gate did not launch Condemned, so this proves only that the implementation and
+tests did not edit the staged file; it is not evidence about Retail persistence
+after a live command-line override. No Retail installation file was changed.
+
+The first headset A/B rejected the initial argument construction. Suppression
+run `run-20260820-143707` requested value 0 and rollback run
+`run-20260820-143941` requested value 1, but the user reported visible bob in
+the first run and then judged the bob identical in the rollback run. Both runs
+exited cleanly and retained their launch report, host log, bridge log, and
+loader evidence. This proves a live visual non-difference for that candidate;
+it does not prove either effective in-process console value.
+
+The initial candidate placed `+HeadBob` before subsequent project-specific
+switches. Because the verified Retail `+Windowed` pairs are emitted at the end,
+the smallest bounded follow-up moved the HeadBob pair to the final two process
+arguments. Pure tests assert that final ordering. Run
+`run-20260820-144458` requested value 0 and exited without a recorded
+perceptual result. The requested rerun `run-20260820-150441` also requested
+value 0, and the user reported that bob was still present. This rejects the
+final-position hypothesis.
+
+A bounded static trace then identified Retail's effective-value boundary.
+`GameOrig+0x00023CA0` is the console-float getter. The profile-apply routine
+at `GameOrig+0x000AED80` reads the integer at `CUserProfile+0x9C`,
+multiplies it by the verified 0.1 constant, and calls the console-float setter
+at `GameOrig+0x00023D50` for `HeadBob`. The update at
+`GameOrig+0x000567D0` selects `HeadBob` for non-idle records or
+`IdleBreathing` for the exact Idle record, generates the twelve
+camera/weapon offset/rotation channels, and multiplies each final channel by
+the selected effective console value. These facts make post-command-line
+profile application the static overwrite candidate; they do not by themselves
+prove its live timing.
+
+The guarded `-HeadBobDiagnostic` is observation-only. It signature-checks
+that getter, setter, profile writer, 0.1 conversion, HeadBob update, final
+channel multiplier, and both names before sampling after Retail's client
+update. It also enables the existing read-only Retail camera transform sample.
+It performs no console, object, camera, IK, grip, weapon, or Retail-file write,
+does not select another gameplay profile, and is rejected with `-Minimal`.
+
+Diagnostic run `run-20260820-152254` is live evidence that the launch request
+was not the effective runtime value. Its report records Current,
+`RetailHeadBobSuppressed=true`, command value 0, and the diagnostic enabled.
+All 90 post-Retail-update samples, from update read 1 through 10,680, reported
+`effective_headbob=1.000000`. The separate `IdleBreathing` query returned
+the diagnostic fallback -1.0 throughout, so this run provides no accepted
+live IdleBreathing value and does not add an override. The user's preceding
+suppression run still showed bob. Therefore the observed locomotion motion
+remains compatible with Retail HeadBob running at 1.0; it is not evidence that
+an animation source survives an effective HeadBob value of zero.
+
+The run used Git HEAD
+`ebe8f3b0bceed3c54bbd86e1d07689c4b97a2538` plus the documented dirty
+working tree. Staged SHA-256 values were
+`638D56CD96DB38F667CD4CD0ABD6A580DEE61F86C014AC5D8E62B572CD634D1D`
+for the loader,
+`60FE9A5F2AC6537A31449B7019E615A3D7496B2A7FE7AFCC3A03060DB5237AE7`
+for the bridge, and
+`EFBFF77BCEEEC5FA62A88C19486FB42784170C21BB9077353DE32EBF2156C489`
+for the host. Preserved run hashes are
+`D108862DEFD016355F7161A2B802212C8A3EC6E1A285312395560FCD09F178B6`
+(report),
+`DDBD481C622FF845931DA528D542A23FEC637C189D6F16556F109487CABE0F09`
+(loader log),
+`C44BD2C62A63E20F6EAF79D576EBAAA002A457329C24186A850191D0FD183759`
+(host log), and
+`F3C4EAF63FD1A5E6995DC988CB83226841B5700F32E5613C3D343734A6EE96E9`
+(bridge log).
+
+The command-line-only suppression candidate is now **live rejected**.
+Suppression is not implemented successfully, and no headset A/B has observed
+an effective zero. A post-profile console application, profile persistence
+change, or another engine intervention would exceed the stated
+command-line-only implementation boundary and requires a separate explicit
+decision before implementation. No compensation was added anywhere else.
+
+Across the automated and live runs, the project-local staged source remained
+exactly 889 bytes at SHA-256
+`3FC7560991888E866FAE3BA42291826BAC43D523C29E602EE31C57DFFC2C49C8`
+and retained `"HeadBob" "1.000000"`; Retail did not persist either requested
+command value there. `IdleBreathing` remains untouched.
+
+### Guarded post-profile enforcement and live discriminator
+
+After the failed command-line-only candidate and with explicit approval for a
+bounded follow-up, the non-Minimal launch policy retained `+HeadBob 0` and
+added a private post-profile-zero arm flag. The loader first verifies the
+known Retail console getter and setter, the profile writer and 0.1 conversion,
+the HeadBob update and final channel multiplier, and both console-variable
+names. After the original Retail client update, it reads `HeadBob` and calls
+Retail's verified console setter only when the effective value differs from
+the requested zero. This neither patches `GameOrig.dll` nor writes the profile
+object, head-bob records, camera, weapon, IK, grip, weight, controller, model
+nodes, or Retail/project config files. `IdleBreathing` remains untouched.
+
+The rollback-only `-RetailHeadBob` path continues to request `+HeadBob 1`,
+does not arm post-profile enforcement, and does not change the Current profile.
+Plain `-Minimal` still sends neither override nor enforcement flag. The normal
+21 August gate passed 26/26 x86 and 22/22 x64 CTest cases plus all five
+PowerShell suites. The staged loader SHA-256 was
+`DDF8D322A24BCAFF222FDF73525899C52534D058D41B9830FA1C9A8BFE2A49CB`;
+the bridge and host retained
+`60FE9A5F2AC6537A31449B7019E615A3D7496B2A7FE7AFCC3A03060DB5237AE7`
+and
+`EFBFF77BCEEEC5FA62A88C19486FB42784170C21BB9077353DE32EBF2156C489`.
+The source basis was Git HEAD
+`ebe8f3b0bceed3c54bbd86e1d07689c4b97a2538` plus the documented dirty
+working tree.
+
+Suppression run `run-20260821-032521` used Current on VirtualDesktopXR
+1.0.10. Its report recorded `RetailHeadBobSuppressed=true`, command value 0,
+and the diagnostic enabled. The first post-Retail-update read observed 1.0;
+one guarded setter call requested 0.0, and all 83 effective samples then read
+0.0. The user reported that locomotion bob was heavily reduced. Other movement
+directions showed no residual; only a small amount of hand movement remained
+during forward locomotion. This run therefore proves that the dominant motion
+was Retail HeadBob and rejects character animation as its primary source. It
+does not identify the small forward-only hand residual.
+
+The same run identified the held firearm as Colt Retail index 76 and selected
+the existing `weapon_weighted_aim` right-hand source with the bounded damped
+weapon-weight spring active. Intentional filtered weapon inertia is therefore
+the leading bounded hypothesis for that residual, but the run did not record a
+simultaneous raw-controller versus weighted-target delta. It is not yet a
+verified cause and does not authorize a weapon-weight or IK change.
+
+Rollback run `run-20260821-032811` retained Current, recorded
+`RetailHeadBobSuppressed=false` and command value 1, armed no post-profile
+setter, and all 30 effective samples read 1.0. On the same comparison route,
+the user reported that the large head bob returned. Both runs ended through
+the normal game-heartbeat disconnect path. Preserved suppression hashes are
+`51B56D91F82832BDCA06B0C3625D072E173A32081F0AAE3CBED772B1CD411515`
+for the report,
+`8CB5322C9EA0CA2436DEF726F7D668861B3DBC7A9E364C22D10DDF89D309D2D9`
+for the loader log,
+`1BE3C376E7415795C40A60F247015E3F1BA12A125FA7572EF8AB870DB71989FE`
+for the host log, and
+`C43B2125987009D3E6BAA4F1E93360648B68C278E99188AFDD2A9D94C05867EE`
+for the bridge log. Rollback hashes in the same order are
+`A8D57BF9B371A4BDA23D9A2FCF2CFAC55FDDCBA92B335BD3AB9519E336FD25B5`,
+`BC8F06E5F1CDD8B42DFC70641ECE238DC8224C847388C663AD2E5E7B0556F06C`,
+`9E14C2926FCB8A23DFD414A1FC5D93E12FBC2F75B9EC2F8EB1DD041A05122819`,
+and
+`443C11728BB5F818DDE65F08EF6F5678CDD432D5161F36D77C487FB5B6640FC7`.
+
+Before staging, after the suppression exit, and after the rollback exit, the
+project-local staged `autoexec.cfg` remained exactly 889 bytes at SHA-256
+`3FC7560991888E866FAE3BA42291826BAC43D523C29E602EE31C57DFFC2C49C8`
+and retained its original HeadBob value 1.0. Retail did not persist either
+live console value to that file, and no source Retail file was altered.
+
+The main locomotion HeadBob suppression and deterministic rollback now have a
+**live-verified core A/B**. The small forward-only hand movement remains a
+separate bounded hypothesis and must be diagnosed by observing input,
+controller-world transform, desired hand/weapon pose, IK handoff, and rendered
+result independently. No compensation is authorized in those systems. The
+one-firearm, one-mapped-melee, landing, damage, scripted-camera,
+keyboard/mouse, attachment, calibration, and complete pacing regression is
+still incomplete, so the whole feature is not yet described as fully live
+accepted.

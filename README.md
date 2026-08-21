@@ -134,7 +134,11 @@ plus the guarded Retail VR Settings entry. `-Wait` is optional and only keeps
 the launcher attached until exit. `-Minimal` retains the bare transport for a
 bounded fallback, while any explicit feature-selection switch retains the
 existing custom diagnostic behavior. Mutually exclusive A/B probes, high-cost
-observers, and headset-rejected behavior remain out of the default.
+observers, and headset-rejected behavior remain out of the default. Every
+non-Minimal VR launch also requests Retail's supported `+HeadBob 0` console
+override and re-applies value 0 through Retail's verified console setter after
+profile loading. Use `-RetailHeadBob` for a deterministic `+HeadBob 1` A/B;
+`-Minimal` without that rollback leaves Retail HeadBob untouched.
 
 For the one-handed physical-weapon baseline, equip `pipe_lever` (Retail weapon
 index 32) after the normal launch. The former explicit command remains a

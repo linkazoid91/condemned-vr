@@ -33,7 +33,11 @@ powershell -ExecutionPolicy Bypass -File `
 
 The launch-profile test proves that no feature argument selects `Current`,
 that wait/rollback-only options retain it, and that explicit, Pipe, Minimal,
-and invalid mixed modes remain distinct. The focus test exercises invalid
+and invalid mixed modes remain distinct. It also checks pure Retail-console
+argument construction: every non-Minimal default/custom path requests
+`+HeadBob 0`, plain `-Minimal` requests no HeadBob value, and
+`-RetailHeadBob` requests `+HeadBob 1` without changing profile selection.
+The focus test exercises invalid
 targets, bounded retries, and the final fallback/cleanup contract through
 deterministic substitutes; it never changes the real foreground window. The
 screenshot-helper validation checks its guarded command path without capturing
@@ -132,9 +136,12 @@ weapon-grip calibration, and full arm IK enabled. Two-hand attachment,
 forensic-memory tracing, mutually exclusive A/B probes, and rejected automatic
 swing attack must remain disabled or governed by their existing saved/default
 gate. Require the exact staged bridge, no ASI modules, successful final focus,
-and responsive game/host processes. `-Minimal` must preserve the bare transport;
-any explicit feature-selection parameter must resolve to Pipe or Custom rather
-than silently inheriting Current.
+and responsive game/host processes. Also require
+`RetailHeadBobSuppressed=true` and `RetailHeadBobCommandValue=0`; these fields
+prove only that the console override was requested. `-Minimal` must preserve
+the bare transport and send no HeadBob override; any explicit feature-selection
+parameter must resolve to Pipe or Custom rather than silently inheriting
+Current.
 
 Run `run-20260820-041148` passes only the no-argument selection and guarded
 readiness portion. Headset rendering, input, melee, IK, settings UI, persistence,
@@ -147,6 +154,78 @@ The same run later ended in `Condemned.exe` /
 exited, but the stability/shutdown portion therefore fails. Because this exact
 fault bucket predates the Current profile and Retail VR Settings work, do not
 assign causality without a controlled baseline/profile comparison.
+
+### Retail HeadBob suppression A/B gate
+
+The command-line-only candidate remains **live rejected**: Retail profile
+application restored the requested zero to 1.0. The guarded post-profile
+console enforcement now has a **live-verified core A/B**, while the complete
+gameplay regression below remains open. Every non-Minimal launch requests
+`+HeadBob 0` and, after exact Retail signature checks, restores effective zero
+through Retail's console setter after profile loading. `-RetailHeadBob`
+requests `+HeadBob 1`, arms no enforcement, and leaves profile selection
+unchanged. Plain `-Minimal` sends neither override nor enforcement flag.
+
+For source diagnosis, run the normal Current profile with the guarded
+read-only probe:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+    tools\launch-condemned-m2-vr.ps1 -HeadBobDiagnostic -Wait
+```
+
+The switch does not reselect the gameplay profile, automatically enables the
+existing read-only Retail camera sample, and is rejected with `-Minimal`.
+Require `m5_retail_headbob_diagnostic_armed` and at least one
+`m5_retail_headbob_effective_sample`; any signature mismatch fails launch
+readiness. Run `run-20260820-152254` requested value 0 but all 90 samples
+read effective `HeadBob=1.0`. Its `IdleBreathing` query returned the -1
+fallback, so it is not an accepted live value.
+
+Run `run-20260821-032521` subsequently performed one guarded 1.0-to-0.0
+setter call and held effective zero for all 83 samples. The user reported that
+the locomotion bob was heavily reduced, with only small hand movement during
+forward locomotion and no residual in other directions. Rollback run
+`run-20260821-032811` held effective 1.0 for all 30 samples without
+post-profile enforcement, and the user reported that the large head bob
+returned. This accepts the core suppression/rollback discriminator and rejects
+character animation as the source of the dominant bob. It does not classify
+the small forward-only hand residual or complete the regression matrix below.
+
+For every replacement or follow-up suppression mechanism, record the exact
+bytes, length, and SHA-256 of the project-local staged `autoexec.cfg` and its
+`HeadBob` line before and after the run. Use a fresh run directory and preserve
+the launch report, host log, bridge log, loader log, source state, staged
+hashes, runtime, launch switches, and weapon identities.
+
+1. Run the normal non-Minimal profile with one firearm and one mapped melee
+   weapon. While standing still, walking, running, turning, crouching, and
+   stopping, require the sinusoidal vertical camera, weapon, and IK-hand bob to
+   be absent while real controller translation and rotation remain responsive.
+2. Confirm grip calibration, both arm-IK hands, two-hand or slide attachment
+   where applicable, firearm aim/fire/reload, melee animation and physical
+   contact, landing motion, damage motion, scripted camera motion,
+   keyboard/mouse fallback, and frame pacing remain unchanged.
+3. Exit cleanly and compare the complete staged `autoexec.cfg` bytes with the
+   pre-run copy. If Retail persisted the command-line value, record the exact
+   change and prove that the explicit `+HeadBob 1` rollback restores a
+   deterministic baseline. Never edit or replace the source Retail copy.
+4. Repeat the same route with `-RetailHeadBob`. Require
+   `RetailHeadBobSuppressed=false`,
+   `RetailHeadBobCommandValue=1`, and visible Retail locomotion bob to return.
+   This report proves the request only; the perceptual return is the live
+   discriminator.
+5. Keep `IdleBreathing` untouched. If motion remains only while stationary,
+   record it as a separate breathing hypothesis rather than adding another
+   override or compensating inside IK, grip, weight, controller, model-node, or
+   stereo-camera transforms.
+
+Reject suppression for controller-tracking loss, hand/weapon separation,
+changed collision or native dispatch, missing landing/damage/scripted camera
+motion, keyboard/mouse regression, unstable pacing, a changed Retail file, or
+failure of the rollback run to restore the original bob. A clean `-Minimal`
+run remains the unmodified Retail-behaviour baseline and is not a substitute
+for the explicit same-route `-RetailHeadBob` A/B.
 
 ### Startup foreground handoff gate
 
